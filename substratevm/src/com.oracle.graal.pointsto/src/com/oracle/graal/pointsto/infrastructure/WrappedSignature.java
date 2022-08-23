@@ -49,8 +49,8 @@ public class WrappedSignature implements Signature {
     public JavaType getParameterType(int index, ResolvedJavaType accessingClass) {
         ResolvedJavaType parameterType;
         try {
-            parameterType = wrapped.getParameterType(index, defaultAccessingClass).resolve(defaultAccessingClass);
-        } catch (NoClassDefFoundError e) {
+            parameterType = resolve(wrapped.getParameterType(index, defaultAccessingClass));
+        } catch (LinkageError e) {
             /*
              * Type resolution fails if the parameter type is missing. Just erase the type by
              * returning the Object type.
@@ -64,8 +64,8 @@ public class WrappedSignature implements Signature {
     public JavaType getReturnType(ResolvedJavaType accessingClass) {
         ResolvedJavaType returnType;
         try {
-            returnType = wrapped.getReturnType(defaultAccessingClass).resolve(defaultAccessingClass);
-        } catch (NoClassDefFoundError e) {
+            returnType = resolve(wrapped.getReturnType(defaultAccessingClass));
+        } catch (LinkageError e) {
             /*
              * Type resolution fails if the return type is missing. Just erase the type by returning
              * the Object type.
@@ -74,4 +74,18 @@ public class WrappedSignature implements Signature {
         }
         return universe.lookup(returnType);
     }
+
+    /**
+     * We must not invoke {@link JavaType#resolve} on an already resolved type because it can
+     * actually fail the accessibility check when synthetic methods and synthetic signatures are
+     * involved.
+     */
+    private ResolvedJavaType resolve(JavaType type) {
+        if (type instanceof ResolvedJavaType) {
+            return (ResolvedJavaType) type;
+        } else {
+            return type.resolve(defaultAccessingClass);
+        }
+    }
+
 }

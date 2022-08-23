@@ -66,6 +66,12 @@ public interface JavaStackWalk extends PointerBase {
     @RawField
     void setAnchor(JavaFrameAnchor anchor);
 
+    @RawField
+    Pointer getEndSP();
+
+    @RawField
+    void setEndSP(Pointer sp);
+
     // these fields are for diagnostics
 
     @RawField

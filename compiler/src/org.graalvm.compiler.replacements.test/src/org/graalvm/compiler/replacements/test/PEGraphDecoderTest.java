@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,12 +25,16 @@
 package org.graalvm.compiler.replacements.test;
 
 import static org.graalvm.compiler.nodes.graphbuilderconf.InlineInvokePlugin.InlineInfo.createStandardInlineInfo;
+import static org.junit.Assume.assumeTrue;
 
 import org.graalvm.collections.EconomicMap;
+import org.graalvm.compiler.core.common.memory.MemoryOrderMode;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.core.test.GraalCompilerTest;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.nodes.AbstractBeginNode;
+import org.graalvm.compiler.nodes.EncodedGraph;
+import org.graalvm.compiler.nodes.InvokeNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.StructuredGraph.AllowAssumptions;
 import org.graalvm.compiler.nodes.ValueNode;
@@ -47,7 +51,9 @@ import org.graalvm.compiler.nodes.memory.address.OffsetAddressNode;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
 import org.graalvm.compiler.replacements.CachingPEGraphDecoder;
+import org.graalvm.compiler.serviceprovider.GraalServices;
 import org.graalvm.word.LocationIdentity;
+import org.junit.Assert;
 import org.junit.Test;
 
 import jdk.vm.ci.meta.JavaKind;
@@ -109,11 +115,11 @@ public class PEGraphDecoderTest extends GraalCompilerTest {
 
     private static void registerPlugins(InvocationPlugins plugins) {
         Registration r = new Registration(plugins, PEGraphDecoderTest.class);
-        r.register2("readInt", Object.class, long.class, new InvocationPlugin() {
+        r.register(new InvocationPlugin("readInt", Object.class, long.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver unused, ValueNode obj, ValueNode offset) {
                 AddressNode address = b.add(new OffsetAddressNode(obj, offset));
-                ReadNode read = b.addPush(JavaKind.Int, new ReadNode(address, LocationIdentity.any(), StampFactory.forKind(JavaKind.Int), BarrierType.NONE));
+                ReadNode read = b.addPush(JavaKind.Int, new ReadNode(address, LocationIdentity.any(), StampFactory.forKind(JavaKind.Int), BarrierType.NONE, MemoryOrderMode.PLAIN));
                 read.setGuard(AbstractBeginNode.prevBegin(read));
                 return true;
             }
@@ -127,18 +133,63 @@ public class PEGraphDecoderTest extends GraalCompilerTest {
         }
     }
 
+    public interface SingleInterface {
+        SingleInterface increment(long offset);
+    }
+
+    static class SingleInterfaceImpl implements SingleInterface {
+
+        int counter;
+
+        @Override
+        public SingleInterfaceImpl increment(long offset) {
+            counter++;
+            return this;
+        }
+
+        static void init() {
+        }
+    }
+
+    @BytecodeParserNeverInline
+    static SingleInterface doIncrement(SingleInterface ptr) {
+        return ptr.increment(0);
+    }
+
+    static void testSingleImplementorDevirtualize(SingleInterface ptr) {
+        doIncrement(ptr);
+    }
+
+    @Test
+    public void testSingleImplementor() {
+        assumeTrue(GraalServices.hasLookupReferencedType());
+        EconomicMap<ResolvedJavaMethod, EncodedGraph> graphCache = EconomicMap.create();
+        // Parse and cache doIncrement before the single implementor is loaded
+        test("doIncrement", graphCache);
+        // Force loading of the single implementor
+        SingleInterfaceImpl.init();
+        StructuredGraph graph = test("testSingleImplementorDevirtualize", graphCache);
+        Assert.assertEquals(0, graph.getNodes().filter(InvokeNode.class).count());
+    }
+
     @Test
     @SuppressWarnings("try")
     public void test() {
-        ResolvedJavaMethod testMethod = getResolvedJavaMethod(PEGraphDecoderTest.class, "doTest", Object.class);
+        test("doTest", EconomicMap.create());
+    }
+
+    @SuppressWarnings("try")
+    private StructuredGraph test(String methodName, EconomicMap<ResolvedJavaMethod, EncodedGraph> graphCache) {
+        ResolvedJavaMethod testMethod = getResolvedJavaMethod(methodName);
         StructuredGraph targetGraph = null;
         DebugContext debug = getDebugContext();
         try (DebugContext.Scope scope = debug.scope("GraphPETest", testMethod)) {
             GraphBuilderConfiguration graphBuilderConfig = GraphBuilderConfiguration.getDefault(getDefaultGraphBuilderPlugins()).withEagerResolving(true).withUnresolvedIsError(true);
+            graphBuilderConfig = editGraphBuilderConfiguration(graphBuilderConfig);
             registerPlugins(graphBuilderConfig.getPlugins().getInvocationPlugins());
-            targetGraph = new StructuredGraph.Builder(getInitialOptions(), debug, AllowAssumptions.YES).method(testMethod).build();
+            targetGraph = new StructuredGraph.Builder(debug.getOptions(), debug, AllowAssumptions.YES).method(testMethod).build();
             CachingPEGraphDecoder decoder = new CachingPEGraphDecoder(getTarget().arch, targetGraph, getProviders(), graphBuilderConfig, OptimisticOptimizations.NONE, AllowAssumptions.YES,
-                            null, null, new InlineInvokePlugin[]{new InlineAll()}, null, null, null, null, null, null, EconomicMap.create());
+                            null, null, new InlineInvokePlugin[]{new InlineAll()}, null, null, null, null, null, graphCache, () -> null, false);
 
             decoder.decode(testMethod, false, false);
             debug.dump(DebugContext.BASIC_LEVEL, targetGraph, "Target Graph");
@@ -147,12 +198,12 @@ public class PEGraphDecoderTest extends GraalCompilerTest {
             CoreProviders context = getProviders();
             createCanonicalizerPhase().apply(targetGraph, context);
             targetGraph.verify();
-
+            return targetGraph;
         } catch (Throwable ex) {
             if (targetGraph != null) {
                 debug.dump(DebugContext.BASIC_LEVEL, targetGraph, ex.toString());
             }
-            debug.handle(ex);
+            throw debug.handle(ex);
         }
     }
 }

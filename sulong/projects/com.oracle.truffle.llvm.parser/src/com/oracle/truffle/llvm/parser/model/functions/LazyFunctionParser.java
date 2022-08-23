@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -32,12 +32,18 @@ package com.oracle.truffle.llvm.parser.model.functions;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
 import com.oracle.truffle.llvm.parser.listeners.Function;
+import com.oracle.truffle.llvm.parser.listeners.FunctionMDOnly;
+import com.oracle.truffle.llvm.parser.listeners.MetadataSubprogramOnly.MDSubprogramParsedException;
 import com.oracle.truffle.llvm.parser.listeners.ParameterAttributes;
 import com.oracle.truffle.llvm.parser.listeners.Types;
+import com.oracle.truffle.llvm.parser.metadata.MDString;
+import com.oracle.truffle.llvm.parser.metadata.MDSubprogram;
+import com.oracle.truffle.llvm.parser.metadata.MetadataVisitor;
 import com.oracle.truffle.llvm.parser.metadata.debuginfo.DebugInfoFunctionProcessor;
 import com.oracle.truffle.llvm.parser.model.IRScope;
 import com.oracle.truffle.llvm.parser.scanner.LLVMScanner;
 import com.oracle.truffle.llvm.parser.text.LLSourceBuilder;
+import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.options.SulongEngineOption;
 
 public final class LazyFunctionParser {
@@ -63,17 +69,50 @@ public final class LazyFunctionParser {
         this.isParsed = false;
     }
 
-    public void parse(DebugInfoFunctionProcessor diProcessor, Source bitcodeSource, LLVMParserRuntime runtime) {
+    public void parse(DebugInfoFunctionProcessor diProcessor, Source bitcodeSource, LLVMParserRuntime runtime, LLVMContext context) {
         if (!isParsed) {
             synchronized (scope) {
                 Function parser = new Function(scope, types, function, mode, paramAttributes);
                 parser.setupScope();
                 scanner.scanBlock(parser);
-                diProcessor.process(parser.getFunction(), parser.getScope(), bitcodeSource, runtime.getContext());
-                if (runtime.getContext().getEnv().getOptions().get(SulongEngineOption.LL_DEBUG)) {
-                    llSource.applySourceLocations(parser.getFunction(), runtime);
+                diProcessor.process(parser.getFunction(), parser.getScope(), bitcodeSource);
+                if (context.getEnv().getOptions().get(SulongEngineOption.LL_DEBUG)) {
+                    llSource.applySourceLocations(parser.getFunction(), runtime, context);
                 }
                 isParsed = true;
+            }
+        }
+    }
+
+    public void parseLinkageName(LLVMParserRuntime runtime) {
+        synchronized (scope) {
+            FunctionMDOnly parser = new FunctionMDOnly(scope, types, function);
+            try {
+                parser.setupScope();
+                scanner.scanBlock(parser);
+                // In some cases, the SUBPROGRAM is not in the METADATA_BLOCK of a given function
+                // block and, instead,
+                // it is emitted earlier and resides in the METADATA_BLOCK of the MODULE_BLOCK.
+                scope.getMetadata().accept(new MetadataVisitor() {
+                    @Override
+                    public void visit(MDSubprogram md) {
+                        String linkageName = MDString.getIfInstance(md.getLinkageName());
+                        if (function.getName().equals(linkageName)) {
+                            throw new MDSubprogramParsedException(linkageName, MDString.getIfInstance(md.getName()));
+                        }
+                    }
+                });
+            } catch (MDSubprogramParsedException e) {
+                /*
+                 * If linkageName/displayName is found, an exception is thrown (such that
+                 * parsing/searching does not have to be continued).
+                 */
+                final String displayName = e.displayName;
+                final String linkageName = e.linkageName;
+
+                if (linkageName != null && runtime.getFileScope().getFunction(displayName) == null) {
+                    runtime.getFileScope().registerLinkageName(displayName, linkageName);
+                }
             }
         }
     }

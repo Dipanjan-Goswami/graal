@@ -25,20 +25,31 @@
 package com.oracle.svm.hosted;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.options.Option;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.hosted.Feature;
 
+import com.oracle.graal.pointsto.reports.ReportUtils;
+import com.oracle.svm.core.ClassLoaderSupport;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.graal.GraalFeature;
+import com.oracle.svm.core.graal.InternalFeature;
 import com.oracle.svm.core.option.APIOption;
 import com.oracle.svm.core.option.HostedOptionKey;
+import com.oracle.svm.core.option.LocatableMultiOptionValue;
 import com.oracle.svm.core.option.OptionUtils;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.FeatureImpl.IsInConfigurationAccessImpl;
 import com.oracle.svm.util.ReflectionUtil;
 import com.oracle.svm.util.ReflectionUtil.ReflectionUtilError;
@@ -52,7 +63,11 @@ public class FeatureHandler {
     public static class Options {
         @APIOption(name = "features") //
         @Option(help = "A comma-separated list of fully qualified Feature implementation classes")//
-        public static final HostedOptionKey<String[]> Features = new HostedOptionKey<>(null);
+        public static final HostedOptionKey<LocatableMultiOptionValue.Strings> Features = new HostedOptionKey<>(new LocatableMultiOptionValue.Strings());
+
+        private static List<String> userEnabledFeatures() {
+            return OptionUtils.flatten(",", Options.Features.getValue());
+        }
     }
 
     private final ArrayList<Feature> featureInstances = new ArrayList<>();
@@ -64,27 +79,76 @@ public class FeatureHandler {
         }
     }
 
-    public void forEachGraalFeature(Consumer<GraalFeature> consumer) {
+    public void forEachGraalFeature(Consumer<InternalFeature> consumer) {
         for (Feature feature : featureInstances) {
-            if (feature instanceof GraalFeature) {
-                consumer.accept((GraalFeature) feature);
+            if (feature instanceof InternalFeature) {
+                consumer.accept((InternalFeature) feature);
             }
         }
     }
 
+    @SuppressWarnings("unchecked")
     public void registerFeatures(ImageClassLoader loader, DebugContext debug) {
         IsInConfigurationAccessImpl access = new IsInConfigurationAccessImpl(this, loader, debug);
 
-        for (Class<?> automaticFeature : loader.findAnnotatedClasses(AutomaticFeature.class, true)) {
-            registerFeature(automaticFeature, access);
+        LinkedHashSet<Class<?>> automaticFeatures = new LinkedHashSet<>(loader.findAnnotatedClasses(AutomaticFeature.class, true));
+        Map<Class<?>, Class<?>> specificAutomaticFeatures = new HashMap<>();
+        for (Class<?> automaticFeature : automaticFeatures) {
+
+            Class<Feature> mostSpecific = (Class<Feature>) automaticFeature;
+            boolean foundMostSpecific = false;
+            do {
+                List<Class<? extends Feature>> featureSubclasses = loader.findSubclasses(mostSpecific, true);
+                featureSubclasses.remove(mostSpecific);
+                featureSubclasses.removeIf(o -> !automaticFeatures.contains(o));
+                if (featureSubclasses.isEmpty()) {
+                    foundMostSpecific = true;
+                } else {
+                    if (featureSubclasses.size() > 1) {
+                        String candidates = featureSubclasses.stream().map(Class::getName).collect(Collectors.joining(" "));
+                        VMError.shouldNotReachHere("Ambiguous @AutomaticFeature extension. Conflicting candidates: " + candidates);
+                    }
+                    mostSpecific = (Class<Feature>) featureSubclasses.get(0);
+                }
+            } while (!foundMostSpecific);
+
+            if (mostSpecific != automaticFeature) {
+                specificAutomaticFeatures.put(automaticFeature, mostSpecific);
+            }
         }
 
-        for (String featureName : OptionUtils.flatten(",", Options.Features.getValue())) {
+        /* Remove specific since they get registered via their base */
+        for (Class<?> specific : specificAutomaticFeatures.values()) {
+            automaticFeatures.remove(specific);
+        }
+
+        Function<Class<?>, Class<?>> specificClassProvider = specificAutomaticFeatures::get;
+
+        for (Class<?> featureClass : automaticFeatures) {
+            registerFeature(featureClass, specificClassProvider, access);
+        }
+
+        for (String featureName : Options.userEnabledFeatures()) {
+            Class<?> featureClass;
             try {
-                registerFeature(Class.forName(featureName, true, loader.getClassLoader()), access);
+                featureClass = Class.forName(featureName, true, loader.getClassLoader());
             } catch (ClassNotFoundException e) {
-                throw UserError.abort("feature " + featureName + " class not found on the classpath. Ensure that the name is correct and that the class is on the classpath.");
+                throw UserError.abort("Feature %s class not found on the classpath. Ensure that the name is correct and that the class is on the classpath.", featureName);
             }
+            registerFeature(featureClass, specificClassProvider, access);
+        }
+        if (NativeImageOptions.PrintFeatures.getValue()) {
+            ReportUtils.report("feature information", SubstrateOptions.reportsPath(), "feature_info", "csv", out -> {
+                out.println("Feature, Required Features");
+                for (Feature featureInstance : featureInstances) {
+                    out.print(featureInstance.getClass().getTypeName());
+                    String requiredFeaturesString = featureInstance.getRequiredFeatures().stream()
+                                    .map(Class::getTypeName)
+                                    .collect(Collectors.joining(" ", "[", "]"));
+                    out.print(", ");
+                    out.println(requiredFeaturesString);
+                }
+            });
         }
     }
 
@@ -94,25 +158,28 @@ public class FeatureHandler {
      * @param access
      */
     @SuppressWarnings("unchecked")
-    private void registerFeature(Class<?> featureClass, IsInConfigurationAccessImpl access) {
-        if (!Feature.class.isAssignableFrom(featureClass)) {
-            throw UserError.abort("Class does not implement " + Feature.class.getName() + ": " + featureClass.getName());
+    private void registerFeature(Class<?> baseFeatureClass, Function<Class<?>, Class<?>> specificClassProvider, IsInConfigurationAccessImpl access) {
+        if (!Feature.class.isAssignableFrom(baseFeatureClass)) {
+            throw UserError.abort("Class does not implement %s: %s", Feature.class.getName(), baseFeatureClass.getName());
         }
 
-        if (registeredFeatures.contains(featureClass)) {
+        if (registeredFeatures.contains(baseFeatureClass)) {
             return;
         }
+
         /*
          * Immediately add to the registeredFeatures to avoid infinite recursion in case of cyclic
          * dependencies.
          */
-        registeredFeatures.add(featureClass);
+        registeredFeatures.add(baseFeatureClass);
 
+        Class<?> specificClass = specificClassProvider.apply(baseFeatureClass);
+        Class<?> featureClass = specificClass != null ? specificClass : baseFeatureClass;
         Feature feature;
         try {
             feature = (Feature) ReflectionUtil.newInstance(featureClass);
         } catch (ReflectionUtilError ex) {
-            throw UserError.abort(ex.getCause(), "Error instantiating Feature class " + featureClass.getTypeName() + ". Ensure the class is not abstract and has a no-argument constructor.");
+            throw UserError.abort(ex.getCause(), "Error instantiating Feature class %s. Ensure the class is not abstract and has a no-argument constructor.", featureClass.getTypeName());
         }
 
         if (!feature.isInConfiguration(access)) {
@@ -123,15 +190,24 @@ public class FeatureHandler {
          * All features are automatically added to the VMConfiguration, to allow convenient
          * configuration checks.
          */
-        ImageSingletons.add((Class<Feature>) feature.getClass(), feature);
+        ImageSingletons.add((Class<Feature>) baseFeatureClass, feature);
 
         /*
          * First add dependent features so that initializers are executed in order of dependencies.
          */
         for (Class<? extends Feature> requiredFeatureClass : feature.getRequiredFeatures()) {
-            registerFeature(requiredFeatureClass, access);
+            registerFeature(requiredFeatureClass, specificClassProvider, access);
         }
 
         featureInstances.add(feature);
+    }
+
+    public List<Feature> getUserSpecificFeatures() {
+        ClassLoaderSupport classLoaderSupport = ImageSingletons.lookup(ClassLoaderSupport.class);
+        List<String> userEnabledFeatures = Options.userEnabledFeatures();
+        return featureInstances.stream()
+                        .filter(f -> (!(f instanceof InternalFeature) || !((InternalFeature) f).isHidden()) &&
+                                        (classLoaderSupport.isNativeImageClassLoader(f.getClass().getClassLoader()) || userEnabledFeatures.contains(f.getClass().getName())))
+                        .collect(Collectors.toList());
     }
 }

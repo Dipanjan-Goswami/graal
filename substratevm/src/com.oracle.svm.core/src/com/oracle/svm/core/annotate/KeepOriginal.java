@@ -29,15 +29,23 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+
 /**
- * In a {@link Substitute substituted} type, keep the original definition of this method. The
- * default behavior is that all non-substituted methods are implicitly treated as {@link Delete
- * deleted}.
+ * If a class annotated with {@link TargetClass} is also annotated with {@link Substitute}, all
+ * non-substituted methods in that class are by default treated as {@link Delete deleted}. This
+ * annotation changes the behavior: A method annotated with {@link KeepOriginal} keeps the original
+ * definition of the method.
+ * <p>
+ * If this annotation is used to the {@link Substitute * substituted} type itself, then the original
+ * definition of all methods and fields in the target type are kept by default.
  * <p>
  * The element can also be annotated with {@link TargetElement} to specify additional properties.
  * See {@link TargetClass} for an overview of the annotation system.
  */
 @Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.METHOD)
+@Target({ElementType.METHOD, ElementType.TYPE})
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface KeepOriginal {
 }

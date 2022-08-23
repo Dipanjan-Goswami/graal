@@ -34,13 +34,17 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 import org.graalvm.collections.Pair;
@@ -52,10 +56,10 @@ import org.graalvm.options.OptionValues;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.Instrument;
-import org.graalvm.tools.lsp.server.ContextAwareExecutor;
 import org.graalvm.tools.lsp.exceptions.LSPIOException;
-import org.graalvm.tools.lsp.server.LanguageServerImpl;
+import org.graalvm.tools.lsp.server.ContextAwareExecutor;
 import org.graalvm.tools.lsp.server.LSPFileSystem;
+import org.graalvm.tools.lsp.server.LanguageServerImpl;
 import org.graalvm.tools.lsp.server.TruffleAdapter;
 import org.graalvm.tools.lsp.server.utils.CoverageEventNode;
 
@@ -70,7 +74,7 @@ import com.oracle.truffle.api.instrumentation.TruffleInstrument.Registration;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.source.SourceSection;
 
-@Registration(id = LSPInstrument.ID, name = "Language Server", version = "0.1", services = {EnvironmentProvider.class})
+@Registration(id = LSPInstrument.ID, name = "Language Server", version = "0.1", services = {EnvironmentProvider.class}, website = "https://www.graalvm.org/tools/lsp/")
 public final class LSPInstrument extends TruffleInstrument implements EnvironmentProvider {
 
     public static final String ID = "lsp";
@@ -102,19 +106,19 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
         return hostPorts;
     }, (Consumer<List<LanguageAndAddress>>) (addresses) -> addresses.forEach((address) -> address.verify()));
 
-    @Option(help = "Enable features for language developers, e.g. hovering code snippets shows AST related information like the node class or tags. (default:false)", category = OptionCategory.INTERNAL) //
+    @Option(help = "Enable features for language developers, e.g. hovering code snippets shows AST related information like the node class or tags.", category = OptionCategory.INTERNAL) //
     public static final OptionKey<Boolean> DeveloperMode = new OptionKey<>(false);
 
-    @Option(help = "Include internal sources in goto-definition, references and symbols search. (default:false)", category = OptionCategory.INTERNAL) //
+    @Option(help = "Include internal sources in goto-definition, references and symbols search.", category = OptionCategory.INTERNAL) //
     public static final OptionKey<Boolean> Internal = new OptionKey<>(false);
 
-    @Option(name = "", help = "Start the Language Server on [[host:]port]. (default: <loopback address>:" + DEFAULT_PORT + ")", category = OptionCategory.USER) //
+    @Option(name = "", help = "Start the Language Server on [[host:]port].", usageSyntax = "[[<host>:]<port>]", category = OptionCategory.USER) //
     static final OptionKey<HostAndPort> Lsp = new OptionKey<>(DEFAULT_ADDRESS, ADDRESS_OR_BOOLEAN);
 
-    @Option(help = "Requested maximum length of the Socket queue of incoming connections. (default: -1)", category = OptionCategory.EXPERT) //
+    @Option(help = "Requested maximum length of the Socket queue of incoming connections.", usageSyntax = "[0, inf)", category = OptionCategory.EXPERT) //
     static final OptionKey<Integer> SocketBacklogSize = new OptionKey<>(-1);
 
-    @Option(help = "Delegate language servers", category = OptionCategory.USER) //
+    @Option(help = "Delegate language servers (default: no language server).", usageSyntax = "[languageId@][[host:]port],...", category = OptionCategory.USER) //
     static final OptionKey<List<LanguageAndAddress>> Delegates = new OptionKey<>(Collections.emptyList(), DELEGATES);
 
     @Override
@@ -200,23 +204,24 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
         builder.fileSystem(LSPFileSystem.newReadOnlyFileSystem(truffleAdapter));
         ContextAwareExecutor executorWrapper = new ContextAwareExecutorImpl(builder);
 
+        setWaitForClose();
         executorWrapper.executeWithDefaultContext(() -> {
-            Context context = builder.build();
-            context.enter();
-
-            Instrument instrument = context.getEngine().getInstruments().get(ID);
-            EnvironmentProvider envProvider = instrument.lookup(EnvironmentProvider.class);
-            truffleAdapter.register(envProvider.getEnvironment(), executorWrapper);
-
             HostAndPort hostAndPort = options.get(Lsp);
             try {
+                Context context = builder.build();
+                context.enter();
+
+                Instrument instrument = context.getEngine().getInstruments().get(ID);
+                EnvironmentProvider envProvider = instrument.lookup(EnvironmentProvider.class);
+                truffleAdapter.register(envProvider.getEnvironment(), executorWrapper);
+
                 InetSocketAddress socketAddress = hostAndPort.createSocket();
                 int port = socketAddress.getPort();
                 Integer backlog = options.get(SocketBacklogSize);
                 InetAddress address = socketAddress.getAddress();
                 ServerSocket serverSocket = new ServerSocket(port, backlog, address);
                 List<Pair<String, SocketAddress>> delegates = createDelegateSockets(options.get(Delegates));
-                LanguageServerImpl.create(truffleAdapter, info, err).start(serverSocket, delegates, () -> setWaitForClose()).thenRun(() -> {
+                LanguageServerImpl.create(truffleAdapter, info, err).start(serverSocket, delegates).thenRun(() -> {
                     try {
                         executorWrapper.executeWithDefaultContext(() -> {
                             context.leave();
@@ -234,7 +239,7 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
             } catch (ThreadDeath td) {
                 throw td;
             } catch (Throwable e) {
-                String message = String.format("[Graal LSP] Starting server on %s failed: %s", hostAndPort.getHostPort(), e.getLocalizedMessage());
+                String message = String.format(Locale.ENGLISH, "[Graal LSP] Starting server on %s failed: %s", hostAndPort.getHostPort(), e.getLocalizedMessage());
                 new LSPIOException(message, e).printStackTrace(err);
             }
 
@@ -290,6 +295,31 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
             return execute(wrapWithNewContext(taskWithResult, cached));
         }
 
+        @Override
+        public <T> Future<T> executeWithNestedContext(Callable<T> taskWithResult, int timeoutMillis, Callable<T> onTimeoutTask) {
+            if (timeoutMillis <= 0) {
+                return executeWithNestedContext(taskWithResult);
+            } else {
+                Future<T> future = execute(wrapWithNewContext(taskWithResult, false));
+                try {
+                    return CompletableFuture.completedFuture(future.get(timeoutMillis, TimeUnit.MILLISECONDS));
+                } catch (TimeoutException e) {
+                    future.cancel(true);
+                    try {
+                        return CompletableFuture.completedFuture(onTimeoutTask.call());
+                    } catch (Exception timeoutTaskException) {
+                        CompletableFuture<T> cf = new CompletableFuture<>();
+                        cf.completeExceptionally(timeoutTaskException);
+                        return cf;
+                    }
+                } catch (InterruptedException | ExecutionException e) {
+                    CompletableFuture<T> cf = new CompletableFuture<>();
+                    cf.completeExceptionally(e);
+                    return cf;
+                }
+            }
+        }
+
         private <T> Future<T> execute(Callable<T> taskWithResult) {
             if (Thread.currentThread() == workerThread.get()) {
                 FutureTask<T> futureTask = new FutureTask<>(taskWithResult);
@@ -301,7 +331,7 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
         }
 
         private <T> Callable<T> wrapWithNewContext(Callable<T> taskWithResult, boolean cached) {
-            return new Callable<T>() {
+            return new Callable<>() {
 
                 @Override
                 public T call() throws Exception {
@@ -418,6 +448,11 @@ public final class LSPInstrument extends TruffleInstrument implements Environmen
                 ia = inetAddress;
             }
             return new InetSocketAddress(ia, port);
+        }
+
+        @Override
+        public String toString() {
+            return (host != null ? host : "<loopback address>") + ":" + port;
         }
     }
 

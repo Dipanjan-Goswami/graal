@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,38 +40,100 @@
  */
 package com.oracle.truffle.regex.tregex.nodes.input;
 
+import static com.oracle.truffle.regex.tregex.string.Encodings.Encoding;
+
 import com.oracle.truffle.api.ArrayUtils;
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.ImportStatic;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.regex.RegexRootNode;
+import com.oracle.truffle.regex.util.TRegexGuards;
 
+@ImportStatic(TRegexGuards.class)
 public abstract class InputIndexOfStringNode extends Node {
 
     public static InputIndexOfStringNode create() {
         return InputIndexOfStringNodeGen.create();
     }
 
-    public abstract int execute(Object input, int fromIndex, int maxIndex, String match, String mask);
+    public abstract int execute(Object input, int fromIndex, int maxIndex, Object match, Object mask, Encoding encoding);
 
     @Specialization(guards = "mask == null")
-    public int doString(String input, int fromIndex, int maxIndex, String match, @SuppressWarnings("unused") String mask) {
-        int result = input.indexOf(match, fromIndex);
-        return result >= maxIndex ? -1 : result;
+    public int doBytes(byte[] input, int fromIndex, int maxIndex, byte[] match, @SuppressWarnings("unused") Object mask, @SuppressWarnings("unused") Encoding encoding) {
+        return ArrayUtils.indexOfWithOrMask(input, fromIndex, maxIndex - fromIndex, match, null);
     }
 
     @Specialization(guards = "mask != null")
-    public int doStringWithMask(String input, int fromIndex, int maxIndex, String match, String mask) {
+    public int doBytesMask(byte[] input, int fromIndex, int maxIndex, byte[] match, byte[] mask, @SuppressWarnings("unused") Encoding encoding) {
         return ArrayUtils.indexOfWithOrMask(input, fromIndex, maxIndex - fromIndex, match, mask);
     }
 
-    @Specialization
-    public int doTruffleObject(TruffleObject input, int fromIndex, int maxIndex, String match, String mask,
-                    @Cached("create()") InputLengthNode lengthNode,
-                    @Cached("create()") InputRegionMatchesNode regionMatchesNode) {
-        if (maxIndex > lengthNode.execute(input)) {
+    @Specialization(guards = "mask == null")
+    public int doString(String input, int fromIndex, int maxIndex, String match, @SuppressWarnings("unused") Object mask, @SuppressWarnings("unused") Encoding encoding) {
+        int result = stringIndexOf(input, fromIndex, match);
+        return result >= maxIndex ? -1 : result;
+    }
+
+    @TruffleBoundary
+    private static int stringIndexOf(String input, int fromIndex, String match) {
+        return input.indexOf(match, fromIndex);
+    }
+
+    @Specialization(guards = "mask != null")
+    public int doStringMask(String input, int fromIndex, int maxIndex, String match, String mask, @SuppressWarnings("unused") Encoding encoding) {
+        return ArrayUtils.indexOfWithOrMask(input, fromIndex, maxIndex - fromIndex, match, mask);
+    }
+
+    @Specialization(guards = "mask == null")
+    public int doTString(TruffleString input, int fromIndex, int maxIndex, TruffleString match, @SuppressWarnings("unused") Object mask, Encoding encoding,
+                    @Cached TruffleString.ByteIndexOfStringNode indexOfStringNode) {
+        int fromByteIndex = fromIndex << encoding.getStride();
+        if (fromByteIndex >= input.byteLength(encoding.getTStringEncoding())) {
+            return -1;
+        }
+        return indexOfStringNode.execute(input, match, fromByteIndex, maxIndex << encoding.getStride(), encoding.getTStringEncoding()) >> encoding.getStride();
+    }
+
+    @Specialization(guards = "mask != null")
+    public int doTStringMask(TruffleString input, int fromIndex, int maxIndex, @SuppressWarnings("unused") TruffleString match, TruffleString.WithMask mask, Encoding encoding,
+                    @Cached TruffleString.ByteIndexOfStringNode indexOfStringNode) {
+        int fromByteIndex = fromIndex << encoding.getStride();
+        if (fromByteIndex >= input.byteLength(encoding.getTStringEncoding())) {
+            return -1;
+        }
+        return indexOfStringNode.execute(input, mask, fromByteIndex, maxIndex << encoding.getStride(), encoding.getTStringEncoding()) >> encoding.getStride();
+    }
+
+    @Specialization(guards = "neitherByteArrayNorString(input)")
+    public int doTruffleObjBytes(Object input, int fromIndex, int maxIndex, byte[] match, Object mask, @SuppressWarnings("unused") Encoding encoding,
+                    @Cached InputLengthNode lengthNode,
+                    @Cached InputRegionMatchesNode regionMatchesNode) {
+        if (maxIndex > lengthNode.execute(input, encoding)) {
+            return -1;
+        }
+        if (fromIndex + match.length > maxIndex) {
+            return -1;
+        }
+        for (int i = fromIndex; i <= maxIndex - match.length; i++) {
+            if (CompilerDirectives.inInterpreter()) {
+                RegexRootNode.checkThreadInterrupted();
+            }
+            if (regionMatchesNode.execute(input, i, match, 0, match.length, mask, encoding)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    @Specialization(guards = "neitherByteArrayNorString(input)")
+    public int doTruffleObjString(Object input, int fromIndex, int maxIndex, String match, Object mask, @SuppressWarnings("unused") Encoding encoding,
+                    @Cached InputLengthNode lengthNode,
+                    @Cached InputRegionMatchesNode regionMatchesNode) {
+        if (maxIndex > lengthNode.execute(input, encoding)) {
             return -1;
         }
         if (fromIndex + match.length() > maxIndex) {
@@ -81,7 +143,7 @@ public abstract class InputIndexOfStringNode extends Node {
             if (CompilerDirectives.inInterpreter()) {
                 RegexRootNode.checkThreadInterrupted();
             }
-            if (regionMatchesNode.execute(input, i, match, 0, match.length(), mask)) {
+            if (regionMatchesNode.execute(input, i, match, 0, match.length(), mask, encoding)) {
                 return i;
             }
         }

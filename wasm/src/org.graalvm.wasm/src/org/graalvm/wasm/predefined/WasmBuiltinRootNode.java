@@ -40,22 +40,37 @@
  */
 package org.graalvm.wasm.predefined;
 
+import org.graalvm.wasm.WasmContext;
+import org.graalvm.wasm.WasmInstance;
 import org.graalvm.wasm.WasmLanguage;
-import org.graalvm.wasm.WasmModule;
+import org.graalvm.wasm.memory.WasmMemory;
 import org.graalvm.wasm.nodes.WasmRootNode;
 
 public abstract class WasmBuiltinRootNode extends WasmRootNode {
-    protected final WasmModule module;
+    protected final WasmInstance instance;
 
-    public WasmBuiltinRootNode(WasmLanguage language, WasmModule module) {
-        super(language, null);
-        this.module = module;
+    public WasmBuiltinRootNode(WasmLanguage language, WasmInstance instance) {
+        super(language, null, null);
+        this.instance = instance;
     }
 
     public abstract String builtinNodeName();
+
+    protected WasmMemory memory() {
+        return instance.memory();
+    }
+
+    @Override
+    public void tryInitialize(WasmContext context) {
+        // We want to ensure that linking always precedes the running of the WebAssembly code.
+        // This linking should be as late as possible, because a WebAssembly context should
+        // be able to parse multiple modules before the code gets run.
+        context.linker().tryLink(instance);
+    }
 
     @Override
     public String getName() {
         return "wasm-function:" + builtinNodeName();
     }
+
 }

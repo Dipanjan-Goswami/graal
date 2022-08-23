@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,14 +25,14 @@
 package org.graalvm.compiler.truffle.compiler.phases;
 
 import org.graalvm.compiler.api.replacements.SnippetReflectionProvider;
+import org.graalvm.compiler.debug.MethodFilter;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeSourcePosition;
 import org.graalvm.compiler.nodes.IfNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.spi.CoreProviders;
-import org.graalvm.options.OptionValues;
 
 import jdk.vm.ci.meta.JavaConstant;
+import org.graalvm.compiler.truffle.compiler.TruffleTierContext;
 
 /**
  * Instruments {@link IfNode}s in the graph, by adding execution counters to the true and the false
@@ -58,15 +58,16 @@ public class InstrumentBranchesPhase extends InstrumentPhase {
 
     private final boolean isInstrumentPerInlineSite;
 
-    public InstrumentBranchesPhase(OptionValues options, SnippetReflectionProvider snippetReflection, Instrumentation instrumentation, boolean instrumentPerInlineSite) {
-        super(options, snippetReflection, instrumentation);
+    public InstrumentBranchesPhase(SnippetReflectionProvider snippetReflection, Instrumentation instrumentation, boolean instrumentPerInlineSite) {
+        super(snippetReflection, instrumentation);
         isInstrumentPerInlineSite = instrumentPerInlineSite;
     }
 
     @Override
-    protected void instrumentGraph(StructuredGraph graph, CoreProviders context, JavaConstant tableConstant) {
-        for (IfNode n : graph.getNodes().filter(IfNode.class)) {
-            Point p = getOrCreatePoint(n);
+    protected void instrumentGraph(StructuredGraph graph, TruffleTierContext context, JavaConstant tableConstant) {
+        MethodFilter methodFilter = methodFilter(context);
+        for (IfNode n : graph.getNodes(IfNode.TYPE)) {
+            Point p = getOrCreatePoint(n, methodFilter);
             if (p != null) {
                 insertCounter(graph, context, tableConstant, n.trueSuccessor(), p.slotIndex(0));
                 insertCounter(graph, context, tableConstant, n.falseSuccessor(), p.slotIndex(1));

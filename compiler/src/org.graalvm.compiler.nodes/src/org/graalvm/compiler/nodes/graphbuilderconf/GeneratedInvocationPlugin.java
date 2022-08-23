@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,11 +29,14 @@ import static jdk.vm.ci.services.Services.IS_IN_NATIVE_IMAGE;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
+import java.lang.reflect.Type;
 
 import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Node.NodeIntrinsic;
+import org.graalvm.compiler.nodes.PluginReplacementNode;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugin.InlineOnlyInvocationPlugin;
 
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
@@ -43,9 +46,13 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * Abstract class for a plugin generated for a method annotated by {@link NodeIntrinsic} or
  * {@link Fold}.
  */
-public abstract class GeneratedInvocationPlugin implements InvocationPlugin {
+public abstract class GeneratedInvocationPlugin extends InlineOnlyInvocationPlugin {
 
     private ResolvedJavaMethod executeMethod;
+
+    public GeneratedInvocationPlugin(String name, Type... argumentTypes) {
+        super(name, argumentTypes);
+    }
 
     /**
      * Gets the class of the annotation for which this plugin was generated.
@@ -56,11 +63,11 @@ public abstract class GeneratedInvocationPlugin implements InvocationPlugin {
     public abstract boolean execute(GraphBuilderContext b, ResolvedJavaMethod targetMethod, InvocationPlugin.Receiver receiver, ValueNode[] args);
 
     @Override
-    public StackTraceElement getApplySourceLocation(MetaAccessProvider metaAccess) {
+    public String getSourceLocation() {
         Class<?> c = getClass();
         for (Method m : c.getDeclaredMethods()) {
             if (m.getName().equals("execute")) {
-                return metaAccess.lookupJavaMethod(m).asStackTraceElement(0);
+                return String.format("%s.%s()", m.getClass().getName(), m.getName());
             }
         }
         throw new GraalError("could not find method named \"execute\" in " + c.getName());
@@ -80,16 +87,24 @@ public abstract class GeneratedInvocationPlugin implements InvocationPlugin {
             return false;
         }
 
-        ResolvedJavaMethod thisExecuteMethod = getExecutedMethod(b);
-        if (b.getMethod().equals(thisExecuteMethod)) {
-            // The "execute" method of this plugin is itself being compiled. In (only) this context,
-            // the injected argument of the call to the @Fold annotated method will be non-null.
-            if (IS_BUILDING_NATIVE_IMAGE) {
+        if (IS_BUILDING_NATIVE_IMAGE) {
+            // The use of this plugin in the plugin itself shouldn't be folded since that defeats
+            // the purpose of the fold.
+            ResolvedJavaType foldNodeClass = b.getMetaAccess().lookupJavaType(PluginReplacementNode.ReplacementFunction.class);
+            if (foldNodeClass.isAssignableFrom(b.getMethod().getDeclaringClass())) {
                 return false;
             }
+            ResolvedJavaType foldPluginClass = b.getMetaAccess().lookupJavaType(GeneratedFoldInvocationPlugin.class);
+            if (foldPluginClass.isAssignableFrom(b.getMethod().getDeclaringClass())) {
+                return false;
+            }
+        }
+
+        ResolvedJavaMethod thisExecuteMethod = getExecutedMethod(b);
+        if (b.getMethod().equals(thisExecuteMethod)) {
             return true;
         }
-        throw new AssertionError("must pass null to injected argument of " + foldAnnotatedMethod.format("%H.%n(%p)") + ", not " + arg);
+        throw new AssertionError("must pass null to injected argument of " + foldAnnotatedMethod.format("%H.%n(%p)") + ", not " + arg + " in " + b.getMethod().format("%H.%n(%p)"));
     }
 
     private ResolvedJavaMethod getExecutedMethod(GraphBuilderContext b) {

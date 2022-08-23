@@ -28,46 +28,149 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import com.oracle.svm.configure.json.JsonPrintable;
+import com.oracle.svm.core.configure.ConfigurationParser;
+import com.oracle.svm.core.configure.ReflectionConfigurationParser;
+import org.graalvm.nativeimage.impl.ConfigurationCondition;
+
+import com.oracle.svm.configure.ConfigurationBase;
 import com.oracle.svm.configure.json.JsonWriter;
-import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.core.configure.ConditionalElement;
+import com.oracle.svm.core.util.VMError;
 
-import jdk.vm.ci.meta.MetaUtil;
+public final class TypeConfiguration extends ConfigurationBase<TypeConfiguration, TypeConfiguration.Predicate> {
 
-public class TypeConfiguration implements JsonPrintable {
-    private final ConcurrentMap<String, ConfigurationType> types = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ConditionalElement<String>, ConfigurationType> types = new ConcurrentHashMap<>();
 
-    public ConfigurationType get(String qualifiedJavaName) {
-        return types.get(qualifiedJavaName);
+    public TypeConfiguration() {
     }
 
-    public ConfigurationType getByInternalName(String name) {
-        return types.get(MetaUtil.internalNameToJava(name, true, false));
+    public TypeConfiguration(TypeConfiguration other) {
+        other.types.forEach((key, value) -> types.put(key, new ConfigurationType(value)));
+    }
+
+    @Override
+    public TypeConfiguration copy() {
+        return new TypeConfiguration(this);
+    }
+
+    @Override
+    protected void merge(TypeConfiguration other) {
+        other.types.forEach((key, value) -> {
+            types.compute(key, (k, v) -> {
+                if (v != null) {
+                    return ConfigurationType.copyAndMerge(v, value);
+                }
+                return value;
+            });
+        });
+    }
+
+    @Override
+    public void subtract(TypeConfiguration other) {
+        other.types.forEach((key, type) -> {
+            types.computeIfPresent(key, (k, v) -> ConfigurationType.copyAndSubtract(v, type));
+        });
+    }
+
+    @Override
+    protected void intersect(TypeConfiguration other) {
+        types.forEach((key, type) -> {
+            ConfigurationType intersectedType = other.types.get(key);
+            if (intersectedType != null) {
+                types.compute(key, (k, v) -> ConfigurationType.copyAndIntersect(type, intersectedType));
+            } else {
+                types.remove(key);
+            }
+        });
+    }
+
+    @Override
+    protected void removeIf(Predicate predicate) {
+        types.entrySet().removeIf(entry -> predicate.testIncludedType(entry.getKey(), entry.getValue()));
+    }
+
+    public ConfigurationType get(ConfigurationCondition condition, String qualifiedJavaName) {
+        return types.get(new ConditionalElement<>(condition, qualifiedJavaName));
     }
 
     public void add(ConfigurationType type) {
-        ConfigurationType previous = types.putIfAbsent(type.getQualifiedJavaName(), type);
-        UserError.guarantee(previous == null || previous == type, "Cannot replace existing type %s with %s", previous, type);
+        ConfigurationType previous = types.putIfAbsent(new ConditionalElement<>(type.getCondition(), type.getQualifiedJavaName()), type);
+        if (previous != null && previous != type) {
+            VMError.shouldNotReachHere("Cannot replace existing type " + previous + " with " + type);
+        }
     }
 
-    public ConfigurationType getOrCreateType(String qualifiedJavaName) {
-        return types.computeIfAbsent(qualifiedJavaName, ConfigurationType::new);
+    public void addOrMerge(ConfigurationType type) {
+        types.compute(new ConditionalElement<>(type.getCondition(), type.getQualifiedJavaName()), (key, value) -> {
+            if (value == null) {
+                return type;
+            } else {
+                value.mergeFrom(type);
+                return value;
+            }
+        });
+    }
+
+    public ConfigurationType getOrCreateType(ConfigurationCondition condition, String qualifiedForNameString) {
+        return types.computeIfAbsent(new ConditionalElement<>(condition, qualifiedForNameString), p -> new ConfigurationType(p.getCondition(), p.getElement()));
+    }
+
+    @Override
+    public void mergeConditional(ConfigurationCondition condition, TypeConfiguration other) {
+        other.types.forEach((key, value) -> {
+            addOrMerge(new ConfigurationType(value, condition));
+        });
     }
 
     @Override
     public void printJson(JsonWriter writer) throws IOException {
+        List<ConfigurationType> typesList = new ArrayList<>(this.types.values());
+        typesList.sort(Comparator.comparing(ConfigurationType::getQualifiedJavaName).thenComparing(ConfigurationType::getCondition));
+
         writer.append('[');
-        String prefix = "\n";
-        List<ConfigurationType> list = new ArrayList<>(types.values());
-        list.sort(Comparator.comparing(ConfigurationType::getQualifiedJavaName));
-        for (ConfigurationType value : list) {
-            writer.append(prefix);
-            value.printJson(writer);
-            prefix = ",\n";
+        String prefix = "";
+        for (ConfigurationType type : typesList) {
+            writer.append(prefix).newline();
+            type.printJson(writer);
+            prefix = ",";
         }
-        writer.newline().append(']').newline();
+        writer.newline().append(']');
+    }
+
+    @Override
+    public ConfigurationParser createParser() {
+        return new ReflectionConfigurationParser<>(new ParserConfigurationAdapter(this), true);
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return types.isEmpty();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        TypeConfiguration that = (TypeConfiguration) o;
+        return types.equals(that.types);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(types);
+    }
+
+    public interface Predicate {
+
+        boolean testIncludedType(ConditionalElement<String> conditionalElement, ConfigurationType type);
+
     }
 }

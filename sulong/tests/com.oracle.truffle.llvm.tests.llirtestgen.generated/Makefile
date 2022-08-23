@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2019, 2020, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2022, Oracle and/or its affiliates.
 #
 # All rights reserved.
 #
@@ -28,33 +28,33 @@
 # OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-JAVA=$(JAVA_HOME)/bin/java
-LLIRTESTGEN_CMD=$(JAVA) -Dllirtestgen.prelude=prelude.ll -cp $(LLIR_TEST_GEN_JAR) com.oracle.truffle.llvm.tests.llirtestgen.LLIRTestGen
+.PHONY: default
+
+ifndef LLIRTESTGEN_CMD
+  $(error LLIRTESTGEN_CMD not set)
+endif
 OUTPUT_DIR=gen
-GENERATED=$(TESTS:=.ll)
 TIMESTAMP=timestamp
+SCRIPTS_DIR=scripts
+SCRIPTS=$(SCRIPTS_DIR)/gep-vector.sh $(SCRIPTS_DIR)/gep-vector-header.sh $(SCRIPTS_DIR)/gep-vector-footer.sh $(SCRIPTS_DIR)/gep-vector-test.sh
 
-GENERATED_REFS=$(GENERATED:.ll=/ref.out)
-GENERATED_BCS=$(GENERATED:.ll=/O0.bc)
+default: $(TIMESTAMP)
 
-all: $(GENERATED_REFS) $(GENERATED_BCS)
+$(TIMESTAMP): $(LLIR_TEST_GEN_JAR) $(SCRIPTS_DIR) $(SCRIPTS)
+	@mkdir -p $(OUTPUT_DIR)
+	$(QUIETLY) touch $@
+	$(QUIETLY) $(LLIRTESTGEN_CMD) $(OUTPUT_DIR)
+	cd $(SCRIPTS_DIR); ./gep-vector.sh > ../$(OUTPUT_DIR)/gep-vector.ll
 
-include $(VPATH)/../Makefile
 
-prelude.ll: prelude.bc
-	$(LLVM_DIS) $<
+$(SCRIPTS_DIR):
+	@mkdir -p $(SCRIPTS_DIR)
 
-prelude.bc: prelude.c
-	$(CLANG) -Wall -Wextra $(CFLAGS) -c -emit-llvm $<
+$(SCRIPTS_DIR)/gep-vector.sh: gep-vector.sh
+$(SCRIPTS_DIR)/gep-vector-header.sh: gep-vector-header.sh
+$(SCRIPTS_DIR)/gep-vector-footer.sh: gep-vector-footer.sh
+$(SCRIPTS_DIR)/gep-vector-test.sh: gep-vector-test.sh
 
-$(TIMESTAMP): prelude.ll $(LLIR_TEST_GEN_JAR)
-	mkdir -p $(OUTPUT_DIR)
-	touch $@
-	$(LLIRTESTGEN_CMD) $(OUTPUT_DIR)
-
-$(GENERATED): $(TIMESTAMP)
-	@/bin/echo -n ""
-
-.PHONY:
-clean:
-	$(RM) prelude.bc prelude.ll
+$(SCRIPTS_DIR)/%:
+	@mkdir -p scripts
+	cp -f $< $@

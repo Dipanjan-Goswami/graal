@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,8 +32,8 @@ import org.graalvm.compiler.graph.NodeClass;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.FixedWithNextNode;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.memory.MemoryAccess;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.word.LocationIdentity;
 
 import jdk.vm.ci.meta.JavaKind;
@@ -42,7 +42,7 @@ import jdk.vm.ci.meta.JavaKind;
  * Load of a value at a location specified as an absolute address.
  */
 @NodeInfo(cycles = CYCLES_2, size = SIZE_1)
-public class UnsafeMemoryLoadNode extends FixedWithNextNode implements Lowerable {
+public class UnsafeMemoryLoadNode extends FixedWithNextNode implements Lowerable, MemoryAccess {
 
     public static final NodeClass<UnsafeMemoryLoadNode> TYPE = NodeClass.create(UnsafeMemoryLoadNode.class);
 
@@ -66,10 +66,6 @@ public class UnsafeMemoryLoadNode extends FixedWithNextNode implements Lowerable
     }
 
     @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
-    }
-
     public LocationIdentity getLocationIdentity() {
         return locationIdentity;
     }

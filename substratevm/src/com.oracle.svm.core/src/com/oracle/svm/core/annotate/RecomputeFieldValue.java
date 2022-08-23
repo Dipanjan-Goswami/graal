@@ -29,19 +29,25 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.hosted.Feature.BeforeAnalysisAccess;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 
 /**
+ * Supported API is available to replace this non-API annotation: Use
+ * {@link BeforeAnalysisAccess#registerFieldValueTransformer}.
+ *
  * Mechanism to change the value of a field. Normally, field values in the native image heap of the
  * Substrate VM are just taken from the host VM. This annotation allows the field value to be
  * intercepted and recomputed.
  * <p>
  * This annotation must be used on a field also annotated with {@link Alias} to specify the field
- * whose value need to be changed.
+ * whose value needs to be changed.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface RecomputeFieldValue {
 
     enum Kind {
@@ -60,12 +66,18 @@ public @interface RecomputeFieldValue {
          */
         NewInstance,
         /**
+         * The object field is set to a instance of {@link #declClass} created by calling the
+         * default constructor when the target field value is not null.
+         */
+        NewInstanceWhenNotNull,
+        /**
          * The field is set to the value assigned to the {@link Alias} field.
          */
         FromAlias,
         /**
-         * The int or long field is set to the offset of the field named {@link #name} of the class
-         * {@link #declClass}, as it would be computed by {@link sun.misc.Unsafe#objectFieldOffset}.
+         * The int or long field is set to the offset of the field named {@link #name()} of the
+         * class {@link #declClass}, as it would be computed by
+         * {@link sun.misc.Unsafe#objectFieldOffset}.
          */
         FieldOffset,
         /**
@@ -100,27 +112,9 @@ public @interface RecomputeFieldValue {
          */
         Manual,
         /**
-         * Use a {@link CustomFieldValueComputer}, which is specified as the target class.
+         * Use a {@link FieldValueTransformer}, which is specified as the target class.
          */
         Custom,
-    }
-
-    /**
-     * Custom recomputation of field values. A class implementing this interface must have a
-     * no-argument constructor, which is used to instantiate it before invoking {@link #compute}.
-     */
-    public interface CustomFieldValueComputer {
-        /**
-         * Computes the new field value.
-         *
-         * @param original The original field (if {@link RecomputeFieldValue} is used for an
-         *            {@link Alias} field).
-         * @param annotated The field annotated with {@link RecomputeFieldValue}.
-         * @param receiver The original object for instance fields, or {@code null} for static
-         *            fields.
-         * @return The new field value.
-         */
-        Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver);
     }
 
     /**
@@ -153,4 +147,9 @@ public @interface RecomputeFieldValue {
      * Treat the value as final, to enforce constant folding already during static analysis.
      */
     boolean isFinal() default false;
+
+    /**
+     * If true, ignores previously computed values and calculates the value for every field read.
+     */
+    boolean disableCaching() default false;
 }

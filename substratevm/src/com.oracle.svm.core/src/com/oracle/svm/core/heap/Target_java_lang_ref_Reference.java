@@ -24,113 +24,87 @@
  */
 package com.oracle.svm.core.heap;
 
-//Checkstyle: allow reflection
-
 import java.lang.ref.PhantomReference;
 import java.lang.ref.Reference;
 import java.lang.reflect.Field;
+import java.util.function.BooleanSupplier;
 
-import org.graalvm.compiler.api.directives.GraalDirectives;
+import org.graalvm.compiler.nodes.java.ReachabilityFenceNode;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.annotate.Alias;
+import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.ExcludeFromReferenceMap;
+import com.oracle.svm.core.annotate.Inject;
 import com.oracle.svm.core.annotate.KeepOriginal;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
-import com.oracle.svm.core.annotate.RecomputeFieldValue.CustomFieldValueComputer;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
 import com.oracle.svm.core.annotate.Uninterruptible;
 import com.oracle.svm.core.annotate.UnknownClass;
-import com.oracle.svm.core.jdk.CleanerSupport;
-import com.oracle.svm.core.jdk.JDK11OrLater;
-import com.oracle.svm.core.jdk.JDK8OrEarlier;
+import com.oracle.svm.core.jdk.JDK17OrLater;
+import com.oracle.svm.core.jdk.JDK17_0_2OrLater;
 import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.util.ReflectionUtil;
 
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
-
 /**
  * Substitution of {@link Reference}, which is the abstract base class of all non-strong reference
- * classes, the basis of the {@linkplain CleanerSupport cleaner mechanism,} and subject to special
- * treatment by the garbage collector.
+ * classes, the basis of the cleaner mechanism, and subject to special treatment by the garbage
+ * collector.
  * <p>
  * Implementation methods are in the separate class {@link ReferenceInternals} because
  * {@link Reference} can be subclassed and subclasses could otherwise inadvertently override
- * injected methods by declaring methods with identical names and signatures, or override methods
- * such as {@link #enqueue()} with an incompatible implementation, which is problematic because some
- * of the methods are invoked during garbage collection.
+ * injected methods by declaring methods with identical names and signatures.
  * <p>
  * This class serves three purposes:
  * <ul>
- * <li>It has a {@linkplain #rawReferent reference to an object,} which is not strong. Therefore, if
- * the object is not otherwise strongly reachable, the garbage collector can choose to reclaim it
- * and will then set our reference (and possibly others) to {@code null}.
- * <li>It has {@linkplain #nextDiscovered linkage} to become part of a linked list of reference
- * objects that are discovered during garbage collection, when allocation is restricted.
- * <li>It has {@linkplain #nextInQueue linkage} to optionally become part of a
- * {@linkplain #futureQueue linked reference queue,} which is used to clean up resources associated
- * with reclaimed objects.
+ * <li>It has a {@linkplain #referent reference to an object,} which is excluded from the reference
+ * map. If the object is not otherwise strongly reachable, the garbage collector can choose to
+ * reclaim it and will then set our reference (and possibly others) to {@code null}.
+ * <li>It has {@linkplain #discovered linkage} to become part of a linked list of reference objects
+ * that are discovered during garbage collection, when allocation is restricted, or become part of a
+ * linked list of reference objects which are pending to be added to a reference queue.
+ * <li>It has {@linkplain #next linkage} to optionally become part of a {@linkplain #queue linked
+ * reference queue,} which is used to clean up resources associated with reclaimed objects.
  * </ul>
  */
 @UnknownClass
 @TargetClass(Reference.class)
 @Substitute
 public final class Target_java_lang_ref_Reference<T> {
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FieldOffset, name = "rawReferent", declClass = Target_java_lang_ref_Reference.class) //
-    static long rawReferentFieldOffset;
+    @Inject @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FieldOffset, name = ReferenceInternals.REFERENT_FIELD_NAME, declClass = Target_java_lang_ref_Reference.class) //
+    static long referentFieldOffset;
 
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FieldOffset, name = "nextDiscovered", declClass = Target_java_lang_ref_Reference.class) //
-    static long nextDiscoveredFieldOffset;
-
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FieldOffset, name = "futureQueue", declClass = Target_java_lang_ref_Reference.class) //
-    static long futureQueueFieldOffset;
-
-    /** @see ReferenceInternals#isInitialized */
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeTrue.class) //
-    final boolean initialized;
+    @Inject @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FieldOffset, name = "discovered", declClass = Target_java_lang_ref_Reference.class) //
+    static long discoveredFieldOffset;
 
     /**
      * The object we reference. The field must not be in the regular reference map since we do all
      * the garbage collection support manually. The garbage collector performs Pointer-level access
      * to the field. This is fine from the point of view of the static analysis, because the field
      * stores by the garbage collector do not change the type of the referent.
+     *
+     * {@link Target_java_lang_ref_Reference#clear0()} may set this field to null.
      */
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeReferenceValue.class) //
-    @ExcludeFromReferenceMap("Field is manually processed by the garbage collector.") //
-    T rawReferent;
-
-    /**
-     * Whether this reference is currently {@linkplain #nextDiscovered on a list} of references
-     * discovered during garbage collection.
-     * <p>
-     * This cannot be replaced with the same self-link trick that is used for {@link #nextInQueue}
-     * because during reference discovery, our reference object could have been moved, but
-     * {@link #nextDiscovered} might not have been updated yet, and {@code this == next} would fail.
-     * ({@link #nextDiscovered} != null is not valid either because there might not be a next node)
-     */
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
-    boolean isDiscovered;
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeReferenceValue.class) //
+    @ExcludeFromReferenceMap(reason = "Field is manually processed by the garbage collector.") //
+    T referent;
 
     @SuppressWarnings("unused") //
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
-    Reference<?> nextDiscovered;
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
+    @ExcludeFromReferenceMap(reason = "Some GCs process this field manually.", onlyIf = NotSerialNotEpsilonGC.class) //
+    transient Target_java_lang_ref_Reference<?> discovered;
 
-    /**
-     * The queue to which this reference object will be added when the referent becomes unreachable.
-     * This field becomes {@code null} when the reference object is enqueued.
-     */
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeQueueValue.class) //
-    volatile Target_java_lang_ref_ReferenceQueue<? super T> futureQueue;
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeQueueValue.class) //
+    volatile Target_java_lang_ref_ReferenceQueue<? super T> queue;
 
-    /**
-     * If this reference is on a {@linkplain Target_java_lang_ref_ReferenceQueue queue}, the next
-     * reference object on the queue. If the reference is not (yet) on a queue, set to {@code this}.
-     */
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ComputeThisInstanceValue.class) //
-    Reference<?> nextInQueue;
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
+    volatile Reference<?> next;
 
     @Substitute
     Target_java_lang_ref_Reference(T referent) {
@@ -140,68 +114,87 @@ public final class Target_java_lang_ref_Reference<T> {
     @Substitute
     @Uninterruptible(reason = "The initialization of the fields must be atomic with respect to collection.")
     Target_java_lang_ref_Reference(T referent, Target_java_lang_ref_ReferenceQueue<? super T> queue) {
-        this.rawReferent = referent;
-        this.nextDiscovered = null;
-        this.isDiscovered = false;
-        this.futureQueue = queue;
-        ReferenceQueueInternals.doClearQueuedState(ReferenceInternals.uncast(this));
-        this.initialized = true;
+        this.referent = referent;
+        this.queue = (queue == null) ? Target_java_lang_ref_ReferenceQueue.NULL : queue;
+    }
+
+    @KeepOriginal
+    native T get();
+
+    @Substitute
+    public void clear() {
+        ReferenceInternals.clear(SubstrateUtil.cast(this, Reference.class));
     }
 
     @Substitute
-    T get() {
-        return rawReferent;
+    @TargetElement(onlyWith = JDK17OrLater.class)
+    private void clear0() {
+        clear();
     }
 
-    @Substitute
-    void clear() {
-        ReferenceInternals.doClear(this);
-    }
+    @KeepOriginal
+    @TargetElement(onlyWith = JDK17_0_2OrLater.class)
+    native boolean refersToImpl(T obj);
+
+    @KeepOriginal
+    @TargetElement(onlyWith = JDK17OrLater.class)
+    public native boolean refersTo(T obj);
 
     @Substitute
-    boolean enqueue() {
-        return ReferenceInternals.doEnqueue(this);
+    @TargetElement(onlyWith = JDK17OrLater.class)
+    boolean refersTo0(Object obj) {
+        return ReferenceInternals.refersTo(SubstrateUtil.cast(this, Reference.class), obj);
     }
 
-    @Substitute
-    boolean isEnqueued() {
-        return ReferenceInternals.isEnqueued(ReferenceInternals.uncast(this));
-    }
+    @KeepOriginal
+    native boolean enqueue();
 
-    @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    @SuppressWarnings("unused")
-    static boolean tryHandlePending(boolean waitForNotify) {
-        throw VMError.unimplemented();
-    }
+    @KeepOriginal
+    native boolean isEnqueued();
 
+    /** May be used by {@code JavaLangRefAccess} via {@code SharedSecrets}. */
     @Substitute
-    @TargetElement(onlyWith = JDK11OrLater.class)
-    @SuppressWarnings("unused")
-    static boolean waitForReferenceProcessing() {
-        throw VMError.unimplemented();
+    static boolean waitForReferenceProcessing() throws InterruptedException {
+        return ReferenceInternals.waitForReferenceProcessing();
     }
 
     @Override
     @KeepOriginal //
-    @TargetElement(onlyWith = JDK11OrLater.class) //
     protected native Object clone() throws CloneNotSupportedException;
 
+    /** Intrinsified to a {@link ReachabilityFenceNode}. */
     @Substitute //
-    @TargetElement(onlyWith = JDK11OrLater.class) //
     @SuppressWarnings("unused")
     static void reachabilityFence(Object ref) {
-        GraalDirectives.blackhole(ref);
+        throw VMError.shouldNotReachHere("Unreachable, intrinsified during bytecode parsing");
+    }
+
+    @KeepOriginal
+    @TargetElement(onlyWith = JDK17OrLater.class) //
+    native T getFromInactiveFinalReference();
+
+    @Substitute //
+    @TargetElement(onlyWith = JDK17OrLater.class) //
+    void clearInactiveFinalReference() {
+        // assert this instanceof FinalReference;
+        assert next != null; // I.e. FinalReference is inactive
+        ReferenceInternals.clear(SubstrateUtil.cast(this, Reference.class));
     }
 }
 
+/** We provide our own {@link com.oracle.svm.core.heap.ReferenceHandler}. */
+@TargetClass(value = Reference.class, innerClass = "ReferenceHandler")
+@Delete
+final class Target_java_lang_ref_Reference_ReferenceHandler {
+}
+
 @Platforms(Platform.HOSTED_ONLY.class)
-class ComputeReferenceValue implements CustomFieldValueComputer {
+class ComputeReferenceValue implements FieldValueTransformer {
 
     private static final Field REFERENT_FIELD = ReflectionUtil.lookupField(Reference.class, "referent");
 
     @Override
-    public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
+    public Object transform(Object receiver, Object originalValue) {
         if (receiver instanceof PhantomReference) {
             /*
              * PhantomReference does not allow access to its object, so it is mostly useless to have
@@ -223,12 +216,12 @@ class ComputeReferenceValue implements CustomFieldValueComputer {
 }
 
 @Platforms(Platform.HOSTED_ONLY.class)
-class ComputeQueueValue implements CustomFieldValueComputer {
+class ComputeQueueValue implements FieldValueTransformer {
 
     private static final Field QUEUE_FIELD = ReflectionUtil.lookupField(Reference.class, "queue");
 
     @Override
-    public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
+    public Object transform(Object receiver, Object originalValue) {
         try {
             return QUEUE_FIELD.get(receiver);
         } catch (ReflectiveOperationException ex) {
@@ -238,17 +231,9 @@ class ComputeQueueValue implements CustomFieldValueComputer {
 }
 
 @Platforms(Platform.HOSTED_ONLY.class)
-class ComputeThisInstanceValue implements CustomFieldValueComputer {
+class NotSerialNotEpsilonGC implements BooleanSupplier {
     @Override
-    public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
-        return receiver;
-    }
-}
-
-@Platforms(Platform.HOSTED_ONLY.class)
-class ComputeTrue implements CustomFieldValueComputer {
-    @Override
-    public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
-        return true;
+    public boolean getAsBoolean() {
+        return !SubstrateOptions.UseSerialGC.getValue() && !SubstrateOptions.UseEpsilonGC.getValue();
     }
 }

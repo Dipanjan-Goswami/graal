@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,6 +41,7 @@
 package com.oracle.truffle.regex.tregex.nfa;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.RegexLanguage;
 import com.oracle.truffle.regex.tregex.automaton.AbstractTransition;
 import com.oracle.truffle.regex.tregex.parser.ast.GroupBoundaries;
 import com.oracle.truffle.regex.tregex.parser.ast.Term;
@@ -51,20 +52,24 @@ import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 public class ASTTransition implements AbstractTransition<Term, ASTTransition>, JsonConvertible {
 
     private Term target;
-    private GroupBoundaries groupBoundaries = GroupBoundaries.getEmptyInstance();
+    private GroupBoundaries groupBoundaries;
 
-    public ASTTransition() {
+    public ASTTransition(RegexLanguage language) {
+        this.groupBoundaries = GroupBoundaries.getEmptyInstance(language);
     }
 
-    public ASTTransition(Term target) {
+    public ASTTransition(RegexLanguage language, Term target) {
         this.target = target;
+        this.groupBoundaries = GroupBoundaries.getEmptyInstance(language);
     }
 
+    @TruffleBoundary
     @Override
     public int getId() {
         throw new UnsupportedOperationException();
     }
 
+    @TruffleBoundary
     @Override
     public Term getSource() {
         throw new UnsupportedOperationException();

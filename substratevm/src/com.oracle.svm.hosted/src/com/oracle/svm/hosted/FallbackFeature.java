@@ -24,6 +24,11 @@
  */
 package com.oracle.svm.hosted;
 
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.lang.module.ModuleDescriptor;
+import java.lang.module.ModuleFinder;
+import java.lang.module.ModuleReference;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -32,10 +37,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.graalvm.nativeimage.hosted.Feature;
 
-import com.oracle.graal.pointsto.flow.InvokeTypeFlow;
 import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.svm.core.FallbackExecutor;
@@ -46,6 +51,7 @@ import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.FeatureImpl.AfterAnalysisAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.BeforeAnalysisAccessImpl;
 
+import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 @AutomaticFeature
@@ -58,6 +64,11 @@ public class FallbackFeature implements Feature {
     private final List<String> resourceCalls = new ArrayList<>();
     private final List<String> jniCalls = new ArrayList<>();
     private final List<String> proxyCalls = new ArrayList<>();
+    private final List<String> serializationCalls = new ArrayList<>();
+
+    private final Set<ModuleDescriptor> systemModuleDescriptors = ModuleFinder.ofSystem().findAll().stream()
+                    .map(ModuleReference::descriptor)
+                    .collect(Collectors.toSet());
 
     private static class AutoProxyInvoke {
         private final ResolvedJavaMethod method;
@@ -97,10 +108,10 @@ public class FallbackFeature implements Feature {
     }
 
     private interface InvokeChecker {
-        void check(ReflectionInvocationCheck check, InvokeTypeFlow invoke);
+        void check(ReflectionInvocationCheck check, BytecodePosition invokeLocation);
     }
 
-    private static class ReflectionInvocationCheck {
+    private class ReflectionInvocationCheck {
         private final Method reflectionMethod;
         private final InvokeChecker checker;
         private AnalysisMethod trackedReflectionMethod;
@@ -116,22 +127,26 @@ public class FallbackFeature implements Feature {
             trackedReflectionMethod.startTrackInvocations();
         }
 
-        void apply(InvokeTypeFlow invoke) {
-            ClassLoader classLoader = getCallerMethod(invoke).getDeclaringClass().getJavaClass().getClassLoader();
-            if (classLoader instanceof NativeImageClassLoader) {
-                checker.check(this, invoke);
+        void apply(BytecodePosition invokeLocation) {
+            Class<?> javaClass = ((AnalysisMethod) invokeLocation.getMethod()).getDeclaringClass().getJavaClass();
+            if (systemModuleDescriptors.contains(javaClass.getModule().getDescriptor())) {
+                /* Ensure all JDK system modules are excluded from reporting reflection use. */
+                return;
             }
+            ClassLoader classLoader = javaClass.getClassLoader();
+            if (!NativeImageSystemClassLoader.singleton().isNativeImageClassLoader(classLoader)) {
+                /* Classes not loaded by NativeImageClassLoader are also excluded. */
+                return;
+            }
+            /* Collect reflection use in application classes. */
+            checker.check(this, invokeLocation);
         }
 
-        String locationString(InvokeTypeFlow invoke) {
-            AnalysisMethod caller = getCallerMethod(invoke);
-            String callerLocation = caller.asStackTraceElement(invoke.getLocation().getBci()).toString();
+        String locationString(BytecodePosition invokeLocation) {
+            ResolvedJavaMethod caller = invokeLocation.getMethod();
+            String callerLocation = caller.asStackTraceElement(invokeLocation.getBCI()).toString();
             return trackedReflectionMethod.format("%H.%n") + " invoked at " + callerLocation;
         }
-    }
-
-    private static AnalysisMethod getCallerMethod(InvokeTypeFlow invoke) {
-        return (AnalysisMethod) invoke.getSource().graph().method();
     }
 
     private void addCheck(Method reflectionMethod, InvokeChecker checker) {
@@ -171,27 +186,40 @@ public class FallbackFeature implements Feature {
             addCheck(Proxy.class.getMethod("newProxyInstance", ClassLoader.class, Class[].class, InvocationHandler.class), this::collectProxyInvokes);
 
             addCheck(System.class.getMethod("loadLibrary", String.class), this::collectJNIInvokes);
+
+            addCheck(ObjectInputStream.class.getMethod("readObject"), this::collectDeserializationInvokes);
+            addCheck(ObjectInputStream.class.getMethod("readUnshared"), this::collectDeserializationInvokes);
+            addCheck(ObjectOutputStream.class.getMethod("writeObject", Object.class), this::collectSerializationInvokes);
+            addCheck(ObjectOutputStream.class.getMethod("writeUnshared", Object.class), this::collectSerializationInvokes);
         } catch (NoSuchMethodException e) {
             throw VMError.shouldNotReachHere("Registering ReflectionInvocationChecks failed", e);
         }
     }
 
-    private void collectReflectionInvokes(ReflectionInvocationCheck check, InvokeTypeFlow invoke) {
-        reflectionCalls.add("Reflection method " + check.locationString(invoke));
+    private void collectReflectionInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        reflectionCalls.add("Reflection method " + check.locationString(invokeLocation));
     }
 
-    private void collectResourceInvokes(ReflectionInvocationCheck check, InvokeTypeFlow invoke) {
-        resourceCalls.add("Resource access method " + check.locationString(invoke));
+    private void collectResourceInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        resourceCalls.add("Resource access method " + check.locationString(invokeLocation));
     }
 
-    private void collectJNIInvokes(ReflectionInvocationCheck check, InvokeTypeFlow invoke) {
-        jniCalls.add("System method " + check.locationString(invoke));
+    private void collectJNIInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        jniCalls.add("System method " + check.locationString(invokeLocation));
     }
 
-    private void collectProxyInvokes(ReflectionInvocationCheck check, InvokeTypeFlow invoke) {
-        if (!containsAutoProxyInvoke(getCallerMethod(invoke), invoke.getLocation().getBci())) {
-            proxyCalls.add("Dynamic proxy method " + check.locationString(invoke));
+    private void collectProxyInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        if (!containsAutoProxyInvoke(invokeLocation.getMethod(), invokeLocation.getBCI())) {
+            proxyCalls.add("Dynamic proxy method " + check.locationString(invokeLocation));
         }
+    }
+
+    private void collectDeserializationInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        serializationCalls.add("Deserialization method " + check.locationString(invokeLocation));
+    }
+
+    private void collectSerializationInvokes(ReflectionInvocationCheck check, BytecodePosition invokeLocation) {
+        serializationCalls.add("Serialization method " + check.locationString(invokeLocation));
     }
 
     static FallbackImageRequest reportFallback(String message) {
@@ -216,9 +244,9 @@ public class FallbackFeature implements Feature {
         throw request;
     }
 
-    static UserError.UserException reportAsFallback(RuntimeException original) {
+    public static UserError.UserException reportAsFallback(RuntimeException original) {
         if (SubstrateOptions.FallbackThreshold.getValue() == SubstrateOptions.NoFallback) {
-            throw UserError.abort(original, original.getMessage());
+            throw UserError.abort(original, "%s", original.getMessage());
         }
         throw reportFallback(ABORT_MSG_PREFIX + ". " + original.getMessage(), original);
     }
@@ -259,12 +287,12 @@ public class FallbackFeature implements Feature {
     public FallbackImageRequest resourceFallback = null;
     public FallbackImageRequest jniFallback = null;
     public FallbackImageRequest proxyFallback = null;
+    public FallbackImageRequest serializationFallback = null;
 
     @Override
     public void afterAnalysis(AfterAnalysisAccess a) {
         if (SubstrateOptions.FallbackThreshold.getValue() == SubstrateOptions.NoFallback ||
                         NativeImageOptions.ReportUnsupportedElementsAtRuntime.getValue() ||
-                        NativeImageOptions.AllowIncompleteClasspath.getValue() ||
                         SubstrateOptions.SharedLibrary.getValue()) {
             /*
              * Any of the above ensures we unconditionally allow stand-alone image to be generated.
@@ -279,8 +307,8 @@ public class FallbackFeature implements Feature {
         }
 
         for (ReflectionInvocationCheck check : reflectionInvocationChecks) {
-            for (InvokeTypeFlow invoke : check.trackedReflectionMethod.getInvokeTypeFlows()) {
-                check.apply(invoke);
+            for (BytecodePosition invokeLocation : check.trackedReflectionMethod.getInvokeLocations()) {
+                check.apply(invokeLocation);
             }
         }
 
@@ -299,6 +327,10 @@ public class FallbackFeature implements Feature {
         if (!proxyCalls.isEmpty()) {
             proxyCalls.add(ABORT_MSG_PREFIX + " due to dynamic proxy use without configuration.");
             proxyFallback = new FallbackImageRequest(proxyCalls);
+        }
+        if (!serializationCalls.isEmpty()) {
+            serializationCalls.add(ABORT_MSG_PREFIX + " due to serialization use without configuration.");
+            serializationFallback = new FallbackImageRequest(serializationCalls);
         }
     }
 }

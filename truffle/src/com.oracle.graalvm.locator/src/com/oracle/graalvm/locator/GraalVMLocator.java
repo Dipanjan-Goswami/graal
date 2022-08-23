@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -145,7 +145,7 @@ public final class GraalVMLocator extends TruffleLocator
             setGraalVMProperties(homeFinder);
             if (!TruffleOptions.AOT) {
                 final List<URL> classPath = collectClassPath(homeFinder);
-                loader = new GuestLangToolsLoader(classPath.toArray(new URL[0]), JDKServices.getLocatorBaseClassLoader(GraalVMLocator.class));
+                loader = new GuestLangToolsLoader(classPath.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
             }
         }
         return loader;

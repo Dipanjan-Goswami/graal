@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,6 @@
  */
 package com.oracle.truffle.api.test.source;
 
-import com.oracle.truffle.api.TruffleFile;
-import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
-import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -54,13 +50,26 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
 import org.graalvm.polyglot.Context;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.oracle.truffle.api.TruffleFile;
+import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
+
 public class FileTypeDetectorTest extends AbstractPolyglotTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     private File testFile1;
     private File testFile2;
@@ -84,6 +93,10 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
         if (testFile3 != null) {
             testFile3.delete();
         }
+    }
+
+    public FileTypeDetectorTest() {
+        needsLanguageEnv = true;
     }
 
     @Test
@@ -169,7 +182,6 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
     }
 
     @Test
-    @SuppressWarnings("deprecation")
     public void testSourceBulderNoIO() throws IOException {
         setupEnv(Context.create());
         TruffleFile truffleFile1 = languageEnv.getPublicTruffleFile(testFile1.getAbsolutePath());
@@ -201,30 +213,9 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
             Assert.fail("Expected SecurityException");
         } catch (SecurityException se) {
         }
-        try {
-            com.oracle.truffle.api.source.Source.newBuilder(testFile1).build();
-            Assert.fail("Expected SecurityException");
-        } catch (SecurityException se) {
-        }
-        try {
-            com.oracle.truffle.api.source.Source.newBuilder(testFile3).build();
-            Assert.fail("Expected SecurityException");
-        } catch (SecurityException se) {
-        }
-        try {
-            com.oracle.truffle.api.source.Source.newBuilder(testFile1.toURI().toURL()).build();
-            Assert.fail("Expected SecurityException");
-        } catch (SecurityException se) {
-        }
-        try {
-            com.oracle.truffle.api.source.Source.newBuilder(testFile3.toURI().toURL()).build();
-            Assert.fail("Expected SecurityException");
-        } catch (SecurityException se) {
-        }
     }
 
     @Test
-    @SuppressWarnings("deprecation")
     public void testSourceBulderFullIO() throws IOException {
         setupEnv(Context.newBuilder().allowIO(true).build());
         TruffleFile truffleFile1 = languageEnv.getPublicTruffleFile(testFile1.getAbsolutePath());
@@ -240,15 +231,6 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
         truffleSource = com.oracle.truffle.api.source.Source.newBuilder("TestFooXML", truffleFile3).build();
         Assert.assertEquals("text/foo+xml", truffleSource.getMimeType());
 
-        truffleSource = com.oracle.truffle.api.source.Source.newBuilder(testFile1).build();
-        Assert.assertEquals("application/test-js", truffleSource.getMimeType());
-        truffleSource = com.oracle.truffle.api.source.Source.newBuilder(testFile3).build();
-        Assert.assertEquals("text/foo+xml", truffleSource.getMimeType());
-
-        truffleSource = com.oracle.truffle.api.source.Source.newBuilder(testFile1.toURI().toURL()).build();
-        Assert.assertEquals("application/test-js", truffleSource.getMimeType());
-        truffleSource = com.oracle.truffle.api.source.Source.newBuilder(testFile3.toURI().toURL()).build();
-        Assert.assertEquals("text/foo+xml", truffleSource.getMimeType());
     }
 
     @Test
@@ -259,6 +241,7 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
         File seconda = createTmpFile("test", "." + SecondLanguage.EXT_A, "");
         File secondb = createTmpFile("test", "." + SecondLanguage.EXT_B, "");
 
+        AbstractFileTypeDetector.active = true;
         FirstFileTypeDetector.events.clear();
         SecondFileTypeDetector.events.clear();
         com.oracle.truffle.api.source.Source.newBuilder(FirstLanguage.LANG_ID, languageEnv.getPublicTruffleFile(firsta.getAbsolutePath())).build();
@@ -282,6 +265,7 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
         Assert.assertEquals(1, SecondFileTypeDetector.events.stream().filter((e) -> e.getType() == AbstractFileTypeDetector.Event.Type.MIME).count());
         Assert.assertEquals(1, SecondFileTypeDetector.events.stream().filter((e) -> e.getType() == AbstractFileTypeDetector.Event.Type.ENCODING).count());
         SecondFileTypeDetector.events.clear();
+        AbstractFileTypeDetector.active = false;
     }
 
     private static File createTmpFile(String name, String ext, String... content) throws IOException {
@@ -299,6 +283,7 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
 
     public static class AbstractFileTypeDetector implements TruffleFile.FileTypeDetector {
 
+        static volatile boolean active = false;
         private final List<? super Event> sink;
         private final Map<String, String> mimeTypes;
 
@@ -309,7 +294,9 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
 
         @Override
         public String findMimeType(TruffleFile file) throws IOException {
-            sink.add(new Event(Event.Type.MIME, file));
+            if (active) {
+                sink.add(new Event(Event.Type.MIME, file));
+            }
             String name = file.getName();
             if (name != null) {
                 for (Map.Entry<String, String> e : mimeTypes.entrySet()) {
@@ -323,7 +310,9 @@ public class FileTypeDetectorTest extends AbstractPolyglotTest {
 
         @Override
         public Charset findEncoding(TruffleFile file) throws IOException {
-            sink.add(new Event(Event.Type.ENCODING, file));
+            if (active) {
+                sink.add(new Event(Event.Type.ENCODING, file));
+            }
             return null;
         }
 

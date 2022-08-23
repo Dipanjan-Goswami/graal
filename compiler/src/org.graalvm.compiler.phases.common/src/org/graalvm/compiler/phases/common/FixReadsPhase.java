@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,13 @@
  */
 package org.graalvm.compiler.phases.common;
 
+import java.util.Optional;
+
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.Equivalence;
 import org.graalvm.collections.MapCursor;
 import org.graalvm.compiler.core.common.GraalOptions;
 import org.graalvm.compiler.core.common.cfg.BlockMap;
-import org.graalvm.compiler.core.common.spi.ConstantFieldProvider;
 import org.graalvm.compiler.core.common.type.FloatStamp;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.core.common.type.StampFactory;
@@ -39,14 +40,16 @@ import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeMap;
 import org.graalvm.compiler.graph.NodeStack;
 import org.graalvm.compiler.graph.Position;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodeinfo.InputType;
 import org.graalvm.compiler.nodes.AbstractBeginNode;
 import org.graalvm.compiler.nodes.AbstractMergeNode;
 import org.graalvm.compiler.nodes.BinaryOpLogicNode;
 import org.graalvm.compiler.nodes.ConstantNode;
 import org.graalvm.compiler.nodes.EndNode;
+import org.graalvm.compiler.nodes.GraphState;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.IfNode;
+import org.graalvm.compiler.nodes.LogicConstantNode;
 import org.graalvm.compiler.nodes.LogicNode;
 import org.graalvm.compiler.nodes.MergeNode;
 import org.graalvm.compiler.nodes.NodeView;
@@ -70,26 +73,24 @@ import org.graalvm.compiler.nodes.memory.FloatingAccessNode;
 import org.graalvm.compiler.nodes.memory.FloatingReadNode;
 import org.graalvm.compiler.nodes.memory.MemoryAccess;
 import org.graalvm.compiler.nodes.memory.MemoryPhiNode;
+import org.graalvm.compiler.nodes.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
+import org.graalvm.compiler.nodes.spi.CoreProvidersDelegate;
 import org.graalvm.compiler.nodes.util.GraphUtil;
 import org.graalvm.compiler.options.OptionValues;
 import org.graalvm.compiler.phases.BasePhase;
-import org.graalvm.compiler.phases.Phase;
 import org.graalvm.compiler.phases.graph.ScheduledNodeIterator;
-import org.graalvm.compiler.phases.schedule.SchedulePhase;
-import org.graalvm.compiler.phases.schedule.SchedulePhase.SchedulingStrategy;
-import org.graalvm.compiler.phases.tiers.LowTierContext;
+import org.graalvm.compiler.phases.util.Providers;
 
 import jdk.vm.ci.meta.Assumptions;
 import jdk.vm.ci.meta.Constant;
-import jdk.vm.ci.meta.ConstantReflectionProvider;
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.TriState;
 
 /**
  * This phase lowers {@link FloatingReadNode FloatingReadNodes} into corresponding fixed reads.
  */
-public class FixReadsPhase extends BasePhase<LowTierContext> {
+public class FixReadsPhase extends BasePhase<CoreProviders> {
 
     private static final CounterKey counterStampsRegistered = DebugContext.counter("FixReads_StampsRegistered");
     private static final CounterKey counterIfsKilled = DebugContext.counter("FixReads_KilledIfs");
@@ -99,8 +100,8 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
     private static final CounterKey counterConstantInputReplacements = DebugContext.counter("FixReads_ConstantInputReplacement");
     private static final CounterKey counterBetterMergedStamps = DebugContext.counter("FixReads_BetterMergedStamp");
 
-    protected boolean replaceInputsWithConstants;
-    protected Phase schedulePhase;
+    protected final boolean replaceInputsWithConstants;
+    protected final BasePhase<? super CoreProviders> schedulePhase;
 
     @Override
     public float codeSizeIncrease() {
@@ -153,28 +154,17 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
         private final BlockMap<Integer> blockActionStart;
         private final EconomicMap<MergeNode, EconomicMap<ValueNode, Stamp>> endMaps;
         private final DebugContext debug;
-        private final RawCanonicalizerTool rawCanonicalizerTool = new RawCanonicalizerTool();
+        private final RawCanonicalizerTool rawCanonicalizerTool;
 
-        private class RawCanonicalizerTool implements NodeView, CanonicalizerTool {
+        private class RawCanonicalizerTool extends CoreProvidersDelegate implements NodeView, CanonicalizerTool {
+
+            RawCanonicalizerTool(CoreProviders providers) {
+                super(providers);
+            }
 
             @Override
             public Assumptions getAssumptions() {
                 return graph.getAssumptions();
-            }
-
-            @Override
-            public MetaAccessProvider getMetaAccess() {
-                return metaAccess;
-            }
-
-            @Override
-            public ConstantReflectionProvider getConstantReflection() {
-                return null;
-            }
-
-            @Override
-            public ConstantFieldProvider getConstantFieldProvider() {
-                return null;
             }
 
             @Override
@@ -193,6 +183,11 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
             }
 
             @Override
+            public boolean supportsRounding() {
+                return false;
+            }
+
+            @Override
             public OptionValues getOptions() {
                 return graph.getOptions();
             }
@@ -202,6 +197,10 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
                 return getBestStamp(node);
             }
 
+            @Override
+            public boolean divisionOverflowIsJVMSCompliant() {
+                return false;
+            }
         }
 
         public RawConditionalEliminationVisitor(StructuredGraph graph, ScheduleResult schedule, MetaAccessProvider metaAccess, boolean replaceInputsWithConstants) {
@@ -209,6 +208,7 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
             this.debug = graph.getDebug();
             this.schedule = schedule;
             this.metaAccess = metaAccess;
+            this.rawCanonicalizerTool = new RawCanonicalizerTool(new Providers(metaAccess, null, null, null, null, null, null, null, null, null, null, null, null));
             blockActionStart = new BlockMap<>(schedule.getCFG());
             endMaps = EconomicMap.create(Equivalence.IDENTITY);
             stampMap = graph.createNodeMap();
@@ -408,7 +408,7 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
                 ConstantNode stampConstant = ConstantNode.forConstant(newStamp, constant, metaAccess, graph);
                 debug.log("RawConditionElimination: constant stamp replaces %1s with %1s", node, stampConstant);
                 counterConstantReplacements.increment(debug);
-                node.replaceAtUsages(InputType.Value, stampConstant);
+                node.replaceAtUsages(stampConstant, InputType.Value);
                 GraphUtil.tryKillUnused(node);
                 return true;
             }
@@ -457,12 +457,9 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
             TriState result = tryProveCondition(node.condition());
             if (result != TriState.UNKNOWN) {
                 boolean isTrue = (result == TriState.TRUE);
-                AbstractBeginNode survivingSuccessor = node.getSuccessor(isTrue);
-                survivingSuccessor.replaceAtUsages(null);
-                survivingSuccessor.replaceAtPredecessor(null);
-                node.replaceAtPredecessor(survivingSuccessor);
-                GraphUtil.killCFG(node);
-
+                // Don't kill the other branch immediately, see
+                // `ConditionalEliminationPhase.processGuard`.
+                node.setCondition(LogicConstantNode.forBoolean(isTrue, node.graph()));
                 counterIfsKilled.increment(debug);
             }
         }
@@ -596,47 +593,40 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
 
     }
 
-    public FixReadsPhase(boolean replaceInputsWithConstants, Phase schedulePhase) {
+    public FixReadsPhase(boolean replaceInputsWithConstants, BasePhase<? super CoreProviders> schedulePhase) {
         this.replaceInputsWithConstants = replaceInputsWithConstants;
         this.schedulePhase = schedulePhase;
     }
 
     @Override
-    protected void run(StructuredGraph graph, LowTierContext context) {
-        schedulePhase.apply(graph);
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return NotApplicable.combineConstraints(
+                        NotApplicable.canOnlyApplyOnce(this, StageFlag.FIXED_READS, graphState),
+                        NotApplicable.mustRunAfter(this, StageFlag.LOW_TIER_LOWERING, graphState),
+                        NotApplicable.notApplicableIf(graphState.getGuardsStage().areFrameStatesAtSideEffects(), Optional.of(new NotApplicable("This phase must run after FSA."))));
+    }
+
+    @Override
+    @SuppressWarnings("try")
+    protected void run(StructuredGraph graph, CoreProviders context) {
+        assert graph.verify();
+        schedulePhase.apply(graph, context);
         ScheduleResult schedule = graph.getLastSchedule();
         FixReadsClosure fixReadsClosure = new FixReadsClosure();
         for (Block block : schedule.getCFG().getBlocks()) {
             fixReadsClosure.processNodes(block, schedule);
         }
+
+        assert graph.verify();
         if (GraalOptions.RawConditionalElimination.getValue(graph.getOptions())) {
             schedule.getCFG().visitDominatorTree(createVisitor(graph, schedule, context), false);
         }
-        graph.setAfterFixReadPhase(true);
     }
 
-    public static class RawCEPhase extends BasePhase<LowTierContext> {
-
-        private final boolean replaceInputsWithConstants;
-
-        public RawCEPhase(boolean replaceInputsWithConstants) {
-            this.replaceInputsWithConstants = replaceInputsWithConstants;
-        }
-
-        @Override
-        protected CharSequence getName() {
-            return "RawCEPhase";
-        }
-
-        @Override
-        protected void run(StructuredGraph graph, LowTierContext context) {
-            if (GraalOptions.RawConditionalElimination.getValue(graph.getOptions())) {
-                SchedulePhase schedulePhase = new SchedulePhase(SchedulingStrategy.LATEST, true);
-                schedulePhase.apply(graph);
-                ScheduleResult schedule = graph.getLastSchedule();
-                schedule.getCFG().visitDominatorTree(new RawConditionalEliminationVisitor(graph, schedule, context.getMetaAccess(), replaceInputsWithConstants), false);
-            }
-        }
+    @Override
+    public void updateGraphState(GraphState graphState) {
+        super.updateGraphState(graphState);
+        graphState.setAfterStage(StageFlag.FIXED_READS);
     }
 
     protected ControlFlowGraph.RecursiveVisitor<?> createVisitor(StructuredGraph graph, ScheduleResult schedule, CoreProviders context) {
@@ -673,7 +663,8 @@ public class FixReadsPhase extends BasePhase<LowTierContext> {
         }
     }
 
-    public void setReplaceInputsWithConstants(boolean replaceInputsWithConstants) {
-        this.replaceInputsWithConstants = replaceInputsWithConstants;
+    public BasePhase<? super CoreProviders> getSchedulePhase() {
+        return schedulePhase;
     }
+
 }

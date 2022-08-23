@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,15 +28,19 @@ import static org.graalvm.compiler.nodeinfo.NodeCycles.CYCLES_2;
 import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_1;
 import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_2;
 
+import org.graalvm.compiler.core.common.memory.MemoryOrderMode;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.graph.NodeClass;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodeinfo.NodeSize;
 import org.graalvm.compiler.nodeinfo.Verbosity;
+import org.graalvm.compiler.nodes.FieldLocationIdentity;
 import org.graalvm.compiler.nodes.FixedWithNextNode;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.memory.MemoryAccess;
+import org.graalvm.compiler.nodes.memory.OrderedMemoryAccess;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
+import org.graalvm.word.LocationIdentity;
 
 import jdk.vm.ci.meta.ResolvedJavaField;
 
@@ -44,13 +48,13 @@ import jdk.vm.ci.meta.ResolvedJavaField;
  * The base class of all instructions that access fields.
  */
 @NodeInfo(cycles = CYCLES_2, size = SIZE_1)
-public abstract class AccessFieldNode extends FixedWithNextNode implements Lowerable {
+public abstract class AccessFieldNode extends FixedWithNextNode implements Lowerable, OrderedMemoryAccess, MemoryAccess {
 
     public static final NodeClass<AccessFieldNode> TYPE = NodeClass.create(AccessFieldNode.class);
     @OptionalInput ValueNode object;
-
+    protected final FieldLocationIdentity location;
     protected final ResolvedJavaField field;
-    protected final boolean volatileAccess;
+    protected final MemoryOrderMode memoryOrder;
 
     public ValueNode object() {
         return object;
@@ -61,14 +65,15 @@ public abstract class AccessFieldNode extends FixedWithNextNode implements Lower
      *
      * @param object the instruction producing the receiver object
      * @param field the compiler interface representation of the field
-     * @param volatileAccess specifies if the access is volatile or not, this overrides the field
-     *            volatile modifier.
+     * @param memoryOrder specifies the memory ordering requirements of the access. This overrides
+     *            the field volatile modifier.
      */
-    public AccessFieldNode(NodeClass<? extends AccessFieldNode> c, Stamp stamp, ValueNode object, ResolvedJavaField field, boolean volatileAccess) {
+    public AccessFieldNode(NodeClass<? extends AccessFieldNode> c, Stamp stamp, ValueNode object, ResolvedJavaField field, MemoryOrderMode memoryOrder) {
         super(c, stamp);
         this.object = object;
         this.field = field;
-        this.volatileAccess = volatileAccess;
+        this.memoryOrder = memoryOrder;
+        this.location = new FieldLocationIdentity(field);
     }
 
     /**
@@ -78,7 +83,12 @@ public abstract class AccessFieldNode extends FixedWithNextNode implements Lower
      * @param field the compiler interface representation of the field
      */
     public AccessFieldNode(NodeClass<? extends AccessFieldNode> c, Stamp stamp, ValueNode object, ResolvedJavaField field) {
-        this(c, stamp, object, field, field.isVolatile());
+        this(c, stamp, object, field, MemoryOrderMode.getMemoryOrder(field));
+    }
+
+    @Override
+    public LocationIdentity getLocationIdentity() {
+        return location;
     }
 
     /**
@@ -100,18 +110,12 @@ public abstract class AccessFieldNode extends FixedWithNextNode implements Lower
     }
 
     /**
-     * Checks whether this access has volatile semantics.
-     *
-     * The field access semantics are coupled to the access and not to the field. e.g. it's possible
-     * to access volatile fields using non-volatile semantics via VarHandles.
+     * Note the field access semantics are coupled to the access and not to the field. e.g. it's
+     * possible to access volatile fields using non-volatile semantics via VarHandles.
      */
-    public boolean isVolatile() {
-        return volatileAccess;
-    }
-
     @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
+    public MemoryOrderMode getMemoryOrder() {
+        return memoryOrder;
     }
 
     @Override
@@ -130,10 +134,10 @@ public abstract class AccessFieldNode extends FixedWithNextNode implements Lower
     }
 
     @Override
-    public NodeSize estimatedNodeSize() {
-        if (isVolatile()) {
+    protected NodeSize dynamicNodeSizeEstimate() {
+        if (ordersMemoryAccesses()) {
             return SIZE_2;
         }
-        return super.estimatedNodeSize();
+        return super.dynamicNodeSizeEstimate();
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,21 +40,21 @@
  */
 package com.oracle.truffle.tck.tests;
 
-import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.Function;
+import java.util.TreeSet;
 import org.graalvm.polyglot.PolyglotException;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -74,7 +74,7 @@ public class ErrorTypeTest {
     public static Collection<? extends TestRun> createErrorTypeTests() {
         context = new TestContext(ErrorTypeTest.class);
         final Set<? extends String> requiredLanguages = TestUtil.getRequiredLanguages(context);
-        final Collection<TestRun> testRuns = new LinkedHashSet<>();
+        final Collection<TestRun> testRuns = new TreeSet<>(Comparator.comparing(TestRun::toString));
         for (String snippetLanguage : requiredLanguages) {
             Collection<? extends Snippet> snippets = context.getExpressions(null, null, snippetLanguage);
             Map<String, Collection<? extends Snippet>> overloads = computeOverloads(snippets);
@@ -83,11 +83,21 @@ public class ErrorTypeTest {
             overloads = computeOverloads(snippets);
             computeSnippets(snippetLanguage, snippets, overloads, testRuns);
         }
+        if (testRuns.isEmpty()) {
+            // BeforeClass and AfterClass annotated methods are not called when there are no tests
+            // to run. But we need to free TestContext.
+            afterClass();
+        }
         return testRuns;
     }
 
+    @BeforeClass
+    public static void setUpClass() {
+        TestUtil.assertNoCurrentContext();
+    }
+
     @AfterClass
-    public static void afterClass() throws IOException {
+    public static void afterClass() {
         context.close();
         context = null;
     }
@@ -103,7 +113,7 @@ public class ErrorTypeTest {
                 if (snippetLanguage.equals(parLanguage)) {
                     continue;
                 }
-                final Collection<Map.Entry<String, ? extends Snippet>> valueConstructors = new ArrayList<>();
+                final Collection<Map.Entry<String, ? extends Snippet>> valueConstructors = new TreeSet<>(Comparator.comparing(a -> a.getValue().getId()));
                 for (Snippet valueConstructor : context.getValueConstructors(null, parLanguage)) {
                     valueConstructors.add(new AbstractMap.SimpleImmutableEntry<>(parLanguage, valueConstructor));
                 }
@@ -126,12 +136,7 @@ public class ErrorTypeTest {
     private static Map<String, Collection<? extends Snippet>> computeOverloads(final Collection<? extends Snippet> snippets) {
         final Map<String, Collection<Snippet>> res = new HashMap<>();
         for (Snippet snippet : snippets) {
-            res.computeIfAbsent(snippet.getId(), new Function<String, Collection<Snippet>>() {
-                @Override
-                public Collection<Snippet> apply(String id) {
-                    return new ArrayList<>();
-                }
-            }).add(snippet);
+            res.computeIfAbsent(snippet.getId(), id -> new ArrayList<>()).add(snippet);
         }
         return (Map<String, Collection<? extends Snippet>>) (Map<String, ?>) res;
     }
@@ -234,18 +239,24 @@ public class ErrorTypeTest {
         Assume.assumeThat(testRun, TEST_RESULT_MATCHER);
         boolean passed = false;
         try {
+            PolyglotException polyglotException = null;
             try {
                 testRun.getSnippet().getExecutableValue().execute(testRun.getActualParameters().toArray());
-            } catch (PolyglotException pe) {
+            } catch (PolyglotException e) {
+                polyglotException = e;
+            } catch (IllegalArgumentException e) {
+                polyglotException = context.getContext().asValue(e).as(PolyglotException.class);
+            }
+            if (polyglotException != null) {
                 try {
-                    TestUtil.validateResult(testRun, null, pe);
+                    TestUtil.validateResult(testRun, polyglotException);
                 } catch (PolyglotException | AssertionError e) {
-                    if (pe.equals(e)) {
+                    if (polyglotException.equals(e)) {
                         passed = true;
                     } else {
                         throw new AssertionError(
                                         TestUtil.formatErrorMessage(
-                                                        "Unexpected Exception: " + e.getMessage() + ", expected: " + pe.getMessage(),
+                                                        "Unexpected Exception: " + e.getMessage() + ", expected: " + polyglotException.getMessage(),
                                                         testRun,
                                                         context),
                                         e);

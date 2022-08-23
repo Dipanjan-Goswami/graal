@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,10 +50,12 @@ import com.oracle.truffle.regex.tregex.buffer.ByteArrayBuffer;
 import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
 import com.oracle.truffle.regex.tregex.buffer.IntArrayBuffer;
 import com.oracle.truffle.regex.tregex.buffer.ObjectArrayBuffer;
+import com.oracle.truffle.regex.tregex.nfa.NFA;
 import com.oracle.truffle.regex.tregex.nfa.NFAState;
 import com.oracle.truffle.regex.tregex.nfa.NFAStateTransition;
-import com.oracle.truffle.regex.tregex.nodes.dfa.DFACaptureGroupLazyTransition;
 import com.oracle.truffle.regex.tregex.nodes.dfa.DFACaptureGroupPartialTransition;
+import com.oracle.truffle.regex.tregex.nodes.dfa.DFACaptureGroupPartialTransition.IndexOperation;
+import com.oracle.truffle.regex.tregex.nodes.dfa.DFACaptureGroupPartialTransition.LastGroupUpdate;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
@@ -62,26 +64,26 @@ import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder {
 
     private final DFAGenerator dfaGen;
-    private StateSet<NFAState> requiredStates = null;
+    private StateSet<NFA, NFAState> requiredStates = null;
     private int[] requiredStatesIndexMap = null;
-    private DFACaptureGroupLazyTransition lazyTransition = null;
+    private DFACaptureGroupLazyTransitionBuilder lazyTransition = null;
 
-    DFACaptureGroupTransitionBuilder(NFAStateTransition[] transitions, StateSet<NFAState> targetStateSet, CodePointSet matcherBuilder, DFAGenerator dfaGen) {
+    DFACaptureGroupTransitionBuilder(NFAStateTransition[] transitions, StateSet<NFA, NFAState> targetStateSet, CodePointSet matcherBuilder, DFAGenerator dfaGen) {
         super(transitions, targetStateSet, matcherBuilder);
         this.dfaGen = dfaGen;
     }
 
-    DFACaptureGroupTransitionBuilder(CodePointSet matcherBuilder, TransitionSet<NFAState, NFAStateTransition> transitions, DFAGenerator dfaGen) {
+    DFACaptureGroupTransitionBuilder(CodePointSet matcherBuilder, TransitionSet<NFA, NFAState, NFAStateTransition> transitions, DFAGenerator dfaGen) {
         super(transitions, matcherBuilder);
         this.dfaGen = dfaGen;
     }
 
     @Override
     public DFAStateTransitionBuilder createNodeSplitCopy() {
-        return new DFACaptureGroupTransitionBuilder(getMatcherBuilder(), getTransitionSet(), dfaGen);
+        return new DFACaptureGroupTransitionBuilder(getCodePointSet(), getTransitionSet(), dfaGen);
     }
 
-    public void setLazyTransition(DFACaptureGroupLazyTransition lazyTransition) {
+    public void setLazyTransition(DFACaptureGroupLazyTransitionBuilder lazyTransition) {
         this.lazyTransition = lazyTransition;
     }
 
@@ -95,7 +97,7 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
         return !dfaGen.getProps().isSearching() && getSource().isInitialState();
     }
 
-    private StateSet<NFAState> getRequiredStates() {
+    private StateSet<NFA, NFAState> getRequiredStates() {
         if (requiredStates == null) {
             requiredStates = StateSet.create(dfaGen.getNfa());
             for (NFAStateTransition nfaTransition : getTransitionSet().getTransitions()) {
@@ -112,24 +114,25 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
         return requiredStatesIndexMap;
     }
 
-    private DFACaptureGroupPartialTransition createPartialTransition(StateSet<NFAState> targetStates, int[] targetStatesIndexMap, CompilationBuffer compilationBuffer) {
+    private DFACaptureGroupPartialTransition createPartialTransition(StateSet<NFA, NFAState> targetStates, int[] targetStatesIndexMap, CompilationBuffer compilationBuffer) {
         int numberOfNFAStates = Math.max(getRequiredStates().size(), targetStates.size());
         PartialTransitionDebugInfo partialTransitionDebugInfo = null;
-        if (dfaGen.getEngineOptions().isDumpAutomata()) {
+        if (dfaGen.getOptions().isDumpAutomata()) {
             partialTransitionDebugInfo = new PartialTransitionDebugInfo(numberOfNFAStates);
         }
         dfaGen.updateMaxNumberOfNFAStatesInOneTransition(numberOfNFAStates);
         IntArrayBuffer newOrder = compilationBuffer.getIntRangesBuffer1().asFixedSizeArray(numberOfNFAStates, -1);
         IntArrayBuffer copySource = compilationBuffer.getIntRangesBuffer2().asFixedSizeArray(numberOfNFAStates, -1);
-        ObjectArrayBuffer<byte[]> indexUpdates = compilationBuffer.getObjectBuffer1();
-        ObjectArrayBuffer<byte[]> indexClears = compilationBuffer.getObjectBuffer2();
+        ObjectArrayBuffer<IndexOperation> indexUpdates = compilationBuffer.getObjectBuffer1();
+        ObjectArrayBuffer<IndexOperation> indexClears = compilationBuffer.getObjectBuffer2();
+        ObjectArrayBuffer<LastGroupUpdate> lastGroupUpdates = compilationBuffer.getObjectBuffer3();
         ByteArrayBuffer arrayCopies = compilationBuffer.getByteArrayBuffer();
 
         for (NFAStateTransition nfaTransition : getTransitionSet().getTransitions()) {
             if (targetStates.contains(nfaTransition.getTarget())) {
                 int sourceIndex = getStateIndex(getRequiredStatesIndexMap(), nfaTransition.getSource());
                 int targetIndex = getStateIndex(targetStatesIndexMap, nfaTransition.getTarget());
-                if (dfaGen.getEngineOptions().isDumpAutomata()) {
+                if (dfaGen.getOptions().isDumpAutomata()) {
                     partialTransitionDebugInfo.mapResultToNFATransition(targetIndex, nfaTransition);
                 }
                 assert !(nfaTransition.getTarget().isFinalState()) || targetIndex == DFACaptureGroupPartialTransition.FINAL_STATE_RESULT_INDEX;
@@ -141,10 +144,13 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
                     arrayCopies.add((byte) targetIndex);
                 }
                 if (nfaTransition.getGroupBoundaries().hasIndexUpdates()) {
-                    indexUpdates.add(nfaTransition.getGroupBoundaries().updatesToPartialTransitionArray(targetIndex));
+                    indexUpdates.add(new IndexOperation(targetIndex, nfaTransition.getGroupBoundaries().updatesToByteArray()));
                 }
                 if (nfaTransition.getGroupBoundaries().hasIndexClears()) {
-                    indexClears.add(nfaTransition.getGroupBoundaries().clearsToPartialTransitionArray(targetIndex));
+                    indexClears.add(new IndexOperation(targetIndex, nfaTransition.getGroupBoundaries().clearsToByteArray()));
+                }
+                if (nfaTransition.getGroupBoundaries().hasLastGroup()) {
+                    lastGroupUpdates.add(new LastGroupUpdate(targetIndex, nfaTransition.getGroupBoundaries().getLastGroup()));
                 }
             }
         }
@@ -161,15 +167,16 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
         // important: don't change the order, because newOrderToSequenceOfSwaps() reuses
         // CompilationBuffer#getByteArrayBuffer()
         byte[] byteArrayCopies = arrayCopies.toArray();
-        byte[] reorderSwaps = skipReorder() ? DFACaptureGroupPartialTransition.EMPTY_REORDER_SWAPS : newOrderToSequenceOfSwaps(newOrder, compilationBuffer);
+        byte[] reorderSwaps = skipReorder() ? DFACaptureGroupPartialTransition.EMPTY : newOrderToSequenceOfSwaps(newOrder, compilationBuffer);
         DFACaptureGroupPartialTransition dfaCaptureGroupPartialTransitionNode = DFACaptureGroupPartialTransition.create(
                         dfaGen,
                         reorderSwaps,
                         byteArrayCopies,
-                        indexUpdates.toArray(DFACaptureGroupPartialTransition.EMPTY_INDEX_UPDATES),
-                        indexClears.toArray(DFACaptureGroupPartialTransition.EMPTY_INDEX_CLEARS),
+                        indexUpdates.toArray(DFACaptureGroupPartialTransition.EMPTY_INDEX_OPS),
+                        indexClears.toArray(DFACaptureGroupPartialTransition.EMPTY_INDEX_OPS),
+                        lastGroupUpdates.toArray(DFACaptureGroupPartialTransition.EMPTY_LAST_GROUP_UPDATES),
                         preReorderFinalStateResultIndex);
-        if (dfaGen.getEngineOptions().isDumpAutomata()) {
+        if (dfaGen.getOptions().isDumpAutomata()) {
             partialTransitionDebugInfo.node = dfaCaptureGroupPartialTransitionNode;
             dfaGen.registerCGPartialTransitionDebugInfo(partialTransitionDebugInfo);
         }
@@ -202,7 +209,7 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
         return swaps.toArray();
     }
 
-    public DFACaptureGroupLazyTransition toLazyTransition(CompilationBuffer compilationBuffer) {
+    public DFACaptureGroupLazyTransitionBuilder toLazyTransition(CompilationBuffer compilationBuffer) {
         if (lazyTransition == null) {
             DFAStateNodeBuilder successor = getTarget();
             DFACaptureGroupPartialTransition[] partialTransitions = new DFACaptureGroupPartialTransition[successor.getSuccessors().length];
@@ -224,7 +231,7 @@ public class DFACaptureGroupTransitionBuilder extends DFAStateTransitionBuilder 
             if (getId() > Short.MAX_VALUE) {
                 throw new UnsupportedRegexException("too many capture group transitions");
             }
-            lazyTransition = new DFACaptureGroupLazyTransition((short) getId(), partialTransitions, transitionToFinalState, transitionToAnchoredFinalState);
+            lazyTransition = new DFACaptureGroupLazyTransitionBuilder((short) getId(), partialTransitions, transitionToFinalState, transitionToAnchoredFinalState);
         }
         return lazyTransition;
     }

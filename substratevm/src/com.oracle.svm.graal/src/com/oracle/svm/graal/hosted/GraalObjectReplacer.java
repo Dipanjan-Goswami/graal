@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.graal.hosted;
 
-import java.lang.management.ThreadMXBean;
+import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -34,7 +34,14 @@ import java.util.function.Function;
 
 import org.graalvm.compiler.api.replacements.SnippetReflectionProvider;
 import org.graalvm.compiler.api.runtime.GraalRuntime;
+import org.graalvm.compiler.core.common.spi.ConstantFieldProvider;
 import org.graalvm.compiler.core.common.spi.ForeignCallsProvider;
+import org.graalvm.compiler.debug.MetricKey;
+import org.graalvm.compiler.graph.NodeClass;
+import org.graalvm.compiler.hotspot.GraalHotSpotVMConfig;
+import org.graalvm.compiler.hotspot.HotSpotBackendFactory;
+import org.graalvm.compiler.hotspot.SnippetResolvedJavaMethod;
+import org.graalvm.compiler.hotspot.SnippetResolvedJavaType;
 import org.graalvm.compiler.nodes.FieldLocationIdentity;
 import org.graalvm.nativeimage.c.function.RelocatedPointer;
 import org.graalvm.nativeimage.hosted.Feature.CompilationAccess;
@@ -50,7 +57,7 @@ import com.oracle.svm.core.graal.nodes.SubstrateFieldLocationIdentity;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.meta.ReadableJavaField;
 import com.oracle.svm.core.util.HostedStringDeduplication;
-import com.oracle.svm.core.util.Replaced;
+import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.graal.SubstrateGraalRuntime;
 import com.oracle.svm.graal.meta.SubstrateField;
 import com.oracle.svm.graal.meta.SubstrateMethod;
@@ -59,17 +66,22 @@ import com.oracle.svm.graal.meta.SubstrateType;
 import com.oracle.svm.hosted.SVMHost;
 import com.oracle.svm.hosted.ameta.AnalysisConstantFieldProvider;
 import com.oracle.svm.hosted.ameta.AnalysisConstantReflectionProvider;
-import com.oracle.svm.hosted.analysis.Inflation;
+import com.oracle.svm.hosted.analysis.AnnotationsProcessor;
+import com.oracle.svm.hosted.meta.HostedConstantFieldProvider;
 import com.oracle.svm.hosted.meta.HostedField;
 import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.meta.HostedType;
 import com.oracle.svm.hosted.meta.HostedUniverse;
+import com.oracle.svm.util.ReflectionUtil;
 
+import jdk.vm.ci.code.Architecture;
 import jdk.vm.ci.hotspot.HotSpotJVMCIRuntime;
+import jdk.vm.ci.hotspot.HotSpotObjectConstant;
 import jdk.vm.ci.hotspot.HotSpotResolvedJavaField;
 import jdk.vm.ci.hotspot.HotSpotResolvedJavaMethod;
 import jdk.vm.ci.hotspot.HotSpotResolvedJavaType;
 import jdk.vm.ci.hotspot.HotSpotSignature;
+import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaField;
@@ -88,7 +100,7 @@ public class GraalObjectReplacer implements Function<Object, Object> {
     private final AnalysisMetaAccess aMetaAccess;
     private final HashMap<AnalysisMethod, SubstrateMethod> methods = new HashMap<>();
     private final HashMap<AnalysisField, SubstrateField> fields = new HashMap<>();
-    private final HashMap<FieldLocationIdentity, FieldLocationIdentity> fieldLocationIdentities = new HashMap<>();
+    private final HashMap<FieldLocationIdentity, SubstrateFieldLocationIdentity> fieldLocationIdentities = new HashMap<>();
     private final HashMap<AnalysisType, SubstrateType> types = new HashMap<>();
     private final HashMap<Signature, SubstrateSignature> signatures = new HashMap<>();
     private final GraalProviderObjectReplacements providerReplacements;
@@ -96,11 +108,26 @@ public class GraalObjectReplacer implements Function<Object, Object> {
 
     private final HostedStringDeduplication stringTable;
 
+    private final Field substrateFieldAnnotationsEncodingField;
+    private final Field substrateFieldTypeField;
+    private final Field substrateFieldDeclaringClassField;
+    private final Field dynamicHubMetaTypeField;
+    private final Field substrateTypeRawAllInstanceFieldsField;
+    private final Field substrateMethodImplementationsField;
+    private final Field substrateMethodAnnotationsEncodingField;
+
     public GraalObjectReplacer(AnalysisUniverse aUniverse, AnalysisMetaAccess aMetaAccess, GraalProviderObjectReplacements providerReplacements) {
         this.aUniverse = aUniverse;
         this.aMetaAccess = aMetaAccess;
         this.providerReplacements = providerReplacements;
         this.stringTable = HostedStringDeduplication.singleton();
+        substrateFieldAnnotationsEncodingField = ReflectionUtil.lookupField(SubstrateField.class, "annotationsEncoding");
+        substrateFieldTypeField = ReflectionUtil.lookupField(SubstrateField.class, "type");
+        substrateFieldDeclaringClassField = ReflectionUtil.lookupField(SubstrateField.class, "declaringClass");
+        dynamicHubMetaTypeField = ReflectionUtil.lookupField(DynamicHub.class, "metaType");
+        substrateTypeRawAllInstanceFieldsField = ReflectionUtil.lookupField(SubstrateType.class, "rawAllInstanceFields");
+        substrateMethodImplementationsField = ReflectionUtil.lookupField(SubstrateMethod.class, "implementations");
+        substrateMethodAnnotationsEncodingField = ReflectionUtil.lookupField(SubstrateMethod.class, "annotationsEncoding");
     }
 
     public void setGraalRuntime(SubstrateGraalRuntime sGraalRuntime) {
@@ -121,10 +148,21 @@ public class GraalObjectReplacer implements Function<Object, Object> {
             return dest;
         }
 
+        if (source instanceof SnippetResolvedJavaMethod || source instanceof SnippetResolvedJavaType) {
+            return source;
+        }
         if (source instanceof MetaAccessProvider) {
             dest = providerReplacements.getMetaAccessProvider();
         } else if (source instanceof HotSpotJVMCIRuntime) {
             throw new UnsupportedFeatureException("HotSpotJVMCIRuntime should not appear in the image: " + source);
+        } else if (source instanceof GraalHotSpotVMConfig) {
+            throw new UnsupportedFeatureException("GraalHotSpotVMConfig should not appear in the image: " + source);
+        } else if (source instanceof HotSpotBackendFactory) {
+            HotSpotBackendFactory factory = (HotSpotBackendFactory) source;
+            Architecture hostArch = HotSpotJVMCIRuntime.runtime().getHostJVMCIBackend().getTarget().arch;
+            if (!factory.getArchitecture().equals(hostArch.getClass())) {
+                throw new UnsupportedFeatureException("Non-host archtecture HotSpotBackendFactory should not appear in the image: " + source);
+            }
         } else if (source instanceof GraalRuntime) {
             dest = sGraalRuntime;
         } else if (source instanceof AnalysisConstantReflectionProvider) {
@@ -136,37 +174,31 @@ public class GraalObjectReplacer implements Function<Object, Object> {
         } else if (source instanceof SnippetReflectionProvider) {
             dest = providerReplacements.getSnippetReflectionProvider();
 
-        } else if (shouldBeReplaced(source)) {
-            /*
-             * The hash maps must be synchronized, because replace() may be called from
-             * BigBang.finish(), which is multi-threaded.
-             */
-            synchronized (this) {
-                if (source instanceof HotSpotResolvedJavaMethod) {
-                    throw new UnsupportedFeatureException(source.toString());
-                } else if (source instanceof HotSpotResolvedJavaField) {
-                    throw new UnsupportedFeatureException(source.toString());
-                } else if (source instanceof HotSpotResolvedJavaType) {
-                    throw new UnsupportedFeatureException(source.toString());
-                } else if (source instanceof HotSpotSignature) {
-                    throw new UnsupportedFeatureException(source.toString());
-                } else if (source instanceof ResolvedJavaMethod) {
-                    dest = createMethod((ResolvedJavaMethod) source);
-                } else if (source instanceof ResolvedJavaField) {
-                    dest = createField((ResolvedJavaField) source);
-                } else if (source instanceof ResolvedJavaType) {
-                    dest = createType((ResolvedJavaType) source);
-                } else if (source instanceof Signature) {
-                    dest = createSignature((Signature) source);
-                } else if (source instanceof FieldLocationIdentity) {
-                    dest = fieldLocationIdentities.get(source);
-                    if (dest == null) {
-                        SubstrateField destField = (SubstrateField) apply(((FieldLocationIdentity) source).getField());
-                        dest = new SubstrateFieldLocationIdentity(destField);
-                        fieldLocationIdentities.put((FieldLocationIdentity) source, (FieldLocationIdentity) dest);
-                    }
-                }
-            }
+        } else if (source instanceof MetricKey) {
+            /* Ensure lazily initialized name fields are computed. */
+            ((MetricKey) source).getName();
+        } else if (source instanceof NodeClass) {
+            /* Ensure lazily initialized shortName field is computed. */
+            ((NodeClass<?>) source).shortName();
+
+        } else if (source instanceof HotSpotResolvedJavaMethod) {
+            throw new UnsupportedFeatureException(source.toString());
+        } else if (source instanceof HotSpotResolvedJavaField) {
+            throw new UnsupportedFeatureException(source.toString());
+        } else if (source instanceof HotSpotResolvedJavaType) {
+            throw new UnsupportedFeatureException(source.toString());
+        } else if (source instanceof HotSpotSignature) {
+            throw new UnsupportedFeatureException(source.toString());
+        } else if (source instanceof HotSpotObjectConstant) {
+            throw new UnsupportedFeatureException(source.toString());
+        } else if (source instanceof ResolvedJavaMethod && !(source instanceof SubstrateMethod)) {
+            dest = createMethod((ResolvedJavaMethod) source);
+        } else if (source instanceof ResolvedJavaField && !(source instanceof SubstrateField)) {
+            dest = createField((ResolvedJavaField) source);
+        } else if (source instanceof ResolvedJavaType && !(source instanceof SubstrateType)) {
+            dest = createType((ResolvedJavaType) source);
+        } else if (source instanceof FieldLocationIdentity && !(source instanceof SubstrateFieldLocationIdentity)) {
+            dest = createFieldLocationIdentity((FieldLocationIdentity) source);
         }
 
         assert dest != null;
@@ -179,33 +211,9 @@ public class GraalObjectReplacer implements Function<Object, Object> {
         return dest;
     }
 
-    private static boolean shouldBeReplaced(Object object) {
-        if (object instanceof Replaced) {
-            return false;
-        }
+    public synchronized SubstrateMethod createMethod(ResolvedJavaMethod original) {
+        assert !(original instanceof SubstrateMethod) : original;
 
-        /*
-         * Must be in sync with the types checked in replace()
-         */
-        if (object instanceof ResolvedJavaMethod) {
-            return true;
-        }
-        if (object instanceof ResolvedJavaField) {
-            return true;
-        }
-        if (object instanceof ResolvedJavaType) {
-            return true;
-        }
-        if (object instanceof ThreadMXBean) {
-            return true;
-        }
-        if (object instanceof FieldLocationIdentity) {
-            return true;
-        }
-        return false;
-    }
-
-    public SubstrateMethod createMethod(ResolvedJavaMethod original) {
         AnalysisMethod aMethod;
         if (original instanceof AnalysisMethod) {
             aMethod = (AnalysisMethod) original;
@@ -230,17 +238,21 @@ public class GraalObjectReplacer implements Function<Object, Object> {
              * Annotations are updated in every analysis iteration, but this is a starting point. It
              * also ensures that all types used by annotations are created eagerly.
              */
-            sMethod.setAnnotationsEncoding(Inflation.encodeAnnotations(aMetaAccess, aMethod.getAnnotations(), null));
+            setAnnotationsEncoding(aMethod, sMethod, null);
         }
         return sMethod;
     }
 
-    public SubstrateField createField(ResolvedJavaField original) {
+    public synchronized SubstrateField createField(ResolvedJavaField original) {
+        assert !(original instanceof SubstrateField) : original;
+
         AnalysisField aField;
         if (original instanceof AnalysisField) {
             aField = (AnalysisField) original;
-        } else {
+        } else if (original instanceof HostedField) {
             aField = ((HostedField) original).wrapped;
+        } else {
+            throw new InternalError(original.toString());
         }
         SubstrateField sField = fields.get(aField);
 
@@ -251,18 +263,32 @@ public class GraalObjectReplacer implements Function<Object, Object> {
             if (ReadableJavaField.injectFinalForRuntimeCompilation(aField.wrapped)) {
                 modifiers = modifiers | Modifier.FINAL;
             }
-            sField = new SubstrateField(aMetaAccess, aField, modifiers, stringTable);
+            sField = new SubstrateField(aField, modifiers, stringTable);
             fields.put(aField, sField);
 
             sField.setLinks(createType(aField.getType()), createType(aField.getDeclaringClass()));
+            aUniverse.getHeapScanner().rescanField(sField, substrateFieldTypeField);
+            aUniverse.getHeapScanner().rescanField(sField, substrateFieldDeclaringClassField);
 
             /*
              * Annotations are updated in every analysis iteration, but this is a starting point. It
              * also ensures that all types used by annotations are created eagerly.
              */
-            sField.setAnnotationsEncoding(Inflation.encodeAnnotations(aMetaAccess, aField.getAnnotations(), null));
+            setAnnotationsEncoding(aField, sField, null);
         }
         return sField;
+    }
+
+    private synchronized SubstrateFieldLocationIdentity createFieldLocationIdentity(FieldLocationIdentity original) {
+        assert !(original instanceof SubstrateFieldLocationIdentity) : original;
+
+        SubstrateFieldLocationIdentity dest = fieldLocationIdentities.get(original);
+        if (dest == null) {
+            SubstrateField destField = createField(original.getField());
+            dest = new SubstrateFieldLocationIdentity(destField);
+            fieldLocationIdentities.put(original, dest);
+        }
+        return dest;
     }
 
     public SubstrateField getField(AnalysisField field) {
@@ -277,22 +303,27 @@ public class GraalObjectReplacer implements Function<Object, Object> {
         return types.containsKey(toAnalysisType(original));
     }
 
-    public SubstrateType createType(JavaType original) {
+    public synchronized SubstrateType createType(JavaType original) {
+        assert !(original instanceof SubstrateType) : original;
         if (original == null) {
             return null;
         }
 
         AnalysisType aType = toAnalysisType(original);
+        VMError.guarantee(aType.isLinked(), "types reachable for JIT compilation must not have linkage errors");
         SubstrateType sType = types.get(aType);
 
         if (sType == null) {
             assert !(original instanceof HostedType) : "too late to create new type";
+            aType.registerAsReachable();
             DynamicHub hub = ((SVMHost) aUniverse.hostVM()).dynamicHub(aType);
             sType = new SubstrateType(aType.getJavaKind(), hub);
             types.put(aType, sType);
             hub.setMetaType(sType);
+            aUniverse.getHeapScanner().rescanField(hub, dynamicHubMetaTypeField);
 
             sType.setRawAllInstanceFields(createAllInstanceFields(aType));
+            aUniverse.getHeapScanner().rescanField(sType, substrateTypeRawAllInstanceFieldsField);
             createType(aType.getSuperclass());
             createType(aType.getComponentType());
             for (AnalysisType aInterface : aType.getInterfaces()) {
@@ -321,7 +352,9 @@ public class GraalObjectReplacer implements Function<Object, Object> {
         return sFields;
     }
 
-    private SubstrateSignature createSignature(Signature original) {
+    private synchronized SubstrateSignature createSignature(Signature original) {
+        assert !(original instanceof SubstrateSignature) : original;
+
         SubstrateSignature sSignature = signatures.get(original);
         if (sSignature == null) {
             sSignature = new SubstrateSignature();
@@ -343,7 +376,7 @@ public class GraalObjectReplacer implements Function<Object, Object> {
     /**
      * Some meta data must be updated during analysis. This is done here.
      */
-    public boolean updateDataDuringAnalysis(AnalysisMetaAccess metaAccess) {
+    public boolean updateDataDuringAnalysis() {
         boolean result = false;
         List<AnalysisMethod> aMethods = new ArrayList<>();
         aMethods.addAll(methods.keySet());
@@ -365,22 +398,45 @@ public class GraalObjectReplacer implements Function<Object, Object> {
                 implementations[idx++] = sImpl;
             }
             if (sMethod.setImplementations(implementations)) {
+                aUniverse.getHeapScanner().rescanField(sMethod, substrateMethodImplementationsField);
                 result = true;
             }
         }
 
         for (Map.Entry<AnalysisMethod, SubstrateMethod> entry : methods.entrySet()) {
-            if (entry.getValue().setAnnotationsEncoding(Inflation.encodeAnnotations(metaAccess, entry.getKey().getAnnotations(), entry.getValue().getAnnotationsEncoding()))) {
+            AnalysisMethod aMethod = entry.getKey();
+            SubstrateMethod sMethod = entry.getValue();
+            if (setAnnotationsEncoding(aMethod, sMethod, sMethod.getAnnotationsEncoding())) {
                 result = true;
             }
         }
         for (Map.Entry<AnalysisField, SubstrateField> entry : fields.entrySet()) {
-            if (entry.getValue().setAnnotationsEncoding(Inflation.encodeAnnotations(metaAccess, entry.getKey().getAnnotations(), entry.getValue().getAnnotationsEncoding()))) {
+            AnalysisField aField = entry.getKey();
+            SubstrateField sField = entry.getValue();
+            if (setAnnotationsEncoding(aField, sField, sField.getAnnotationsEncoding())) {
                 result = true;
             }
         }
 
         return result;
+    }
+
+    private boolean setAnnotationsEncoding(AnalysisMethod aMethod, SubstrateMethod sMethod, Object oldEncoding) {
+        Object annotationsEncoding = AnnotationsProcessor.encodeAnnotations(aMetaAccess, aMethod.getAnnotations(), aMethod.getDeclaredAnnotations(), oldEncoding);
+        if (sMethod.setAnnotationsEncoding(annotationsEncoding)) {
+            aUniverse.getHeapScanner().rescanField(sMethod, substrateMethodAnnotationsEncodingField);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean setAnnotationsEncoding(AnalysisField aField, SubstrateField sField, Object oldEncoding) {
+        Object annotationsEncoding = AnnotationsProcessor.encodeAnnotations(aMetaAccess, aField.getAnnotations(), aField.getDeclaredAnnotations(), oldEncoding);
+        if (sField.setAnnotationsEncoding(annotationsEncoding)) {
+            aUniverse.getHeapScanner().rescanField(sField, substrateFieldAnnotationsEncodingField);
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -389,7 +445,7 @@ public class GraalObjectReplacer implements Function<Object, Object> {
      * universe.
      */
     @SuppressWarnings("try")
-    public void updateSubstrateDataAfterCompilation(HostedUniverse hUniverse) {
+    public void updateSubstrateDataAfterCompilation(HostedUniverse hUniverse, ConstantFieldProvider constantFieldProvider) {
 
         for (Map.Entry<AnalysisType, SubstrateType> entry : types.entrySet()) {
             AnalysisType aType = entry.getKey();
@@ -400,11 +456,10 @@ public class GraalObjectReplacer implements Function<Object, Object> {
             }
             HostedType hType = hUniverse.lookup(aType);
 
-            DynamicHub uniqueImplementation = null;
             if (hType.getUniqueConcreteImplementation() != null) {
-                uniqueImplementation = hType.getUniqueConcreteImplementation().getHub();
+                sType.setTypeCheckData(hType.getUniqueConcreteImplementation().getHub());
             }
-            sType.setTypeCheckData(hType.getInstanceOfFromTypeID(), hType.getInstanceOfNumTypeIDs(), uniqueImplementation);
+
             if (sType.getInstanceFieldCount() > 1) {
                 /*
                  * What we do here is just a reordering of the instance fields array. The fields
@@ -422,7 +477,8 @@ public class GraalObjectReplacer implements Function<Object, Object> {
             SubstrateField sField = entry.getValue();
             HostedField hField = hUniverse.lookup(aField);
 
-            sField.setSubstrateData(hField.getLocation(), hField.isAccessed(), hField.isWritten(), hField.getConstantValue());
+            JavaConstant constantValue = hField.isStatic() && ((HostedConstantFieldProvider) constantFieldProvider).isFinalField(hField, null) ? hField.readValue(null) : null;
+            sField.setSubstrateData(hField.getLocation(), hField.isAccessed(), hField.isWritten(), constantValue);
         }
     }
 

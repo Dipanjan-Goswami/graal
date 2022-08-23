@@ -24,25 +24,17 @@
  */
 package com.oracle.svm.core.heap;
 
-import java.lang.management.GarbageCollectorMXBean;
-import java.util.List;
-
 public interface GC {
-
     /** Cause a collection of the Heap's choosing. */
     void collect(GCCause cause);
 
     /** Cause a full collection. */
     void collectCompletely(GCCause cause);
 
-    /*
-     * Registered collection watchers.
-     */
+    /** Human-readable name. */
+    String getName();
 
-    void registerCollectionWatcher(CollectionWatcher watcher);
-
-    void unregisterCollectionWatcher(CollectionWatcher watcher);
-
-    /** Get the list of GarbageCollectorMXBeans for this collector. */
-    List<GarbageCollectorMXBean> getGarbageCollectorMXBeanList();
+    /** Issue an optional GC request. */
+    default void maybeCauseUserRequestedCollection(@SuppressWarnings("unused") GCCause cause, @SuppressWarnings("unused") boolean fullGC) {
+    }
 }

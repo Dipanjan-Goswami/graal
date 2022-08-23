@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,7 +29,9 @@ import static jdk.vm.ci.code.ValueUtil.asRegister;
 import static jdk.vm.ci.code.ValueUtil.isIllegal;
 import static jdk.vm.ci.code.ValueUtil.isLegal;
 import static jdk.vm.ci.code.ValueUtil.isRegister;
+import static org.graalvm.compiler.lir.LIRValueUtil.asVariable;
 import static org.graalvm.compiler.lir.LIRValueUtil.isVariable;
+import static org.graalvm.compiler.lir.LIRValueUtil.stripCast;
 import static org.graalvm.compiler.lir.phases.LIRPhase.Options.LIROptimization;
 
 import java.util.ArrayList;
@@ -56,7 +58,7 @@ import org.graalvm.compiler.lir.VirtualStackSlot;
 import org.graalvm.compiler.lir.alloc.lsra.Interval.RegisterBinding;
 import org.graalvm.compiler.lir.framemap.FrameMapBuilder;
 import org.graalvm.compiler.lir.gen.LIRGenerationResult;
-import org.graalvm.compiler.lir.gen.LIRGeneratorTool.MoveFactory;
+import org.graalvm.compiler.lir.gen.MoveFactory;
 import org.graalvm.compiler.lir.phases.AllocationPhase.AllocationContext;
 import org.graalvm.compiler.options.NestedBooleanOptionKey;
 import org.graalvm.compiler.options.Option;
@@ -120,6 +122,12 @@ public class LinearScan {
 
     public static final int DOMINATOR_SPILL_MOVE_ID = -2;
     private static final int SPLIT_INTERVALS_CAPACITY_RIGHT_SHIFT = 1;
+
+    /**
+     * Maximum number of unsorted intervals we consider "almost sorted" and cheap to sort in-place
+     * with insertion sort, i.e. not worth affording a worst case O(n log(n)) sorting algorithm.
+     */
+    private static final int ALMOST_SORTED_THRESHOLD = 64;
 
     private final LIR ir;
     private final FrameMapBuilder frameMapBuilder;
@@ -211,6 +219,22 @@ public class LinearScan {
         this.detailedAsserts = Assertions.detailedAssertionsEnabled(ir.getOptions());
     }
 
+    /**
+     * Compute the variable number of the given operand.
+     *
+     * @param operand
+     * @return the variable number of the supplied operand or {@code -1} if the supplied operand
+     *         describes a register
+     */
+    public int getVariableNumber(int operand) {
+        // check if its a variable
+        if (operand >= firstVariableNumber) {
+            return operand - firstVariableNumber;
+        }
+        // register case
+        return -1;
+    }
+
     public LIRGenerationResult getLIRGenerationResult() {
         return res;
     }
@@ -259,14 +283,15 @@ public class LinearScan {
      * the {@linkplain Variable variables} and {@linkplain RegisterValue registers} being processed
      * by this allocator.
      */
-    int operandNumber(Value operand) {
+    int operandNumber(Value op) {
+        Value operand = stripCast(op);
         if (isRegister(operand)) {
             int number = asRegister(operand).number;
             assert number < firstVariableNumber;
             return number;
         }
         assert isVariable(operand) : operand;
-        return firstVariableNumber + ((Variable) operand).index;
+        return firstVariableNumber + asVariable(operand).index;
     }
 
     /**
@@ -575,15 +600,50 @@ public class LinearScan {
         return Pair.create(list1, list2);
     }
 
+    private static void sortIntervals(Interval[] intervals) {
+        Arrays.sort(intervals, (Interval a, Interval b) -> a.from() - b.from());
+    }
+
     protected void sortIntervalsBeforeAllocation() {
         int sortedLen = 0;
+        int notSorted = 0;
+        int sortedFromMax = -1;
         for (Interval interval : intervals) {
             if (interval != null) {
                 sortedLen++;
+
+                int from = interval.from();
+                if (sortedFromMax <= from) {
+                    sortedFromMax = interval.from();
+                } else {
+                    notSorted++;
+                }
             }
         }
 
         Interval[] sortedList = new Interval[sortedLen];
+        if (notSorted > 0 && notSorted <= ALMOST_SORTED_THRESHOLD) {
+            // almost sorted, use simple in-place sorting algorithm
+            sortIntervalsAlmostSorted(intervals, sortedList);
+        } else {
+            // already sorted, or a potentially high number of swaps needed
+            int sortedIdx = 0;
+            for (Interval interval : intervals) {
+                if (interval != null) {
+                    sortedList[sortedIdx++] = interval;
+                }
+            }
+            if (notSorted > 0) {
+                sortIntervals(sortedList);
+            }
+        }
+        sortedIntervals = sortedList;
+    }
+
+    /**
+     * Sorts intervals using insertion sort (O(n) best case, O(n^2) worse case complexity).
+     */
+    private static void sortIntervalsAlmostSorted(Interval[] intervals, Interval[] sortedList) {
         int sortedIdx = 0;
         int sortedFromMax = -1;
 
@@ -608,7 +668,6 @@ public class LinearScan {
                 }
             }
         }
-        sortedIntervals = sortedList;
     }
 
     void sortIntervalsAfterAllocation() {
@@ -623,7 +682,7 @@ public class LinearScan {
         int newLen = newList.length;
 
         // conventional sort-algorithm for new intervals
-        Arrays.sort(newList, (Interval a, Interval b) -> a.from() - b.from());
+        sortIntervals(newList);
 
         // merge old and new list (both already sorted) into one combined list
         Interval[] combinedList = new Interval[oldLen + newLen];

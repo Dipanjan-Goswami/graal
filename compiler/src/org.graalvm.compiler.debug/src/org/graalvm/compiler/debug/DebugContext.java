@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,7 +42,6 @@ import static org.graalvm.compiler.debug.DebugOptions.Timers;
 import static org.graalvm.compiler.debug.DebugOptions.TrackMemUse;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
@@ -59,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.function.Supplier;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
@@ -68,7 +68,9 @@ import org.graalvm.compiler.options.OptionValues;
 import org.graalvm.compiler.serviceprovider.GraalServices;
 import org.graalvm.graphio.GraphOutput;
 
+import jdk.vm.ci.common.NativeImageReinitialize;
 import jdk.vm.ci.meta.JavaMethod;
+import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
  * A facility for logging and dumping as well as a container for values associated with
@@ -82,11 +84,24 @@ import jdk.vm.ci.meta.JavaMethod;
  */
 public final class DebugContext implements AutoCloseable {
 
+    /**
+     * The format of the message printed on the console by {@link #getDumpPath} when
+     * {@link DebugOptions#ShowDumpFiles} is true. The {@code %s} placeholder is replaced with the
+     * absolute path of the dump file (i.e. the value returned by the method).
+     */
+    public static final String DUMP_FILE_MESSAGE_FORMAT = "Dumping debug output to '%s'";
+
+    /**
+     * The regular expression for matching the message derived from
+     * {@link #DUMP_FILE_MESSAGE_FORMAT}.
+     *
+     * Keep in sync with the {@code catch_files} array in {@code common.json}.
+     */
+    public static final String DUMP_FILE_MESSAGE_REGEXP = "Dumping debug output to '(?<filename>[^']+)'";
+
     public static final Description NO_DESCRIPTION = new Description(null, "NO_DESCRIPTION");
     public static final GlobalMetrics NO_GLOBAL_METRIC_VALUES = null;
     public static final Iterable<DebugHandlersFactory> NO_CONFIG_CUSTOMIZERS = Collections.emptyList();
-
-    public static final PrintStream DEFAULT_LOG_STREAM = TTY.out;
 
     /**
      * Contains the immutable parts of a debug context. This separation allows the immutable parts
@@ -100,19 +115,42 @@ public final class DebugContext implements AutoCloseable {
      */
     boolean metricsEnabled;
 
+    /**
+     * Determines whether debug context was closed.
+     */
+    boolean closed;
+
     DebugConfigImpl currentConfig;
     ScopeImpl currentScope;
     CloseableCounter currentTimer;
     CloseableCounter currentMemUseTracker;
     Scope lastClosedScope;
     Throwable lastExceptionThrown;
-    private IgvDumpChannel sharedChannel;
-    private GraphOutput<?, ?> parentOutput;
+
+    /**
+     * Lazily initialized IGV channel used for {@linkplain #buildOutput dumping a graph} associated
+     * with this context.
+     */
+    private IgvDumpChannel igvChannel;
+
+    /**
+     * An existing object for graph dumping whose IGV channel and other internals can be shared with
+     * newly {@linkplain #buildOutput created} graph dumping objects.
+     */
+    private GraphOutput<?, ?> prototypeOutput;
 
     /**
      * Stores the {@link MetricKey} values.
      */
     private long[] metricValues;
+
+    public static PrintStream getDefaultLogStream() {
+        // The PrintStream in the TTY#out field cannot be used because it does not respect current
+        // thread TTY.Filter. We have to use TTY#out(), which returns a LogStream that respects
+        // current thread TTY.filter. Truffle uses TTY.Filter to redirect Graal logging into engine
+        // logger.
+        return TTY.out().out();
+    }
 
     /**
      * Determines if dynamic scopes are enabled.
@@ -121,15 +159,19 @@ public final class DebugContext implements AutoCloseable {
         return immutable.scopesEnabled;
     }
 
+    /**
+     * Gets an object for describing a graph and sending it to IGV.
+     */
     public <G, N, M> GraphOutput<G, M> buildOutput(GraphOutput.Builder<G, N, M> builder) throws IOException {
-        if (parentOutput != null) {
-            return builder.build(parentOutput);
+        if (prototypeOutput != null) {
+            return builder.build(prototypeOutput);
         } else {
-            if (sharedChannel == null) {
-                sharedChannel = new IgvDumpChannel(() -> getDumpPath(".bgv", false), immutable.options);
+            if (igvChannel == null) {
+                igvChannel = new IgvDumpChannel(() -> getDumpPath(".bgv", false), immutable.options);
             }
-            final GraphOutput<G, M> output = builder.build(sharedChannel);
-            parentOutput = output;
+            builder.attr(GraphOutput.ATTR_VM_ID, GraalServices.getExecutionID());
+            final GraphOutput<G, M> output = builder.build(igvChannel);
+            prototypeOutput = output;
             return output;
         }
     }
@@ -315,7 +357,7 @@ public final class DebugContext implements AutoCloseable {
     /**
      * Singleton used to represent a disabled debug context.
      */
-    private static final DebugContext DISABLED = new DebugContext(NO_DESCRIPTION, NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, new Immutable(), NO_CONFIG_CUSTOMIZERS);
+    private static final DebugContext DISABLED = new DebugContext(NO_DESCRIPTION, null, NO_GLOBAL_METRIC_VALUES, getDefaultLogStream(), new Immutable(), NO_CONFIG_CUSTOMIZERS);
 
     /**
      * Create a DebugContext with debugging disabled.
@@ -324,7 +366,7 @@ public final class DebugContext implements AutoCloseable {
         if (options == null || options.getMap().isEmpty()) {
             return DISABLED;
         }
-        return new DebugContext(NO_DESCRIPTION, NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, Immutable.create(options), NO_CONFIG_CUSTOMIZERS);
+        return new DebugContext(NO_DESCRIPTION, null, NO_GLOBAL_METRIC_VALUES, getDefaultLogStream(), Immutable.create(options), NO_CONFIG_CUSTOMIZERS);
     }
 
     /**
@@ -344,7 +386,7 @@ public final class DebugContext implements AutoCloseable {
     /**
      * Describes the computation associated with a {@link DebugContext}.
      */
-    public static class Description {
+    public static final class Description {
         /**
          * The primary input to the computation.
          */
@@ -353,7 +395,7 @@ public final class DebugContext implements AutoCloseable {
         /**
          * A runtime based identifier that is most likely to be unique.
          */
-        final String identifier;
+        public final String identifier;
 
         public Description(Object compilable, String identifier) {
             this.compilable = compilable;
@@ -366,7 +408,7 @@ public final class DebugContext implements AutoCloseable {
             return identifier + ":" + compilableName;
         }
 
-        final String getLabel() {
+        String getLabel() {
             if (compilable instanceof JavaMethod) {
                 JavaMethod method = (JavaMethod) compilable;
                 return method.format("%h.%n(%p)%r");
@@ -377,6 +419,8 @@ public final class DebugContext implements AutoCloseable {
 
     private final Description description;
 
+    private final CompilationListener compilationListener;
+
     /**
      * Gets a description of the computation associated with this debug context.
      *
@@ -384,6 +428,89 @@ public final class DebugContext implements AutoCloseable {
      */
     public Description getDescription() {
         return description;
+    }
+
+    /**
+     * Determines if {@link #enterCompilerPhase} and {@link #notifyInlining} do anything.
+     *
+     * @return {@code true} if there is a listener for compiler phase and inlining events attached
+     *         to this object, {@code false} otherwise
+     */
+    public boolean hasCompilationListener() {
+        return compilationListener != null;
+    }
+
+    private int compilerPhaseNesting = 0;
+
+    /**
+     * Scope for a compiler phase event.
+     */
+    public interface CompilerPhaseScope extends AutoCloseable {
+        /**
+         * Notifies the listener that the phase has ended.
+         */
+        @Override
+        void close();
+    }
+
+    /**
+     * Notifies this object that the compiler is entering a phase.
+     *
+     * It is recommended to use this method in a try-with-resource statement.
+     *
+     * @param phaseName name of the phase being entered
+     * @return {@code null} if {@link #hasCompilationListener()} returns {@code false} otherwise an
+     *         object whose {@link CompilerPhaseScope#close()} method must be called when the phase
+     *         ends
+     */
+    public CompilerPhaseScope enterCompilerPhase(CharSequence phaseName) {
+        if (compilationListener != null) {
+            return enterCompilerPhase(() -> phaseName);
+        }
+        return null;
+    }
+
+    /**
+     * Notifies this object that the compiler is entering a phase.
+     *
+     * It is recommended to use this method in a try-with-resource statement.
+     *
+     * @param phaseName name of the phase being entered
+     * @return {@code null} if {@link #hasCompilationListener()} returns {@code false} otherwise an
+     *         object whose {@link CompilerPhaseScope#close()} method must be called when the phase
+     *         ends
+     */
+    public CompilerPhaseScope enterCompilerPhase(Supplier<CharSequence> phaseName) {
+        CompilationListener l = compilationListener;
+        if (l != null) {
+            CompilerPhaseScope scope = l.enterPhase(phaseName.get(), compilerPhaseNesting++);
+            return new CompilerPhaseScope() {
+
+                @Override
+                public void close() {
+                    --compilerPhaseNesting;
+                    scope.close();
+                }
+            };
+        }
+        return null;
+    }
+
+    /**
+     * Notifies this object when the compiler considers inlining {@code callee} into {@code caller}.
+     * A call to this method should be guarded with {@link #hasCompilationListener()} if
+     * {@code message} is not a string literal or pre-computed value
+     *
+     * @param caller caller method
+     * @param callee callee method considered for inlining into {@code caller}
+     * @param succeeded true if {@code callee} was inlined into {@code caller}
+     * @param message extra information about inlining decision
+     * @param bci byte code index of call site
+     */
+    public void notifyInlining(ResolvedJavaMethod caller, ResolvedJavaMethod callee, boolean succeeded, CharSequence message, int bci) {
+        if (compilationListener != null) {
+            compilationListener.notifyInlining(caller, callee, succeeded, message, bci);
+        }
     }
 
     /**
@@ -396,43 +523,107 @@ public final class DebugContext implements AutoCloseable {
     }
 
     /**
-     * Creates a {@link DebugContext} based on a given set of option values and {@code factory}.
+     * Object used to create a {@link DebugContext}.
      */
-    public static DebugContext create(OptionValues options, DebugHandlersFactory factory) {
-        return new DebugContext(NO_DESCRIPTION, NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, Immutable.create(options), Collections.singletonList(factory));
+    public static class Builder {
+        private final OptionValues options;
+        private Description description = NO_DESCRIPTION;
+        private CompilationListener compilationListener;
+        private GlobalMetrics globalMetrics = NO_GLOBAL_METRIC_VALUES;
+        private PrintStream logStream = getDefaultLogStream();
+        private final Iterable<DebugHandlersFactory> factories;
+        private boolean disabled = false;
+
+        /**
+         * Builder for a {@link DebugContext} based on {@code options} and
+         * {@link DebugHandlersFactory#LOADER}.
+         */
+        public Builder(OptionValues options) {
+            this.options = options;
+            this.factories = DebugHandlersFactory.LOADER;
+        }
+
+        /**
+         * Builder for a {@link DebugContext} based on {@code options} and {@code factories}. The
+         * {@link DebugHandlersFactory#LOADER} value can be used for the latter.
+         */
+        public Builder(OptionValues options, Iterable<DebugHandlersFactory> factories) {
+            this.options = options;
+            this.factories = factories;
+        }
+
+        /**
+         * Builder for a {@link DebugContext} based {@code options} and {@code factory}. The latter
+         * can be null in which case {@link DebugContext#NO_CONFIG_CUSTOMIZERS} is used.
+         */
+        public Builder(OptionValues options, DebugHandlersFactory factory) {
+            this.options = options;
+            this.factories = factory == null ? NO_CONFIG_CUSTOMIZERS : Collections.singletonList(factory);
+        }
+
+        /**
+         * Sets the description for the debug context. The default is for a context to have no
+         * description.
+         */
+        public Builder description(Description desc) {
+            this.description = desc;
+            return this;
+        }
+
+        /**
+         * Sets the compilation listener for the debug context. The default is for a context to have
+         * no compilation listener.
+         */
+        public Builder compilationListener(CompilationListener listener) {
+            this.compilationListener = listener;
+            return this;
+        }
+
+        public Builder globalMetrics(GlobalMetrics metrics) {
+            this.globalMetrics = metrics;
+            return this;
+        }
+
+        public Builder logStream(PrintStream stream) {
+            this.logStream = stream;
+            return this;
+        }
+
+        public Builder disabled(boolean disable) {
+            this.disabled = disable;
+            return this;
+        }
+
+        public DebugContext build() {
+            return new DebugContext(description,
+                            compilationListener,
+                            globalMetrics,
+                            logStream,
+                            Immutable.create(options),
+                            factories,
+                            disabled);
+        }
     }
 
-    /**
-     * Creates a {@link DebugContext} based on a given set of option values and {@code factories}.
-     * The {@link DebugHandlersFactory#LOADER} can be used for the latter.
-     */
-    public static DebugContext create(OptionValues options, Iterable<DebugHandlersFactory> factories) {
-        return new DebugContext(NO_DESCRIPTION, NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, Immutable.create(options), factories);
+    private DebugContext(Description description,
+                    CompilationListener compilationListener,
+                    GlobalMetrics globalMetrics,
+                    PrintStream logStream,
+                    Immutable immutable,
+                    Iterable<DebugHandlersFactory> factories) {
+        this(description, compilationListener, globalMetrics, logStream, immutable, factories, false);
     }
 
-    public static DebugContext create(OptionValues options, PrintStream logStream, DebugHandlersFactory factory) {
-        return new DebugContext(NO_DESCRIPTION, NO_GLOBAL_METRIC_VALUES, logStream, Immutable.create(options), Collections.singletonList(factory));
-    }
-
-    /**
-     * Creates a {@link DebugContext} based on a given set of option values and {@code factories}.
-     * The {@link DebugHandlersFactory#LOADER} can be used for the latter.
-     */
-    public static DebugContext create(OptionValues options, Description description, Iterable<DebugHandlersFactory> factories) {
-        return new DebugContext(description, NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, Immutable.create(options), factories);
-    }
-
-    /**
-     * Creates a {@link DebugContext}.
-     */
-    public static DebugContext create(OptionValues options, Description description, GlobalMetrics globalMetrics, PrintStream logStream, Iterable<DebugHandlersFactory> factories) {
-        return new DebugContext(description, globalMetrics, logStream, Immutable.create(options), factories);
-    }
-
-    private DebugContext(Description description, GlobalMetrics globalMetrics, PrintStream logStream, Immutable immutable, Iterable<DebugHandlersFactory> factories) {
+    private DebugContext(Description description,
+                    CompilationListener compilationListener,
+                    GlobalMetrics globalMetrics,
+                    PrintStream logStream,
+                    Immutable immutable,
+                    Iterable<DebugHandlersFactory> factories, boolean disableConfig) {
         this.immutable = immutable;
         this.description = description;
         this.globalMetrics = globalMetrics;
+        this.compilationListener = compilationListener;
         if (immutable.scopesEnabled) {
             OptionValues options = immutable.options;
             List<DebugDumpHandler> dumpHandlers = new ArrayList<>();
@@ -447,7 +638,11 @@ public final class DebugContext implements AutoCloseable {
                     }
                 }
             }
-            currentConfig = new DebugConfigImpl(options, logStream, dumpHandlers, verifyHandlers);
+            if (disableConfig) {
+                currentConfig = new DebugConfigImpl(options, null, null, null, null, null, null, null, logStream, dumpHandlers, verifyHandlers);
+            } else {
+                currentConfig = new DebugConfigImpl(options, logStream, dumpHandlers, verifyHandlers);
+            }
             currentScope = new ScopeImpl(this, Thread.currentThread(), DisableIntercept.getValue(options));
             currentScope.updateFlags(currentConfig);
             metricsEnabled = true;
@@ -456,13 +651,13 @@ public final class DebugContext implements AutoCloseable {
         }
     }
 
-    public Path getDumpPath(String extension, boolean createMissingDirectory) {
+    public String getDumpPath(String extension, boolean createMissingDirectory) {
         try {
             String id = description == null ? null : description.identifier;
             String label = description == null ? null : description.getLabel();
-            Path result = PathUtilities.createUnique(immutable.options, DumpPath, id, label, extension, createMissingDirectory);
+            String result = PathUtilities.createUnique(immutable.options, DumpPath, id, label, extension, createMissingDirectory);
             if (ShowDumpFiles.getValue(immutable.options)) {
-                TTY.println("Dumping debug output to %s", result.toAbsolutePath().toString());
+                TTY.println(DUMP_FILE_MESSAGE_FORMAT, result);
             }
             return result;
         } catch (IOException ex) {
@@ -589,6 +784,14 @@ public final class DebugContext implements AutoCloseable {
     }
 
     /**
+     * Check if the current method matches the {@link DebugOptions#MethodFilter method filter} debug
+     * option.
+     */
+    public boolean methodFilterMatchesCurrentMethod() {
+        return currentConfig != null && currentConfig.methodFilterMatchesCurrentMethod(currentScope);
+    }
+
+    /**
      * Gets a string composed of the names in the current nesting of debug
      * {@linkplain #scope(Object) scopes} separated by {@code '.'}.
      */
@@ -653,7 +856,11 @@ public final class DebugContext implements AutoCloseable {
         }
     }
 
-    private final Invariants invariants = Assertions.assertionsEnabled() ? new Invariants() : null;
+    /**
+     * Arbitrary threads cannot be in the image so null out {@code DebugContext.invariants} which
+     * holds onto a thread and is only used for assertions.
+     */
+    @NativeImageReinitialize private final Invariants invariants = Assertions.assertionsEnabled() ? new Invariants() : null;
 
     static StackTraceElement[] getStackTrace(Thread thread) {
         return thread.getStackTrace();
@@ -810,7 +1017,7 @@ public final class DebugContext implements AutoCloseable {
         if (immutable.scopesEnabled) {
             if (currentScope == null) {
                 // In an active DisabledScope
-                return true;
+                return !closed;
             }
             return !currentScope.isTopLevel();
         } else {
@@ -1189,7 +1396,7 @@ public final class DebugContext implements AutoCloseable {
             closeAfterDump = true;
         }
         for (DebugDumpHandler dumpHandler : dumpHandlers) {
-            dumpHandler.dump(this, object, format, args);
+            dumpHandler.dump(object, this, true, format, args);
             if (closeAfterDump) {
                 dumpHandler.close();
             }
@@ -1217,6 +1424,30 @@ public final class DebugContext implements AutoCloseable {
     public void dump(int dumpLevel, Object object, String format, Object arg1, Object arg2, Object arg3) {
         if (currentScope != null && currentScope.isDumpEnabled(dumpLevel)) {
             currentScope.dump(dumpLevel, object, format, arg1, arg2, arg3);
+        }
+    }
+
+    public void dump(int dumpLevel, Object object, String format, Object arg1, Object arg2, Object arg3, Object arg4) {
+        if (currentScope != null && currentScope.isDumpEnabled(dumpLevel)) {
+            currentScope.dump(dumpLevel, object, format, arg1, arg2, arg3, arg4);
+        }
+    }
+
+    public void dump(int dumpLevel, Object object, String format, Object arg1, Object arg2, Object arg3, Object arg4, Object arg5) {
+        if (currentScope != null && currentScope.isDumpEnabled(dumpLevel)) {
+            currentScope.dump(dumpLevel, object, format, arg1, arg2, arg3, arg4, arg5);
+        }
+    }
+
+    public void dump(int dumpLevel, Object object, String format, Object arg1, Object arg2, Object arg3, Object arg4, Object arg5, Object arg6) {
+        if (currentScope != null && currentScope.isDumpEnabled(dumpLevel)) {
+            currentScope.dump(dumpLevel, object, format, arg1, arg2, arg3, arg4, arg5, arg6);
+        }
+    }
+
+    public void dump(int dumpLevel, Object object, String format, Object arg1, Object arg2, Object arg3, Object arg4, Object arg5, Object arg6, Object arg7) {
+        if (currentScope != null && currentScope.isDumpEnabled(dumpLevel)) {
+            currentScope.dump(dumpLevel, object, format, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
         }
     }
 
@@ -1866,7 +2097,7 @@ public final class DebugContext implements AutoCloseable {
      * There are paths where construction of formatted class names are common and the code below is
      * surprisingly expensive, so compute it once and cache it.
      */
-    private static final ClassValue<String> formattedClassName = new ClassValue<String>() {
+    private static final ClassValue<String> formattedClassName = new ClassValue<>() {
         @Override
         protected String computeValue(Class<?> c) {
             String baseName = getBaseName(c);
@@ -2000,13 +2231,19 @@ public final class DebugContext implements AutoCloseable {
             globalMetrics.add(this);
         }
         metricValues = null;
-        if (sharedChannel != null) {
+        if (igvChannel != null) {
             try {
-                sharedChannel.realClose();
+                igvChannel.realClose();
+                igvChannel = null;
             } catch (IOException ex) {
                 // ignore.
             }
         }
+        prototypeOutput = null;
+        lastClosedScope = null;
+        currentScope = null;
+        currentConfig = null;
+        closed = true;
     }
 
     public void closeDumpHandlers(boolean ignoreErrors) {
@@ -2050,12 +2287,14 @@ public final class DebugContext implements AutoCloseable {
             synchronized (PRINT_METRICS_LOCK) {
                 if (!metricsFileDeleteCheckPerformed) {
                     metricsFileDeleteCheckPerformed = true;
-                    File file = new File(metricsFile);
-                    if (file.exists()) {
+                    if (PathUtilities.exists(metricsFile)) {
                         // This can return false in case something like /dev/stdout
                         // is specified. If the file is unwriteable, the file open
                         // below will fail.
-                        file.delete();
+                        try {
+                            PathUtilities.deleteFile(metricsFile);
+                        } catch (IOException e) {
+                        }
                     }
                 }
                 if (compilations == null) {

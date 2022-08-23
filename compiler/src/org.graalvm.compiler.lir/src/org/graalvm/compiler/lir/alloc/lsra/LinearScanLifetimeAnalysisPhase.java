@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@ import static jdk.vm.ci.code.ValueUtil.asStackSlot;
 import static jdk.vm.ci.code.ValueUtil.isRegister;
 import static jdk.vm.ci.code.ValueUtil.isStackSlot;
 import static org.graalvm.compiler.lir.LIRValueUtil.asVariable;
+import static org.graalvm.compiler.lir.LIRValueUtil.isCast;
 import static org.graalvm.compiler.lir.LIRValueUtil.isVariable;
 import static org.graalvm.compiler.lir.debug.LIRGenerationDebugContext.getSourceForOperandFromDebugContext;
 
@@ -41,7 +42,6 @@ import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Equivalence;
 import org.graalvm.compiler.core.common.LIRKind;
 import org.graalvm.compiler.core.common.PermanentBailoutException;
-import org.graalvm.compiler.core.common.alloc.ComputeBlockOrder;
 import org.graalvm.compiler.core.common.cfg.AbstractBlockBase;
 import org.graalvm.compiler.core.common.util.BitMap2D;
 import org.graalvm.compiler.debug.Assertions;
@@ -61,6 +61,7 @@ import org.graalvm.compiler.lir.alloc.lsra.Interval.SpillState;
 import org.graalvm.compiler.lir.alloc.lsra.LinearScan.BlockData;
 import org.graalvm.compiler.lir.gen.LIRGenerationResult;
 import org.graalvm.compiler.lir.phases.AllocationPhase.AllocationContext;
+import org.graalvm.compiler.lir.util.IndexedValueMap;
 
 import jdk.vm.ci.code.Register;
 import jdk.vm.ci.code.RegisterArray;
@@ -68,10 +69,8 @@ import jdk.vm.ci.code.StackSlot;
 import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.meta.AllocatableValue;
 import jdk.vm.ci.meta.Constant;
-import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.Value;
 import jdk.vm.ci.meta.ValueKind;
-import org.graalvm.compiler.lir.util.IndexedValueMap;
 
 public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
 
@@ -105,8 +104,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
     }
 
     /**
-     * Numbers all instructions in all blocks. The numbering follows the
-     * {@linkplain ComputeBlockOrder linear scan order}.
+     * Numbers all instructions in all blocks.
      */
     protected void numberInstructions() {
 
@@ -160,8 +158,17 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
     @SuppressWarnings("try")
     void computeLocalLiveSets() {
         int liveSize = allocator.liveSetSize();
-
-        intervalInLoop = new BitMap2D(allocator.operandSize(), allocator.numLoops());
+        int variables = allocator.operandSize();
+        int loops = allocator.numLoops();
+        long nBits = (long) variables * loops;
+        try {
+            if (nBits > Integer.MAX_VALUE) {
+                throw new OutOfMemoryError();
+            }
+            intervalInLoop = new BitMap2D(variables, loops);
+        } catch (OutOfMemoryError e) {
+            throw new PermanentBailoutException(e, "Cannot handle %d variables in %d loops", variables, loops);
+        }
 
         try {
             final BitSet liveGenScratch = new BitSet(liveSize);
@@ -195,7 +202,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
                         }
                     };
                     ValueConsumer stateConsumer = (operand, mode, flags) -> {
-                        if (LinearScan.isVariableOrRegister(operand)) {
+                        if (LinearScan.isVariableOrRegister(operand) && allocator.isProcessed(operand)) {
                             int operandNum = getOperandNumber(operand);
                             if (!liveKillScratch.get(operandNum)) {
                                 liveGenScratch.set(operandNum);
@@ -390,8 +397,22 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
                 if (Assertions.detailedAssertionsEnabled(allocator.getOptions())) {
                     reportFailure(numBlocks);
                 }
+                BitSet bs = allocator.getBlockData(startBlock).liveIn;
+                StringBuilder sb = new StringBuilder();
+                for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetBit(i + 1)) {
+                    int variableNumber = allocator.getVariableNumber(i);
+                    if (variableNumber >= 0) {
+                        sb.append("v").append(variableNumber);
+                    } else {
+                        sb.append(allocator.getRegisters().get(i));
+                    }
+                    sb.append(System.lineSeparator());
+                    if (i == Integer.MAX_VALUE) {
+                        break;
+                    }
+                }
                 // bailout if this occurs in product mode.
-                throw new GraalError("liveIn set of first block must be empty: " + allocator.getBlockData(startBlock).liveIn);
+                throw new GraalError("liveIn set of first block must be empty: " + allocator.getBlockData(startBlock).liveIn + " Live operands:" + sb.toString());
             }
         }
     }
@@ -515,7 +536,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
         }
 
         Interval interval = allocator.getOrCreateInterval(operand);
-        if (!kind.equals(LIRKind.Illegal)) {
+        if (!kind.equals(LIRKind.Illegal) && !isCast(operand)) {
             interval.setKind(kind);
         }
 
@@ -535,7 +556,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
         }
 
         Interval interval = allocator.getOrCreateInterval(operand);
-        if (!kind.equals(LIRKind.Illegal)) {
+        if (!kind.equals(LIRKind.Illegal) && !isCast(operand)) {
             interval.setKind(kind);
         }
 
@@ -882,8 +903,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
      * @param operand The destination operand of the instruction
      * @param interval The interval for this defined value.
      * @return Returns the value which is moved to the instruction and which can be reused at all
-     *         reload-locations in case the interval of this instruction is spilled. Currently this
-     *         can only be a {@link JavaConstant}.
+     *         reload-locations in case the interval of this instruction is spilled.
      */
     protected Constant getMaterializedValue(LIRInstruction op, Value operand, Interval interval) {
         if (LoadConstantOp.isLoadConstantOp(op)) {
@@ -905,12 +925,7 @@ public class LinearScanLifetimeAnalysisPhase extends LinearScanAllocationPhase {
                     }
                 }
             }
-            Constant constant = move.getConstant();
-            if (!(constant instanceof JavaConstant)) {
-                // Other kinds of constants might not be supported by the generic move operation.
-                return null;
-            }
-            return constant;
+            return move.getConstant();
         }
         return null;
     }

@@ -24,32 +24,28 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
+import com.oracle.graal.pointsto.typestate.TypeState;
 
 public final class AllInstantiatedTypeFlow extends TypeFlow<AnalysisType> {
 
-    public AllInstantiatedTypeFlow(AnalysisType declaredType) {
-        super(declaredType, declaredType);
+    public AllInstantiatedTypeFlow(AnalysisType declaredType, boolean canBeNull) {
+        super(declaredType, declaredType, canBeNull);
+    }
+
+    public AllInstantiatedTypeFlow(AnalysisType declaredType, TypeState state) {
+        super(declaredType, declaredType, state);
     }
 
     @Override
-    public TypeFlow<AnalysisType> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<AnalysisType> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return this;
     }
 
     @Override
-    public void update(BigBang bb) {
-        assert checkUsages();
-        super.update(bb);
-    }
-
-    private boolean checkUsages() {
-        for (TypeFlow<?> use : getUses()) {
-            assert !use.isClone() || use instanceof ProxyTypeFlow || use instanceof SourceTypeFlowBase || use instanceof DynamicNewInstanceTypeFlow ||
-                            use instanceof FilterTypeFlow || use instanceof ActualReturnTypeFlow : use.getClass();
-        }
-        return true;
+    public boolean canSaturate() {
+        return false;
     }
 
     @Override

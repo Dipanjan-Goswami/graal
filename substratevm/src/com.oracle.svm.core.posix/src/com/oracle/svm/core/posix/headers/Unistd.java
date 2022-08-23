@@ -62,8 +62,14 @@ public class Unistd {
     @CFunction
     public static native int execv(CCharPointer path, CCharPointerPointer argv);
 
+    @CFunction
+    public static native int execve(CCharPointer path, CCharPointerPointer argv, CCharPointerPointer envp);
+
     @CConstant
     public static native int _SC_CLK_TCK();
+
+    @CConstant
+    public static native int _SC_OPEN_MAX();
 
     @CConstant
     public static native int _SC_PAGESIZE();
@@ -109,12 +115,6 @@ public class Unistd {
     @CFunction
     public static native int getpagesize();
 
-    @CFunction
-    public static native int getdtablesize();
-
-    @CFunction
-    public static native int sleep(int seconds);
-
     public static class NoTransitions {
         @CFunction(transition = Transition.NO_TRANSITION)
         public static native int close(int fd);
@@ -123,6 +123,12 @@ public class Unistd {
         public static native SignedWord read(int fd, PointerBase buf, UnsignedWord nbytes);
 
         @CFunction(transition = Transition.NO_TRANSITION)
+        public static native SignedWord write(int fd, PointerBase buf, UnsignedWord n);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
         public static native long sysconf(int name);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native SignedWord lseek(int fd, SignedWord offset, int whence);
     }
 }

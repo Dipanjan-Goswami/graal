@@ -24,8 +24,6 @@
  */
 package com.oracle.svm.core.c.function;
 
-// Checkstyle: stop
-
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -33,11 +31,9 @@ import java.lang.annotation.Target;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 
-import org.graalvm.util.DirectAnnotationAccess;
+import com.oracle.svm.util.DirectAnnotationAccess;
 
 import com.oracle.svm.core.util.VMError;
-
-// Checkstyle: resume
 
 /**
  * Errors returned by {@link CEntryPointActions} and {@link CEntryPointNativeFunctions} and their
@@ -72,14 +68,17 @@ public final class CEntryPointErrors {
     @Description("Locating the image file failed.") //
     public static final int LOCATE_IMAGE_FAILED = 6;
 
-    @Description("Locating the image file failed.") //
-    public static final int LOCATE_IMAGE_IDENTITY_MISMATCH = 601;
-
     @Description("Opening the located image file failed.") //
     public static final int OPEN_IMAGE_FAILED = 7;
 
     @Description("Mapping the heap from the image file into memory failed.") //
     public static final int MAP_HEAP_FAILED = 8;
+
+    @Description("Reserving address space for the new isolate failed.") //
+    public static final int RESERVE_ADDRESS_SPACE_FAILED = 801;
+
+    @Description("The image heap does not fit in the available address space.") //
+    public static final int INSUFFICIENT_ADDRESS_SPACE = 802;
 
     @Description("Setting the protection of the heap memory failed.") //
     public static final int PROTECT_HEAP_FAILED = 9;
@@ -96,7 +95,37 @@ public final class CEntryPointErrors {
     @Description("Initialization the isolate failed.") //
     public static final int ISOLATE_INITIALIZATION_FAILED = 13;
 
-    static String getDescription(int code) {
+    @Description("Opening the located auxiliary image file failed.") //
+    public static final int OPEN_AUX_IMAGE_FAILED = 14;
+
+    @Description("Reading the opened auxiliary image file failed.") //
+    public static final int READ_AUX_IMAGE_META_FAILED = 15;
+
+    @Description("Mapping the auxiliary image file into memory failed.") //
+    public static final int MAP_AUX_IMAGE_FAILED = 16;
+
+    @Description("Insufficient memory for the auxiliary image.") //
+    public static final int INSUFFICIENT_AUX_IMAGE_MEMORY = 17;
+
+    @Description("Auxiliary images are not supported on this platform or edition.") //
+    public static final int AUX_IMAGE_UNSUPPORTED = 18;
+
+    @Description("Releasing the isolate's address space failed.") //
+    public static final int FREE_ADDRESS_SPACE_FAILED = 19;
+
+    @Description("Releasing the isolate's image heap memory failed.") //
+    public static final int FREE_IMAGE_HEAP_FAILED = 20;
+
+    @Description("The auxiliary image was built from a different primary image.") //
+    public static final int AUX_IMAGE_PRIMARY_IMAGE_MISMATCH = 21;
+
+    @Description("The isolate arguments could not be parsed.") //
+    public static final int ARGUMENT_PARSING_FAILED = 22;
+
+    @Description("Current target does not support the following CPU features that are required by the image.") //
+    public static final int CPU_FEATURE_CHECK_FAILED = 23;
+
+    public static String getDescription(int code) {
         String result = null;
         if (code >= 0 && code < DESCRIPTIONS.length) {
             result = DESCRIPTIONS[code];

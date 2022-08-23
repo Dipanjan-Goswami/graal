@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -27,22 +27,34 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#ifdef _WIN32
+
+#include <Windows.h>
+int main() {
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    return 0;
+}
+
+#else
+
 #include <time.h>
 #include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-struct timeval begin, end;
+struct timeval my_begin, my_end;
 
 int main() {
-  if (gettimeofday(&begin, (struct timezone *)0)) {
-    fprintf(stderr, "can not get time\n");
-    exit(1);
-  }
-  for (volatile int i = 0; i < 10000000; i++)
-    ;
-  if (gettimeofday(&end, (struct timezone *)0)) {
-    fprintf(stderr, "can not get time\n");
-    exit(1);
-  }
+    if (gettimeofday(&my_begin, (struct timezone *) 0)) {
+        fprintf(stderr, "cannot get time\n");
+        exit(1);
+    }
+    for (volatile int i = 0; i < 10000000; i++)
+        ;
+    if (gettimeofday(&my_end, (struct timezone *) 0)) {
+        fprintf(stderr, "cannot get time\n");
+        exit(1);
+    }
 }
+#endif

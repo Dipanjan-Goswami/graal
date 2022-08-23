@@ -32,6 +32,12 @@ import org.graalvm.compiler.options.OptionKey;
 
 public class PointstoOptions {
 
+    @Option(help = "Use experimental Reachability Analysis instead of points-to.")//
+    public static final OptionKey<Boolean> UseExperimentalReachabilityAnalysis = new OptionKey<>(false);
+
+    @Option(help = "Use method summaries for Reachability Analysis.")//
+    public static final OptionKey<Boolean> UseReachabilityMethodSummaries = new OptionKey<>(false);
+
     @Option(help = "Enable hybrid context for static methods, i.e. uses invocation site as context for static methods.")//
     public static final OptionKey<Boolean> HybridStaticContext = new OptionKey<>(false);
 
@@ -89,6 +95,34 @@ public class PointstoOptions {
     @Option(help = "The maximum size of type and method profiles returned by the static analysis. -1 indicates no limitation.")//
     public static final OptionKey<Integer> AnalysisSizeCutoff = new OptionKey<>(8);
 
+    @Option(help = "The maximum number of types recorded in a type flow. -1 indicates no limitation.")//
+    public static final OptionKey<Integer> TypeFlowSaturationCutoff = new OptionKey<>(20);
+
+    @Option(help = "Enable the type flow saturation analysis performance optimization.")//
+    public static final OptionKey<Boolean> RemoveSaturatedTypeFlows = new OptionKey<>(true) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            if (newValue) {
+                /* Removing saturated type flows needs array type flows aliasing. */
+                AliasArrayTypeFlows.update(values, true);
+            }
+        }
+    };
+
+    @Option(help = "Model all array type flows using a unique elements type flow abstraction.")//
+    public static final OptionKey<Boolean> AliasArrayTypeFlows = new OptionKey<>(true) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            if (newValue) {
+                /* Aliasing array type flows implies relaxation of type flow constraints. */
+                RelaxTypeFlowStateConstraints.update(values, true);
+            }
+        }
+    };
+
+    @Option(help = "Allow a type flow state to contain types not compatible with its declared type.")//
+    public static final OptionKey<Boolean> RelaxTypeFlowStateConstraints = new OptionKey<>(true);
+
     @Option(help = "Report unresolved elements as errors.")//
     public static final OptionKey<Boolean> UnresolvedIsError = new OptionKey<>(true);
 
@@ -100,6 +134,9 @@ public class PointstoOptions {
 
     @Option(help = "Object scanning in parallel")//
     public static final OptionKey<Boolean> ScanObjectsParallel = new OptionKey<>(true);
+
+    @Option(help = "Scan all objects reachable from roots for analysis. By default false.")//
+    public static final OptionKey<Boolean> ExhaustiveHeapScan = new OptionKey<>(false);
 
     /**
      * Controls the static analysis context sensitivity. Available values:
@@ -116,7 +153,7 @@ public class PointstoOptions {
      */
     @Option(help = "Controls the static analysis context sensitivity. Available values: insens (context insensitive analysis), allocsens (context insensitive analysis, context insensitive heap, allocation site sensitive heap), " +
                     "_1obj (1 object sensitive analysis with a context insensitive heap), _2obj1h (2 object sensitive with a 1 context sensitive heap)")//
-    public static final OptionKey<String> AnalysisContextSensitivity = new OptionKey<String>("insens") {
+    public static final OptionKey<String> AnalysisContextSensitivity = new OptionKey<>("insens") {
         @Override
         protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, String oldValue, String newValue) {
             switch (newValue.toLowerCase()) {

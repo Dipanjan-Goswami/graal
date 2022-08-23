@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -44,5 +44,4 @@ public interface GetStackSpaceFactory {
     static GetStackSpaceFactory createGetUniqueStackSpaceFactory(UniquesRegion uniquesRegion) {
         return (nodeFactory, type) -> nodeFactory.createGetUniqueStackSpace(type, uniquesRegion);
     }
-
 }

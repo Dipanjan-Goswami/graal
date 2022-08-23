@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,10 +29,12 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
+import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -58,24 +60,25 @@ import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.nodes.LanguageInfo;
-
 import com.oracle.truffle.tools.chromeinspector.InspectorExecutionContext;
-import com.oracle.truffle.tools.chromeinspector.objects.Inspector;
 import com.oracle.truffle.tools.chromeinspector.client.InspectWSClient;
+import com.oracle.truffle.tools.chromeinspector.objects.Inspector;
 import com.oracle.truffle.tools.chromeinspector.server.ConnectionWatcher;
 import com.oracle.truffle.tools.chromeinspector.server.InspectServerSession;
-import com.oracle.truffle.tools.chromeinspector.server.WSInterceptorServer;
-import com.oracle.truffle.tools.chromeinspector.server.WebSocketServer;
+import com.oracle.truffle.tools.chromeinspector.server.InspectorServer;
 import com.oracle.truffle.tools.chromeinspector.server.InspectorServerConnection;
+import com.oracle.truffle.tools.chromeinspector.server.WSInterceptorServer;
 
 /**
  * Chrome inspector as an instrument.
  */
-@TruffleInstrument.Registration(id = InspectorInstrument.INSTRUMENT_ID, name = "Chrome Inspector", version = InspectorInstrument.VERSION, services = TruffleObject.class)
+@TruffleInstrument.Registration(id = InspectorInstrument.INSTRUMENT_ID, name = "Chrome Inspector", version = InspectorInstrument.VERSION, services = TruffleObject.class, website = "https://www.graalvm.org/tools/chrome-debugger/")
 public final class InspectorInstrument extends TruffleInstrument {
 
     private static final int DEFAULT_PORT = 9229;
     private static final HostAndPort DEFAULT_ADDRESS = new HostAndPort(null, DEFAULT_PORT);
+    private static final String HELP_URL = "https://www.graalvm.org/tools/chrome-debugger";
+
     private Server server;
     private ConnectionWatcher connectionWatcher;
 
@@ -148,7 +151,7 @@ public final class InspectorInstrument extends TruffleInstrument {
             }
         }
         if (jarFile != null) {
-            StringBuilder ssp = new StringBuilder("file://").append(jarFile.getAbsolutePath());
+            StringBuilder ssp = new StringBuilder("file://").append(jarFile.toPath().toUri().getPath());
             if (index < path.length()) {
                 if (path.charAt(index) != '!') {
                     ssp.append('!');
@@ -163,47 +166,51 @@ public final class InspectorInstrument extends TruffleInstrument {
         }
     }
 
-    @com.oracle.truffle.api.Option(name = "", help = "Start the Chrome inspector on [[host:]port]. (default: <loopback address>:" + DEFAULT_PORT +
-                    ")", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(name = "", help = "Start the Chrome inspector on [[host:]port].", usageSyntax = "[[<host>]:<port>]", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<HostAndPort> Inspect = new OptionKey<>(DEFAULT_ADDRESS, ADDRESS_OR_BOOLEAN);
 
-    @com.oracle.truffle.api.Option(help = "Attach to an existing endpoint instead of creating a new one. (default:false)", category = OptionCategory.INTERNAL) //
+    @com.oracle.truffle.api.Option(help = "Attach to an existing endpoint instead of creating a new one.", category = OptionCategory.INTERNAL) //
     static final OptionKey<Boolean> Attach = new OptionKey<>(false);
 
-    @com.oracle.truffle.api.Option(help = "Suspend the execution at first executed source line. (default:true)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "Suspend the execution at first executed source line (default: true).", usageSyntax = "true|false", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<Boolean> Suspend = new OptionKey<>(true);
 
-    @com.oracle.truffle.api.Option(help = "Do not execute any source code until inspector client is attached. (default:false)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "Do not execute any source code until inspector client is attached.", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<Boolean> WaitAttached = new OptionKey<>(false);
 
-    @com.oracle.truffle.api.Option(help = "Specifies list of directories or ZIP/JAR files representing source path. (default:none)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    private static final String SOURCE_PATH_USAGE = "<path>,<path>,...";
+
+    @com.oracle.truffle.api.Option(help = "Specifies list of directories or ZIP/JAR files representing source path (default: empty list).", usageSyntax = SOURCE_PATH_USAGE, category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<List<URI>> SourcePath = new OptionKey<>(Collections.emptyList(), SOURCE_PATH);
 
-    @com.oracle.truffle.api.Option(help = "Hide internal errors that can occur as a result of debugger inspection. (default:false)", category = OptionCategory.EXPERT) //
+    @com.oracle.truffle.api.Option(help = "Hide internal errors that can occur as a result of debugger inspection.", category = OptionCategory.EXPERT) //
     static final OptionKey<Boolean> HideErrors = new OptionKey<>(false);
 
-    @com.oracle.truffle.api.Option(help = "Path to the chrome inspect. (default: randomly generated)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "Path to the chrome inspect. This path should be unpredictable. Do note that any website opened in your browser that has knowledge of the URL can connect to the debugger. A predictable path can thus be " +
+                    "abused by a malicious website to execute arbitrary code on your computer, even if you are behind a firewall. (default: randomly generated)", //
+                    usageSyntax = "<path>", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<String> Path = new OptionKey<>("");
 
-    @com.oracle.truffle.api.Option(help = "Inspect internal sources. (default:false)", category = OptionCategory.INTERNAL) //
+    @com.oracle.truffle.api.Option(help = "Inspect internal sources.", category = OptionCategory.INTERNAL) //
     static final OptionKey<Boolean> Internal = new OptionKey<>(false);
 
-    @com.oracle.truffle.api.Option(help = "Inspect language initialization. (default:false)", category = OptionCategory.INTERNAL) //
+    @com.oracle.truffle.api.Option(help = "Inspect language initialization.", category = OptionCategory.INTERNAL) //
     static final OptionKey<Boolean> Initialization = new OptionKey<>(false);
 
-    @com.oracle.truffle.api.Option(help = "Use TLS/SSL. (default: false for loopback address, true otherwise)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "Use TLS/SSL. (default: false for loopback address, true otherwise)", usageSyntax = "true|false", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<Boolean> Secure = new OptionKey<>(true);
 
-    @com.oracle.truffle.api.Option(help = "File path to keystore used for secure connection. (default:javax.net.ssl.keyStore system property)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "File path to keystore used for secure connection. (default:javax.net.ssl.keyStore system property)", usageSyntax = "<path>", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<String> KeyStore = new OptionKey<>("");
 
-    @com.oracle.truffle.api.Option(help = "The keystore type. (default:javax.net.ssl.keyStoreType system property, or \\\"JKS\\\")", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "The keystore type. (default:javax.net.ssl.keyStoreType system property, or \\\"JKS\\\")", usageSyntax = "<keystoreType>", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<String> KeyStoreType = new OptionKey<>("");
 
-    @com.oracle.truffle.api.Option(help = "The keystore password. (default:javax.net.ssl.keyStorePassword system property)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "The keystore password. (default:javax.net.ssl.keyStorePassword system property)", usageSyntax = "<keystorePassword>", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<String> KeyStorePassword = new OptionKey<>("");
 
-    @com.oracle.truffle.api.Option(help = "Password for recovering keys from a keystore. (default:javax.net.ssl.keyPassword system property, or keystore password)", category = OptionCategory.USER, stability = OptionStability.STABLE) //
+    @com.oracle.truffle.api.Option(help = "Password for recovering keys from a keystore. (default:javax.net.ssl.keyPassword system property, or keystore password)", //
+                    usageSyntax = "<keystorePassword>", category = OptionCategory.USER, stability = OptionStability.STABLE) //
     static final OptionKey<String> KeyPassword = new OptionKey<>("");
 
     public static final String INSTRUMENT_ID = "inspect";
@@ -224,7 +231,7 @@ public final class InspectorInstrument extends TruffleInstrument {
             }
         }
 
-        env.registerService(new Inspector(server != null ? server.getConnection() : null, new InspectorServerConnection.Open() {
+        env.registerService(new Inspector(env, server != null ? server.getConnection() : null, new InspectorServerConnection.Open() {
             @Override
             @SuppressWarnings("all") // The parameters port and host should not be assigned
             public synchronized InspectorServerConnection open(int port, String host, boolean wait) {
@@ -272,10 +279,7 @@ public final class InspectorInstrument extends TruffleInstrument {
             connectionWatcher.waitForClose();
         }
         if (server != null) {
-            try {
-                server.close();
-            } catch (IOException ioex) {
-            }
+            server.doFinalize();
         }
     }
 
@@ -292,7 +296,7 @@ public final class InspectorInstrument extends TruffleInstrument {
             @Override
             public Iterator<OptionDescriptor> iterator() {
                 Iterator<OptionDescriptor> iterator = descriptors.iterator();
-                return new Iterator<OptionDescriptor>() {
+                return new Iterator<>() {
                     @Override
                     public boolean hasNext() {
                         return iterator.hasNext();
@@ -305,7 +309,7 @@ public final class InspectorInstrument extends TruffleInstrument {
                             String example = " Example: " + File.separator + "projects" + File.separator + "foo" + File.separator + "src" + File.pathSeparator + "sources.jar" + File.pathSeparator +
                                             "package.zip!/src";
                             descriptor = OptionDescriptor.newBuilder(SourcePath, descriptor.getName()).deprecated(descriptor.isDeprecated()).category(descriptor.getCategory()).help(
-                                            descriptor.getHelp() + example).build();
+                                            descriptor.getHelp() + example).usageSyntax(SOURCE_PATH_USAGE).build();
                         }
                         return descriptor;
                     }
@@ -374,13 +378,18 @@ public final class InspectorInstrument extends TruffleInstrument {
             }
             return new InetSocketAddress(ia, port);
         }
+
+        @Override
+        public String toString() {
+            return (host != null ? host : "<loopback address>") + ":" + port;
+        }
     }
 
     private static final class Server {
 
         private InspectorWSConnection wss;
-        private final String wsspath;
-        private final String wsURL;
+        private final Token token;
+        private final String urlContainingToken;
         private final InspectorExecutionContext executionContext;
 
         Server(final Env env, final String contextName, final HostAndPort hostAndPort, final boolean attach, final boolean debugBreak, final boolean waitAttached, final boolean hideErrors,
@@ -388,49 +397,60 @@ public final class InspectorInstrument extends TruffleInstrument {
                         final KeyStoreOptions keyStoreOptions, final List<URI> sourcePath, final ConnectionWatcher connectionWatcher) throws IOException {
             InetSocketAddress socketAddress = hostAndPort.createSocket();
             PrintWriter info = new PrintWriter(env.err(), true);
+            final String pathContainingToken;
             if (pathOrNull == null || pathOrNull.isEmpty()) {
-                wsspath = "/" + Long.toHexString(System.identityHashCode(env)) + "-" + Long.toHexString(System.nanoTime() ^ System.identityHashCode(env));
+                pathContainingToken = "/" + generateSecureToken();
             } else {
                 String head = pathOrNull.startsWith("/") ? "" : "/";
-                wsspath = head + pathOrNull;
+                pathContainingToken = head + pathOrNull;
             }
+            token = Token.createHashedTokenFromString(pathContainingToken);
             boolean secure = (!secureHasBeenSet && socketAddress.getAddress().isLoopbackAddress()) ? false : secureValue;
 
             PrintWriter err = (hideErrors) ? null : info;
             executionContext = new InspectorExecutionContext(contextName, inspectInternal, inspectInitialization, env, sourcePath, err);
             if (attach) {
-                wss = new InspectWSClient(socketAddress, wsspath, executionContext, debugBreak, secure, keyStoreOptions, connectionWatcher, info);
-                wsURL = ((InspectWSClient) wss).getURI().toString();
+                wss = new InspectWSClient(socketAddress, pathContainingToken, executionContext, debugBreak, secure, keyStoreOptions, connectionWatcher, info);
+                urlContainingToken = ((InspectWSClient) wss).getURI().toString();
             } else {
-                URI wsuri;
+                final URI wsuri;
                 try {
-                    wsuri = new URI(secure ? "wss" : "ws", null, socketAddress.getAddress().getHostAddress(), socketAddress.getPort(), wsspath, null, null);
+                    wsuri = new URI(secure ? "wss" : "ws", null, socketAddress.getAddress().getHostAddress(), socketAddress.getPort(), pathContainingToken, null, null);
                 } catch (URISyntaxException ex) {
                     throw new IOException(ex);
                 }
                 InspectServerSession iss = InspectServerSession.create(executionContext, debugBreak, connectionWatcher);
-                WSInterceptorServer interceptor = new WSInterceptorServer(wsuri, iss, connectionWatcher);
-                MessageEndpoint serverEndpoint;
+                boolean disposeIss = true;
                 try {
-                    serverEndpoint = env.startServer(wsuri, iss);
-                } catch (MessageTransport.VetoException vex) {
-                    throw new IOException(vex.getLocalizedMessage());
-                }
-                if (serverEndpoint == null) {
-                    interceptor.close(wsspath);
-                    wss = WebSocketServer.get(socketAddress, wsspath, executionContext, debugBreak, secure, keyStoreOptions, connectionWatcher, iss);
-                    String wsStr = buildAddress(socketAddress.getAddress().getHostAddress(), wss.getPort(), wsspath, secure);
-                    String address = DEV_TOOLS_PREFIX + wsStr;
-                    wsURL = wsStr.replace("=", "://");
-                    info.println("Debugger listening on port " + wss.getPort() + ".");
-                    info.println("To start debugging, open the following URL in Chrome:");
-                    info.println("    " + address);
-                    info.flush();
-                } else {
-                    restartServerEndpointOnClose(hostAndPort, env, wsuri, executionContext, connectionWatcher, iss, interceptor);
-                    interceptor.opened(serverEndpoint);
-                    wss = interceptor;
-                    wsURL = wsuri.toString();
+                    WSInterceptorServer interceptor = new WSInterceptorServer(socketAddress.getPort(), token, iss, connectionWatcher);
+                    MessageEndpoint serverEndpoint;
+                    try {
+                        serverEndpoint = env.startServer(wsuri, iss);
+                    } catch (MessageTransport.VetoException vex) {
+                        throw new IOException(vex.getLocalizedMessage());
+                    }
+                    if (serverEndpoint == null) {
+                        InspectorServer server;
+                        interceptor.resetSessionEndpoint(); // A new endpoint is going to be opened
+                        server = InspectorServer.get(socketAddress, token, pathContainingToken, executionContext, debugBreak, secure, keyStoreOptions, connectionWatcher, iss);
+                        String wsAddress = server.getWSAddress(token);
+                        wss = server;
+                        urlContainingToken = wsAddress;
+                        info.println("Debugger listening on " + wsAddress);
+                        info.println("For help, see: " + HELP_URL);
+                        info.println("E.g. in Chrome open: " + server.getDevtoolsAddress(token));
+                        info.flush();
+                    } else {
+                        restartServerEndpointOnClose(hostAndPort, env, wsuri, executionContext, connectionWatcher, iss, interceptor);
+                        interceptor.opened(serverEndpoint);
+                        wss = interceptor;
+                        urlContainingToken = wsuri.toString();
+                    }
+                    disposeIss = false;
+                } finally {
+                    if (disposeIss) {
+                        iss.dispose();
+                    }
                 }
             }
             if (debugBreak || waitAttached) {
@@ -487,13 +507,19 @@ public final class InspectorInstrument extends TruffleInstrument {
             }
         }
 
-        private static final String DEV_TOOLS_PREFIX = "chrome-devtools://devtools/bundled/js_app.html?";
-        private static final String WS_PREFIX = "ws=";
-        private static final String WS_PREFIX_SECURE = "wss=";
+        private static String generateSecureToken() {
+            final byte[] tokenRaw = generateSecureRawToken();
+            // base64url (see https://tools.ietf.org/html/rfc4648 ) without padding
+            // For a fixed-length token, there is no ambiguity in paddingless
+            return Base64.getEncoder().withoutPadding().encodeToString(tokenRaw).replace('/', '_').replace('+', '-');
+        }
 
-        private static String buildAddress(String hostAddress, int port, String path, boolean secure) {
-            String prefix = secure ? WS_PREFIX_SECURE : WS_PREFIX;
-            return prefix + hostAddress + ":" + port + path;
+        @SuppressFBWarnings(value = "DMI_RANDOM_USED_ONLY_ONCE", justification = "avoiding a static field which would cache the random seed in a native image")
+        private static byte[] generateSecureRawToken() {
+            // 256 bits of entropy ought to be enough for everybody
+            final byte[] tokenRaw = new byte[32];
+            new SecureRandom().nextBytes(tokenRaw);
+            return tokenRaw;
         }
 
         private static void restartServerEndpointOnClose(HostAndPort hostAndPort, Env env, URI wsuri, InspectorExecutionContext executionContext, ConnectionWatcher connectionWatcher,
@@ -506,6 +532,7 @@ public final class InspectorInstrument extends TruffleInstrument {
                 try {
                     serverEndpoint = env.startServer(wsuri, newSession);
                 } catch (MessageTransport.VetoException vex) {
+                    newSession.dispose();
                     return;
                 } catch (IOException ioex) {
                     throw new InspectorIOException(hostAndPort.getHostPort(), ioex);
@@ -517,7 +544,19 @@ public final class InspectorInstrument extends TruffleInstrument {
 
         public void close() throws IOException {
             if (wss != null) {
-                wss.close(wsspath);
+                wss.close(token);
+                wss = null;
+            }
+        }
+
+        void doFinalize() {
+            if (wss != null) {
+                wss.closing(token);
+                try {
+                    wss.close(token);
+                } catch (IOException ioex) {
+                }
+                wss.dispose();
                 wss = null;
             }
         }
@@ -526,13 +565,8 @@ public final class InspectorInstrument extends TruffleInstrument {
             return new InspectorServerConnection() {
 
                 @Override
-                public String getWSPath() {
-                    return wsspath;
-                }
-
-                @Override
                 public String getURL() {
-                    return wsURL;
+                    return urlContainingToken;
                 }
 
                 @Override
@@ -548,7 +582,7 @@ public final class InspectorInstrument extends TruffleInstrument {
                 @Override
                 public void consoleAPICall(String type, Object text) {
                     if (wss != null) {
-                        wss.consoleAPICall(getWSPath(), type, text);
+                        wss.consoleAPICall(token, type, text);
                     }
                 }
             };

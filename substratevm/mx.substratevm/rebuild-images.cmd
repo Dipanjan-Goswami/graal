@@ -107,7 +107,7 @@ for %%f in (%to_build%) do (
   ) else if "%%f"=="libpolyglot" (
     call :libpolyglot cmd_line
   ) else if "%%f"=="js" (
-    call :launcher js cmd_line
+    call :library jsvm cmd_line
   ) else if "%%f"=="llvm" (
     call :launcher lli cmd_line
   ) else if "%%f"=="python" (
@@ -118,9 +118,12 @@ for %%f in (%to_build%) do (
     echo Should not reach here
     exit /b 1
   )
+  if defined custom_args (
+    set "cmd_line=!cmd_line! !custom_args!"
+  )
   echo Building %%f...
   if defined verbose echo !cmd_line!
-  !cmd_line!
+  call !cmd_line!
 )
 
 goto :eof
@@ -138,9 +141,6 @@ goto :eof
 
 :common cmd_line
   setlocal
-  if defined custom_args (
-    set "cmd_line=%cmd_line% %custom_args%"
-  )
   for /f "tokens=* usebackq" %%l in (`"%graalvm_home%\bin\native-image" --help-extra`) do (
     set "line=%%l"
     if not "!line:--no-server=!"=="!line!" (
@@ -170,5 +170,12 @@ goto :eof
   if "%1"=="polyglot" (
     call :polyglot_common cmd_line
   )
+  endlocal & set "%2=%cmd_line%"
+  exit /b 0
+
+:library cmd cmd_line
+  call :common cmd_line
+  setlocal
+  set "cmd_line=%cmd_line% --macro:%1-library"
   endlocal & set "%2=%cmd_line%"
   exit /b 0

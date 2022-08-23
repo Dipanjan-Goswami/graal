@@ -28,6 +28,7 @@ import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 import static com.oracle.svm.core.util.VMError.unimplemented;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Type;
 
@@ -37,7 +38,8 @@ import org.graalvm.compiler.nodes.StructuredGraph;
 import com.oracle.graal.pointsto.infrastructure.GraphProvider;
 import com.oracle.graal.pointsto.infrastructure.OriginalMethodProvider;
 import com.oracle.graal.pointsto.meta.HostedProviders;
-import com.oracle.svm.hosted.c.GraalAccess;
+import com.oracle.graal.pointsto.util.GraalAccess;
+import com.oracle.svm.util.AnnotationWrapper;
 
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.ConstantPool;
@@ -51,21 +53,24 @@ import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 import jdk.vm.ci.meta.SpeculationLog;
 
-public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider, OriginalMethodProvider {
+public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider, OriginalMethodProvider, AnnotationWrapper {
 
     private final ResolvedJavaMethod original;
     private final ResolvedJavaMethod annotated;
     private final LocalVariableTable localVariableTable;
     private final boolean inClassSubstitution;
 
-    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated) {
-        this(original, annotated, false);
-    }
+    /**
+     * This field is used in the {@link com.oracle.svm.hosted.SubstitutionReportFeature} class to
+     * determine {@link SubstitutionMethod} objects which correspond to annotated substitutions.
+     */
+    private final boolean isUserSubstitution;
 
-    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated, boolean inClassSubstitution) {
+    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated, boolean inClassSubstitution, boolean isUserSubstitution) {
         this.original = original;
         this.annotated = annotated;
         this.inClassSubstitution = inClassSubstitution;
+        this.isUserSubstitution = isUserSubstitution;
 
         LocalVariableTable newLocalVariableTable = null;
         if (annotated.getLocalVariableTable() != null) {
@@ -84,6 +89,10 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider, Or
             newLocalVariableTable = new LocalVariableTable(newLocals);
         }
         localVariableTable = newLocalVariableTable;
+    }
+
+    public boolean isUserSubstitution() {
+        return isUserSubstitution;
     }
 
     public ResolvedJavaMethod getOriginal() {
@@ -201,18 +210,8 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider, Or
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return annotated.getAnnotations();
-    }
-
-    @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return annotated.getDeclaredAnnotations();
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        return annotated.getAnnotation(annotationClass);
+    public AnnotatedElement getAnnotationRoot() {
+        return annotated;
     }
 
     @Override

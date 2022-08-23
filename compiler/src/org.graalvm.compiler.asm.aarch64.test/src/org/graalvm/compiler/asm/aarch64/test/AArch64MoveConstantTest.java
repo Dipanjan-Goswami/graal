@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2019, Arm Limited and affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -26,17 +26,19 @@
 
 package org.graalvm.compiler.asm.aarch64.test;
 
+import static org.junit.Assert.assertArrayEquals;
+
+import org.graalvm.compiler.asm.aarch64.AArch64Assembler;
+import org.graalvm.compiler.asm.aarch64.AArch64MacroAssembler;
+import org.graalvm.compiler.test.GraalTest;
+import org.junit.Assume;
+import org.junit.Before;
+import org.junit.Test;
+
 import jdk.vm.ci.aarch64.AArch64;
 import jdk.vm.ci.code.Register;
 import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.runtime.JVMCI;
-import org.graalvm.compiler.asm.aarch64.AArch64Assembler;
-import org.graalvm.compiler.asm.aarch64.AArch64MacroAssembler;
-import org.graalvm.compiler.test.GraalTest;
-import org.junit.Before;
-import org.junit.Test;
-
-import static org.junit.Assert.assertArrayEquals;
 
 public class AArch64MoveConstantTest extends GraalTest {
 
@@ -49,6 +51,7 @@ public class AArch64MoveConstantTest extends GraalTest {
     public void setupEnvironment() {
         // Setup AArch64 MacroAssembler and Assembler.
         TargetDescription target = JVMCI.getRuntime().getHostJVMCIBackend().getTarget();
+        Assume.assumeTrue("AArch64-specific test", target.arch instanceof AArch64);
         masm = new AArch64MacroAssembler(target);
         asm = new TestProtectedAssembler(target);
         dst = AArch64.r10;
@@ -133,10 +136,11 @@ public class AArch64MoveConstantTest extends GraalTest {
     }
 
     @Test
-    public void testMoveLongSignExtendedLogicalImm() {
-        masm.mov(dst, 0xFFFF_FFFF_8888_8888L); // 0x88888888 is a 32-bit logical immediate.
-        asm.orr(32, dst, zr, 0x8888_8888);
-        asm.sbfm(64, dst, dst, 0, 31);
+    public void testMoveLongSignExtendedImm() {
+        // (int) 0xFFFF_FFFF_8888_8888L == 0x8888_8888
+        masm.mov(dst, 0xFFFF_FFFF_8888_8888L);
+        asm.movn(64, dst, 0x7777, 0);
+        asm.movk(64, dst, 0x8888, 16);
         compareAssembly();
     }
 

@@ -24,9 +24,12 @@
  */
 package org.graalvm.component.installer;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.MalformedURLException;
 import java.text.MessageFormat;
@@ -36,9 +39,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.ResourceBundle;
+import java.util.stream.Collectors;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -156,6 +161,12 @@ public class EnvironmentTest {
         env = new Environment("test", "org.graalvm.component.installer", parameters, initOptions);
     }
 
+    private static String readLines(byte[] arr) throws IOException {
+        try (BufferedReader bfr = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(arr)))) {
+            return bfr.lines().map(l -> l + "\n").collect(Collectors.joining());
+        }
+    }
+
     /**
      * Checks that an error will be printed without stacktrace.
      */
@@ -164,7 +175,8 @@ public class EnvironmentTest {
         setupEmptyEnv();
         env.setErr(new PrintStream(errBuffer));
         env.error("ERROR_UserInput", new ClassCastException(), "Foobar");
-        String s = new String(errBuffer.toByteArray(), "UTF-8");
+        // Windows compat: CRLF -> LF conversion
+        String s = readLines(errBuffer.toByteArray());
         assertEquals(B1.getString("ERROR_UserInput").replace("{0}", "Foobar") + "\n", s);
     }
 
@@ -177,7 +189,8 @@ public class EnvironmentTest {
         setupEmptyEnv();
         env.setErr(new PrintStream(errBuffer));
         env.error("ERROR_UserInput", new ClassCastException(), "Foobar");
-        String all = new String(errBuffer.toByteArray(), "UTF-8");
+        // Windows compat: CRLF -> LF conversion
+        String all = readLines(errBuffer.toByteArray());
         String[] lines = all.split("\n");
         assertEquals(B1.getString("ERROR_UserInput").replace("{0}", "Foobar"), lines[0]);
         assertTrue(lines[1].contains("ClassCastException"));
@@ -193,5 +206,36 @@ public class EnvironmentTest {
         assertEquals(t.getLocalizedMessage(), s);
         assertNotSame(t, t.getCause());
         assertEquals("Foo", t.getCause().getLocalizedMessage());
+    }
+
+    @Test
+    public void testOutput() throws Exception {
+        setupEmptyEnv();
+
+        env.setOut(new PrintStream(outBuffer));
+        env.output("ERROR_MissingCommand");
+        // Windows compat: CRLF -> LF conversion
+        String s = readLines(outBuffer.toByteArray());
+        assertEquals(B1.getString("ERROR_MissingCommand") + "\n", s);
+    }
+
+    @Test
+    public void testSilentOutput() throws Exception {
+        setupEmptyEnv();
+        assertFalse(env.setSilent(true));
+
+        // output error even when silent
+        env.setErr(new PrintStream(errBuffer));
+        env.error("ERROR_UserInput", new ClassCastException(), "Foobar");
+        // Windows compat: CRLF -> LF conversion
+        String s = readLines(errBuffer.toByteArray());
+        assertEquals(B1.getString("ERROR_UserInput").replace("{0}", "Foobar") + "\n", s);
+
+        // don't output normal output when silent
+        env.setOut(new PrintStream(outBuffer));
+        env.output("ERROR_MissingCommand");
+        // Windows compat: CRLF -> LF conversion
+        s = readLines(outBuffer.toByteArray());
+        assertEquals("", s);
     }
 }

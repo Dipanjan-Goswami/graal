@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,13 +24,12 @@
  */
 package org.graalvm.compiler.hotspot.replacements;
 
-import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfigBase.INJECTED_METAACCESS;
+import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_METAACCESS;
 import static org.graalvm.compiler.replacements.ReplacementsUtil.getArrayBaseOffset;
 import static org.graalvm.compiler.replacements.SnippetTemplate.DEFAULT_REPLACER;
 
 import org.graalvm.compiler.api.replacements.Snippet;
 import org.graalvm.compiler.api.replacements.Snippet.ConstantParameter;
-import org.graalvm.compiler.debug.DebugHandlersFactory;
 import org.graalvm.compiler.hotspot.meta.HotSpotProviders;
 import org.graalvm.compiler.nodes.NamedLocationIdentity;
 import org.graalvm.compiler.nodes.debug.StringToBytesNode;
@@ -47,7 +46,6 @@ import org.graalvm.compiler.replacements.nodes.CStringConstant;
 import org.graalvm.compiler.word.Word;
 import org.graalvm.word.LocationIdentity;
 
-import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.meta.JavaKind;
 
 /**
@@ -58,14 +56,13 @@ public class StringToBytesSnippets implements Snippets {
     public static final LocationIdentity CSTRING_LOCATION = NamedLocationIdentity.immutable("CString location");
 
     @Snippet
-    public static byte[] transform(@ConstantParameter String compilationTimeString) {
-        int i = compilationTimeString.length();
+    public static byte[] transform(@ConstantParameter Word cArray, @ConstantParameter int length, @ConstantParameter LocationIdentity locationIdentity) {
+        int i = length;
         byte[] array = (byte[]) NewArrayNode.newUninitializedArray(byte.class, i);
-        Word cArray = CStringConstant.cstring(compilationTimeString);
         while (i-- > 0) {
             // array[i] = cArray.readByte(i);
             RawStoreNode.storeByte(array, getArrayBaseOffset(INJECTED_METAACCESS, JavaKind.Byte) + i, cArray.readByte(i, CSTRING_LOCATION), JavaKind.Byte,
-                            NamedLocationIdentity.getArrayLocation(JavaKind.Byte));
+                            locationIdentity);
         }
         return array;
     }
@@ -74,14 +71,17 @@ public class StringToBytesSnippets implements Snippets {
 
         private final SnippetInfo create;
 
-        public Templates(OptionValues options, Iterable<DebugHandlersFactory> factories, HotSpotProviders providers, TargetDescription target) {
-            super(options, factories, providers, providers.getSnippetReflection(), target);
-            create = snippet(StringToBytesSnippets.class, "transform", NamedLocationIdentity.getArrayLocation(JavaKind.Byte));
+        public Templates(OptionValues options, HotSpotProviders providers) {
+            super(options, providers);
+            create = snippet(StringToBytesSnippets.class, "transform");
         }
 
         public void lower(StringToBytesNode stringToBytesNode, LoweringTool tool) {
             Arguments args = new Arguments(create, stringToBytesNode.graph().getGuardsStage(), tool.getLoweringStage());
-            args.addConst("compilationTimeString", stringToBytesNode.getValue());
+            String value = stringToBytesNode.getValue();
+            args.addConst("cArray", new CStringConstant(value));
+            args.addConst("length", value.length());
+            args.addConst("locationIdentity", LocationIdentity.init());
             SnippetTemplate template = template(stringToBytesNode, args);
             template.instantiate(providers.getMetaAccess(), stringToBytesNode, DEFAULT_REPLACER, args);
         }

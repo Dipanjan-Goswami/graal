@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -54,6 +54,11 @@ public interface LLVMNativePointer extends LLVMPointer {
     @Override
     LLVMNativePointer copy();
 
+    @Override
+    @Deprecated
+    @SuppressWarnings("deprecation")
+    boolean equals(Object obj);
+
     /**
      * Increment this pointer. The result is determined by simply adding the offset to the
      * {@link #asNative} address.
@@ -89,11 +94,7 @@ public interface LLVMNativePointer extends LLVMPointer {
      * the regular Java {@code instanceof} operator.
      */
     static boolean isInstance(Object object) {
-        if (object instanceof LLVMPointerImpl) {
-            return ((LLVMPointerImpl) object).isNative();
-        } else {
-            return false;
-        }
+        return object instanceof LLVMPointerImpl && ((LLVMPointerImpl) object).isNative();
     }
 
     /**

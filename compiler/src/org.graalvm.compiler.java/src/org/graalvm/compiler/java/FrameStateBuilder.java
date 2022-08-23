@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,6 +39,7 @@ import static org.graalvm.compiler.nodes.util.GraphUtil.originalValue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
 
@@ -82,7 +83,6 @@ import jdk.vm.ci.meta.Signature;
 
 public final class FrameStateBuilder implements SideEffectsState {
 
-    private static final ValueNode[] EMPTY_ARRAY = new ValueNode[0];
     private static final MonitorIdNode[] EMPTY_MONITOR_ARRAY = new MonitorIdNode[0];
 
     private final BytecodeParser parser;
@@ -275,10 +275,15 @@ public final class FrameStateBuilder implements SideEffectsState {
         monitorIds = other.monitorIds.length == 0 ? other.monitorIds : other.monitorIds.clone();
 
         assert lockedObjects.length == monitorIds.length;
+
+        if (other.sideEffects != null) {
+            sideEffects = new ArrayList<>();
+            sideEffects.addAll(other.sideEffects);
+        }
     }
 
     private static ValueNode[] allocateArray(int length) {
-        return length == 0 ? EMPTY_ARRAY : new ValueNode[length];
+        return length == 0 ? ValueNode.EMPTY_ARRAY : new ValueNode[length];
     }
 
     public ResolvedJavaMethod getMethod() {
@@ -328,28 +333,17 @@ public final class FrameStateBuilder implements SideEffectsState {
             outerFrameState = parent.getFrameStateBuilder().create(parent.bci(), parent.getNonIntrinsicAncestor(), true, null, null);
         }
         if (bci == BytecodeFrame.AFTER_EXCEPTION_BCI && parent != null) {
-            return outerFrameState.duplicateModified(graph, outerFrameState.bci, true, false, JavaKind.Void, new JavaKind[]{JavaKind.Object}, new ValueNode[]{stack[0]});
+            return outerFrameState.duplicateModified(graph, outerFrameState.bci, true, false, JavaKind.Void, new JavaKind[]{JavaKind.Object}, new ValueNode[]{stack[0]}, null);
         }
         if (bci == BytecodeFrame.INVALID_FRAMESTATE_BCI) {
             throw shouldNotReachHere();
         }
 
-        if (pushedValues != null) {
-            assert pushedSlotKinds.length == pushedValues.length;
-            int stackSizeToRestore = stackSize;
-            for (int i = 0; i < pushedValues.length; i++) {
-                push(pushedSlotKinds[i], pushedValues[i]);
-            }
-            FrameState res = graph.add(new FrameState(outerFrameState, code, bci, locals, stack, stackSize, lockedObjects, Arrays.asList(monitorIds), rethrowException, duringCall));
-            stackSize = stackSizeToRestore;
-            return res;
-        } else {
-            if (bci == BytecodeFrame.AFTER_EXCEPTION_BCI) {
-                assert outerFrameState == null;
-                clearLocals();
-            }
-            return graph.add(new FrameState(outerFrameState, code, bci, locals, stack, stackSize, lockedObjects, Arrays.asList(monitorIds), rethrowException, duringCall));
+        if (bci == BytecodeFrame.AFTER_EXCEPTION_BCI) {
+            assert outerFrameState == null;
+            clearLocals();
         }
+        return graph.add(new FrameState(outerFrameState, code, bci, locals, stack, stackSize, pushedSlotKinds, pushedValues, lockedObjects, Arrays.asList(monitorIds), rethrowException, duringCall));
     }
 
     public NodeSourcePosition createBytecodePosition(int bci) {
@@ -420,11 +414,15 @@ public final class FrameStateBuilder implements SideEffectsState {
             throw new PermanentBailoutException(incompatibilityErrorMessage("unbalanced monitors - locked objects do not match", other));
         }
         for (int i = 0; i < lockedObjects.length; i++) {
+            if (monitorIds[i] != other.monitorIds[i]) {
+                if (MonitorIdNode.monitorIdentityEquals(monitorIds[i], other.monitorIds[i])) {
+                    continue;
+                }
+                throw new PermanentBailoutException(incompatibilityErrorMessage("unbalanced monitors - monitors do not match", other));
+            }
+            // ID's match now also the objects should match
             if (originalValue(lockedObjects[i], false) != originalValue(other.lockedObjects[i], false)) {
                 throw new PermanentBailoutException(incompatibilityErrorMessage("unbalanced monitors - locked objects do not match", other));
-            }
-            if (monitorIds[i] != other.monitorIds[i]) {
-                throw new PermanentBailoutException(incompatibilityErrorMessage("unbalanced monitors - monitors do not match", other));
             }
         }
     }
@@ -439,8 +437,13 @@ public final class FrameStateBuilder implements SideEffectsState {
             stack[i] = merge(stack[i], other.stack[i], block);
         }
         for (int i = 0; i < lockedObjects.length; i++) {
+            assert monitorIds[i] == other.monitorIds[i] || MonitorIdNode.monitorIdentityEquals(monitorIds[i], other.monitorIds[i]);
             lockedObjects[i] = merge(lockedObjects[i], other.lockedObjects[i], block);
-            assert monitorIds[i] == other.monitorIds[i];
+            if (monitorIds[i] != other.monitorIds[i]) {
+                monitorIds[i].setMultipleEntry();
+                other.monitorIds[i].setMultipleEntry();
+                monitorIds[i] = graph.addWithoutUnique(new MonitorIdNode(monitorIds[i].getLockDepth(), monitorIds[i].getBci(), true));
+            }
         }
 
         if (sideEffects == null) {
@@ -604,7 +607,7 @@ public final class FrameStateBuilder implements SideEffectsState {
         try {
             return lockedObjects[lockedObjects.length - 1];
         } finally {
-            lockedObjects = lockedObjects.length == 1 ? EMPTY_ARRAY : Arrays.copyOf(lockedObjects, lockedObjects.length - 1);
+            lockedObjects = lockedObjects.length == 1 ? ValueNode.EMPTY_ARRAY : Arrays.copyOf(lockedObjects, lockedObjects.length - 1);
             monitorIds = monitorIds.length == 1 ? EMPTY_MONITOR_ARRAY : Arrays.copyOf(monitorIds, monitorIds.length - 1);
             assert lockedObjects.length == monitorIds.length;
         }
@@ -659,14 +662,25 @@ public final class FrameStateBuilder implements SideEffectsState {
         if (liveIn) {
             for (int i = 0; i < locals.length; i++) {
                 if (!liveness.localIsLiveIn(block, i)) {
-                    assert locals[i] != TWO_SLOT_MARKER || locals[i - 1] == null : "Clearing of second slot must have cleared the first slot too";
+                    if (locals[i] == TWO_SLOT_MARKER) {
+                        /*
+                         * Clearing a slot is equivalent to a storeLocal() of that slot: if the old
+                         * value is the upper half of a two-slot value, both slots need to be
+                         * cleared. The liveness analysis cannot detect these cases and also mark
+                         * the previous slot as non-live because at the beginning / end of the block
+                         * the slot at index i - 1 can be occupied by a live single-slot value.
+                         */
+                        locals[i - 1] = null;
+                    }
                     locals[i] = null;
                 }
             }
         } else {
             for (int i = 0; i < locals.length; i++) {
                 if (!liveness.localIsLiveOut(block, i)) {
-                    assert locals[i] != TWO_SLOT_MARKER || locals[i - 1] == null : "Clearing of second slot must have cleared the first slot too";
+                    if (locals[i] == TWO_SLOT_MARKER) {
+                        locals[i - 1] = null;
+                    }
                     locals[i] = null;
                 }
             }
@@ -1040,4 +1054,38 @@ public final class FrameStateBuilder implements SideEffectsState {
             }
         }
     }
+
+    public FrameState createInitialIntrinsicFrameState(ResolvedJavaMethod original) {
+        FrameState stateAfterStart;
+
+        ValueNode[] newLocals;
+        if (original.getMaxLocals() == localsSize() || original.isNative()) {
+            newLocals = new ValueNode[original.getMaxLocals()];
+            for (int i = 0; i < newLocals.length; i++) {
+                ValueNode node = locals[i];
+                if (node == FrameState.TWO_SLOT_MARKER) {
+                    node = null;
+                }
+                newLocals[i] = node;
+            }
+        } else {
+            newLocals = new ValueNode[original.getMaxLocals()];
+            int parameterCount = original.getSignature().getParameterCount(!original.isStatic());
+            for (int i = 0; i < parameterCount; i++) {
+                ValueNode param = locals[i];
+                if (param == FrameState.TWO_SLOT_MARKER) {
+                    param = null;
+                }
+                newLocals[i] = param;
+                assert param == null || param instanceof ParameterNode || param.isConstant();
+            }
+        }
+        assert stackSize == 0;
+        ValueNode[] newStack = ValueNode.EMPTY_ARRAY;
+        ValueNode[] locks = ValueNode.EMPTY_ARRAY;
+        assert monitorIds.length == 0;
+        stateAfterStart = graph.add(new FrameState(null, new ResolvedJavaMethodBytecode(original), 0, newLocals, newStack, stackSize, null, null, locks, Collections.emptyList(), false, false));
+        return stateAfterStart;
+    }
+
 }

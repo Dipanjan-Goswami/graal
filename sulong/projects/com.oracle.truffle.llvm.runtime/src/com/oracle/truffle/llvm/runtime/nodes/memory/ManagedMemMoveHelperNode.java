@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -31,28 +31,29 @@ package com.oracle.truffle.llvm.runtime.nodes.memory;
 
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.dsl.CachedLanguage;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.Cached.Shared;
 import com.oracle.truffle.api.dsl.Fallback;
 import com.oracle.truffle.api.dsl.GenerateUncached;
 import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.UnexpectedResultException;
-import com.oracle.truffle.llvm.runtime.LLVMLanguage;
 import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
 import com.oracle.truffle.llvm.runtime.interop.access.LLVMInteropType;
 import com.oracle.truffle.llvm.runtime.library.internal.LLVMManagedReadLibrary;
 import com.oracle.truffle.llvm.runtime.library.internal.LLVMManagedWriteLibrary;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemReadI16NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemReadI32NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemReadI64NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemReadI8NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemReadNativeNodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemWriteI16NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemWriteI32NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemWriteI64NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemWriteI8NodeGen;
-import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeFactory.MemWriteNativeNodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemReadI16NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemReadI32NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemReadI64NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemReadI8NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemReadNativeNodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemWriteI16NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemWriteI32NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemWriteI64NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemWriteI8NodeGen;
+import com.oracle.truffle.llvm.runtime.nodes.memory.ManagedMemMoveHelperNodeGen.MemWriteNativeNodeGen;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMManagedPointer;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMNativePointer;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMPointer;
@@ -61,7 +62,7 @@ import com.oracle.truffle.llvm.spi.NativeTypeLibrary;
 /**
  * Helper class for memmove involving managed (foreign) objects.
  */
-final class ManagedMemMoveHelperNode extends LLVMNode {
+abstract class ManagedMemMoveHelperNode extends LLVMNode {
 
     @Child MemReadHelperNode read;
     @Child MemWriteHelperNode write;
@@ -69,13 +70,13 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
     public static ManagedMemMoveHelperNode create(LLVMPointer target, LLVMPointer source) {
         MemReadHelperNode read = MemReadHelperNode.create(source);
         MemWriteHelperNode write = MemWriteHelperNode.create(target);
-        return new ManagedMemMoveHelperNode(read, write);
+        return ManagedMemMoveHelperNodeGen.create(read, write);
     }
 
     public static ManagedMemMoveHelperNode createSlowPath(LLVMPointer target, LLVMPointer source) {
         MemReadHelperNode read = MemReadHelperNode.createSlowPath(source);
         MemWriteHelperNode write = MemWriteHelperNode.createSlowPath(target);
-        return new ManagedMemMoveHelperNode(read, write);
+        return ManagedMemMoveHelperNodeGen.create(read, write);
     }
 
     public boolean supportsUnitSize(int unitSize) {
@@ -92,10 +93,30 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
         return write.guard(target);
     }
 
-    public void moveUnit(LLVMPointer target, LLVMPointer source, int unitSize) {
+    // return value unused but needed to make rewriteOn not re-execute
+    abstract Object execute(LLVMPointer target, LLVMPointer source, int unitSize);
+
+    @Specialization(rewriteOn = UnexpectedResultException.class)
+    protected long moveUnitLong(LLVMPointer target, LLVMPointer source, int unitSize) throws UnexpectedResultException {
         CompilerAsserts.partialEvaluationConstant(unitSize);
-        long value = read.execute(source, unitSize);
+        long value;
+        try {
+            value = read.execute(source, unitSize);
+        } catch (UnexpectedResultException e) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            write.executeGeneric(target, e.getResult(), unitSize);
+            throw e;
+        }
         write.execute(target, value, unitSize);
+        return 0L;
+    }
+
+    @Specialization(replaces = "moveUnitLong")
+    protected Object moveUnitGeneric(LLVMPointer target, LLVMPointer source, int unitSize) {
+        CompilerAsserts.partialEvaluationConstant(unitSize);
+        Object value = read.executeGeneric(source, unitSize);
+        write.executeGeneric(target, value, unitSize);
+        return null;
     }
 
     abstract static class UnitSizeNode extends LLVMNode {
@@ -106,39 +127,58 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
             return length % unitSize == 0;
         }
 
+        /**
+         * @param helper
+         * @param length
+         * @see #execute(ManagedMemMoveHelperNode, long)
+         */
         @Specialization(guards = {"helper.supportsUnitSize(8)", "isDivisible(length, 8)"})
-        @SuppressWarnings("unused")
         int do8(ManagedMemMoveHelperNode helper, long length) {
             return 8;
         }
 
+        /**
+         * @param helper
+         * @param length
+         * @see #execute(ManagedMemMoveHelperNode, long)
+         */
         @Specialization(guards = {"helper.supportsUnitSize(4)", "isDivisible(length, 4)"}, replaces = "do8")
-        @SuppressWarnings("unused")
         int do4(ManagedMemMoveHelperNode helper, long length) {
             return 4;
         }
 
+        /**
+         * @param helper
+         * @param length
+         * @see #execute(ManagedMemMoveHelperNode, long)
+         */
         @Specialization(guards = {"helper.supportsUnitSize(2)", "isDivisible(length, 2)"}, replaces = "do4")
-        @SuppressWarnings("unused")
         int do2(ManagedMemMoveHelperNode helper, long length) {
             return 2;
         }
 
+        /**
+         * @param helper
+         * @param length
+         * @see #execute(ManagedMemMoveHelperNode, long)
+         */
         @Specialization(guards = {"helper.supportsUnitSize(1)", "isDivisible(length, 1)"}, replaces = "do2")
-        @SuppressWarnings("unused")
         int do1(ManagedMemMoveHelperNode helper, long length) {
             return 1;
         }
 
+        /**
+         * @param helper
+         * @param length
+         * @see #execute(ManagedMemMoveHelperNode, long)
+         */
         @Fallback
-        @SuppressWarnings("unused")
         int doError(ManagedMemMoveHelperNode helper, long length) {
-            CompilerDirectives.transferToInterpreter();
             throw new LLVMPolyglotException(this, "Memmove length is not divisible by managed array element size.");
         }
     }
 
-    private ManagedMemMoveHelperNode(MemReadHelperNode read, MemWriteHelperNode write) {
+    protected ManagedMemMoveHelperNode(MemReadHelperNode read, MemWriteHelperNode write) {
         this.read = read;
         this.write = write;
     }
@@ -154,7 +194,7 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
 
         private static MemReadHelperNode createManaged(Object type, NativeTypeLibrary nativeTypes, LLVMManagedReadLibrary managedRead) {
             if (type instanceof LLVMInteropType.Array) {
-                long elementSize = ((LLVMInteropType.Array) type).getElementSize();
+                long elementSize = ((LLVMInteropType.Array) type).elementSize;
                 if (elementSize == 2) {
                     return MemReadI16NodeGen.create(nativeTypes, managedRead);
                 } else if (elementSize == 4) {
@@ -193,7 +233,9 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
             }
         }
 
-        abstract long execute(LLVMPointer source, int unitSize);
+        abstract long execute(LLVMPointer source, int unitSize) throws UnexpectedResultException;
+
+        abstract Object executeGeneric(LLVMPointer source, int unitSize);
     }
 
     @GenerateUncached
@@ -210,27 +252,23 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
         }
 
         @Specialization(guards = "unitSize == 1")
-        long doNativeI8(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            return language.getLLVMMemory().getI8(source);
+        long doNativeI8(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize) {
+            return getLanguage().getLLVMMemory().getI8(this, source);
         }
 
         @Specialization(guards = "unitSize == 2")
-        long doNativeI16(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            return language.getLLVMMemory().getI16(source);
+        long doNativeI16(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize) {
+            return getLanguage().getLLVMMemory().getI16(this, source);
         }
 
         @Specialization(guards = "unitSize == 4")
-        long doNativeI32(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            return language.getLLVMMemory().getI32(source);
+        long doNativeI32(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize) {
+            return getLanguage().getLLVMMemory().getI32(this, source);
         }
 
         @Specialization(guards = "unitSize == 8")
-        long doNativeI64(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            return language.getLLVMMemory().getI64(source);
+        long doNativeI64(LLVMNativePointer source, @SuppressWarnings("unused") int unitSize) {
+            return getLanguage().getLLVMMemory().getI64(this, source);
         }
     }
 
@@ -258,7 +296,7 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
                 if (nativeTypes.accepts(managed.getObject()) && managedRead.accepts(managed.getObject()) && managedRead.isReadable(managed.getObject())) {
                     Object type = nativeTypes.getNativeType(managed.getObject());
                     if (type instanceof LLVMInteropType.Array) {
-                        return ((LLVMInteropType.Array) type).getElementSize() == getAccessSize();
+                        return ((LLVMInteropType.Array) type).elementSize == getAccessSize();
                     } else {
                         return getAccessSize() == 1;
                     }
@@ -351,15 +389,16 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
             return Long.BYTES;
         }
 
-        @Specialization
-        long doManaged(LLVMManagedPointer source, int unitSize) {
-            try {
-                assert unitSize == Long.BYTES;
-                return managedRead.readI64(source.getObject(), source.getOffset());
-            } catch (UnexpectedResultException ex) {
-                CompilerDirectives.transferToInterpreter();
-                throw new LLVMPolyglotException(this, "Can not memmove from an object containing foreign pointers.");
-            }
+        @Specialization(rewriteOn = UnexpectedResultException.class)
+        long doLong(LLVMManagedPointer source, int unitSize) throws UnexpectedResultException {
+            assert unitSize == Long.BYTES;
+            return managedRead.readI64(source.getObject(), source.getOffset());
+        }
+
+        @Specialization(replaces = "doLong")
+        Object doGeneric(LLVMManagedPointer source, int unitSize) {
+            assert unitSize == Long.BYTES;
+            return managedRead.readGenericI64(source.getObject(), source.getOffset());
         }
     }
 
@@ -367,7 +406,7 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
 
         private static MemWriteHelperNode createManaged(Object type, NativeTypeLibrary nativeTypes, LLVMManagedWriteLibrary managedWrite) {
             if (type instanceof LLVMInteropType.Array) {
-                long elementSize = ((LLVMInteropType.Array) type).getElementSize();
+                long elementSize = ((LLVMInteropType.Array) type).elementSize;
                 if (elementSize == 2) {
                     return MemWriteI16NodeGen.create(nativeTypes, managedWrite);
                 } else if (elementSize == 4) {
@@ -407,6 +446,8 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
         }
 
         abstract void execute(LLVMPointer target, long value, int unitSize);
+
+        abstract void executeGeneric(LLVMPointer target, Object value, int unitSize);
     }
 
     @GenerateUncached
@@ -423,27 +464,58 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
         }
 
         @Specialization(guards = "unitSize == 1")
-        void doNativeI8(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            language.getLLVMMemory().putI8(target, (byte) value);
+        void doNativeI8(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize) {
+            getLanguage().getLLVMMemory().putI8(this, target, (byte) value);
         }
 
         @Specialization(guards = "unitSize == 2")
-        void doNativeI16(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            language.getLLVMMemory().putI16(target, (short) value);
+        void doNativeI16(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize) {
+            getLanguage().getLLVMMemory().putI16(this, target, (short) value);
         }
 
         @Specialization(guards = "unitSize == 4")
-        void doNativeI32(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            language.getLLVMMemory().putI32(target, (int) value);
+        void doNativeI32(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize) {
+            getLanguage().getLLVMMemory().putI32(this, target, (int) value);
         }
 
         @Specialization(guards = "unitSize == 8")
-        void doNativeI64(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize,
-                        @CachedLanguage LLVMLanguage language) {
-            language.getLLVMMemory().putI64(target, value);
+        void doNativeI64(LLVMNativePointer target, long value, @SuppressWarnings("unused") int unitSize) {
+            getLanguage().getLLVMMemory().putI64(this, target, value);
+        }
+
+        private static long asPointer(LLVMPointer value, @Cached LLVMNativePointerSupport llvmNativePointerSupport) {
+            if (!llvmNativePointerSupport.isPointer(value)) {
+                llvmNativePointerSupport.toNativePointer(value);
+            }
+            try {
+                return llvmNativePointerSupport.asPointer(value);
+            } catch (UnsupportedMessageException e) {
+                throw CompilerDirectives.shouldNotReachHere();
+            }
+        }
+
+        @Specialization(guards = "unitSize == 1")
+        void doObjectI8(LLVMNativePointer target, LLVMPointer value, @SuppressWarnings("unused") int unitSize,
+                        @Shared("nativeSupport") @Cached LLVMNativePointerSupport llvmNativePointerSupport) {
+            getLanguage().getLLVMMemory().putI8(this, target, (byte) asPointer(value, llvmNativePointerSupport));
+        }
+
+        @Specialization(guards = "unitSize == 2")
+        void doObjectI16(LLVMNativePointer target, LLVMPointer value, @SuppressWarnings("unused") int unitSize,
+                        @Shared("nativeSupport") @Cached LLVMNativePointerSupport llvmNativePointerSupport) {
+            getLanguage().getLLVMMemory().putI16(this, target, (short) asPointer(value, llvmNativePointerSupport));
+        }
+
+        @Specialization(guards = "unitSize == 4")
+        void doObjectI32(LLVMNativePointer target, LLVMPointer value, @SuppressWarnings("unused") int unitSize,
+                        @Shared("nativeSupport") @Cached LLVMNativePointerSupport llvmNativePointerSupport) {
+            getLanguage().getLLVMMemory().putI32(this, target, (int) asPointer(value, llvmNativePointerSupport));
+        }
+
+        @Specialization(guards = "unitSize == 8")
+        void doObjectI64(LLVMNativePointer target, LLVMPointer value, @SuppressWarnings("unused") int unitSize,
+                        @Shared("nativeSupport") @Cached LLVMNativePointerSupport lib) {
+            getLanguage().getLLVMMemory().putI64(this, target, asPointer(value, lib));
         }
     }
 
@@ -471,7 +543,7 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
                 if (nativeTypes.accepts(managed.getObject()) && managedWrite.accepts(managed.getObject()) && managedWrite.isWritable(managed.getObject())) {
                     Object type = nativeTypes.getNativeType(managed.getObject());
                     if (type instanceof LLVMInteropType.Array) {
-                        return ((LLVMInteropType.Array) type).getElementSize() == getAccessSize();
+                        return ((LLVMInteropType.Array) type).elementSize == getAccessSize();
                     } else {
                         return getAccessSize() == 1;
                     }
@@ -559,9 +631,15 @@ final class ManagedMemMoveHelperNode extends LLVMNode {
         }
 
         @Specialization
-        void doManaged(LLVMManagedPointer target, long value, int unitSize) {
+        void doLong(LLVMManagedPointer target, long value, int unitSize) {
             assert unitSize == Long.BYTES;
             managedWrite.writeI64(target.getObject(), target.getOffset(), value);
+        }
+
+        @Specialization(replaces = "doLong")
+        void doManaged(LLVMManagedPointer target, Object value, int unitSize) {
+            assert unitSize == Long.BYTES;
+            managedWrite.writeGenericI64(target.getObject(), target.getOffset(), value);
         }
     }
 }

@@ -24,43 +24,19 @@
  */
 package com.oracle.svm.core.image;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-
 /**
- * A native image heap consist of multiple {@link ImageHeapPartition}s. Every object in the native
- * image heap, is assigned to a position within a {@link ImageHeapPartition}.
+ * A native image heap consists of multiple non-overlapping {@link ImageHeapPartition}s. Every
+ * object in the native image heap is assigned to a position within a {@link ImageHeapPartition}.
  */
-@Platforms(value = Platform.HOSTED_ONLY.class)
 public interface ImageHeapPartition {
     /** Returns the name of the partition. */
     String getName();
 
-    /** Returns true if the partition is writable. */
-    boolean isWritable();
-
-    /** Reserves sufficient memory in this partition for the given object. */
-    void allocate(ImageHeapObject info);
+    /** Returns the offset at which this partition is allocated. */
+    long getStartOffset();
 
     /**
      * Returns the size of the partition (i.e., the sum of all allocated objects + some overhead).
      */
     long getSize();
-
-    /** Adds some padding to the end of the partition. */
-    void addPadding(long computePadding);
-
-    /**
-     * Sets the ELF/PE/Mach-O file position where this partition will be placed.
-     */
-    void setSection(String sectionName, long offsetInSection);
-
-    /** Returns the name of the ELF/PE/Mach-O section to which this partition was assigned. */
-    String getSectionName();
-
-    /**
-     * Returns the offset at which this partition will be placed in the specified ELF/PE/Mach-O
-     * section.
-     */
-    long getOffsetInSection();
 }

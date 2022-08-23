@@ -24,34 +24,22 @@
  */
 package com.oracle.svm.core;
 
-import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 
 import com.oracle.svm.core.annotate.RestrictHeapAccess;
 import com.oracle.svm.core.code.CodeInfo;
+import com.oracle.svm.core.heap.ObjectVisitor;
 
 /** A walker over different kinds of allocated memory. */
-public abstract class MemoryWalker {
-
-    /** Get the implementation of the MemoryWalker. */
-    public static MemoryWalker getMemoryWalker() {
-        return ImageSingletons.lookup(MemoryWalker.class);
-    }
-
-    /**
-     * Walk memory applying the visitor. Returns true if all visits returned true, else false when
-     * any visit returns false.
-     */
-    public abstract boolean visitMemory(Visitor visitor);
-
-    /** This is the interface that clients have to implement. */
-    public interface Visitor {
-
+public final class MemoryWalker {
+    public interface ImageHeapRegionVisitor {
         /** Visit a region from the native image heap. */
         @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Must not allocate while visiting memory.")
-        boolean visitNativeImageHeapRegion(NativeImageHeapRegionAccess access);
+        <T> boolean visitNativeImageHeapRegion(T region, MemoryWalker.NativeImageHeapRegionAccess<T> access);
+    }
 
+    public interface Visitor extends ImageHeapRegionVisitor {
         /**
          * Visit a heap chunk, using the provided access methods. Return true if visiting should
          * continue, else false.
@@ -68,16 +56,19 @@ public abstract class MemoryWalker {
     }
 
     /** A set of access methods for visiting regions of the native image heap. */
-    public interface NativeImageHeapRegionAccess {
+    public interface NativeImageHeapRegionAccess<T> {
 
-        /** Return the start of the native image heap region. */
-        UnsignedWord getStart();
+        UnsignedWord getStart(T region);
 
-        /** Return the size of the native image heap region. */
-        UnsignedWord getSize();
+        UnsignedWord getSize(T region);
 
-        /** Return the name of the native image heap region. */
-        String getRegion();
+        String getRegionName(T region);
+
+        boolean containsReferences(T region);
+
+        boolean isWritable(T region);
+
+        boolean visitObjects(T region, ObjectVisitor visitor);
     }
 
     /** A set of access methods for visiting heap chunk memory. */
@@ -113,9 +104,9 @@ public abstract class MemoryWalker {
 
         UnsignedWord getStart(T codeInfo);
 
-        UnsignedWord getSize(T codeInfo);
+        UnsignedWord getCodeAndDataMemorySize(T codeInfo);
 
-        UnsignedWord getMetadataSize(T codeInfo);
+        UnsignedWord getNativeMetadataSize(T codeInfo);
 
         String getName(T codeInfo);
     }

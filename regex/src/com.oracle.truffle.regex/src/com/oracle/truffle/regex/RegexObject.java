@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,12 @@
  */
 package com.oracle.truffle.regex;
 
-import java.util.Map;
-
+import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.dsl.Cached;
-import com.oracle.truffle.api.dsl.Cached.Shared;
 import com.oracle.truffle.api.dsl.GenerateUncached;
 import com.oracle.truffle.api.dsl.ImportStatic;
 import com.oracle.truffle.api.dsl.ReportPolymorphism;
@@ -56,26 +56,25 @@ import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
-import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.library.ExportLibrary;
 import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.IndirectCallNode;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.regex.result.NoMatchResult;
 import com.oracle.truffle.regex.result.RegexResult;
+import com.oracle.truffle.regex.runtime.nodes.ExpectByteArrayHostObjectNode;
 import com.oracle.truffle.regex.runtime.nodes.ExpectStringOrTruffleObjectNode;
-import com.oracle.truffle.regex.runtime.nodes.StringEqualsNode;
 import com.oracle.truffle.regex.runtime.nodes.ToLongNode;
+import com.oracle.truffle.regex.tregex.TRegexCompilationRequest;
 import com.oracle.truffle.regex.tregex.parser.flavors.PythonFlags;
-import com.oracle.truffle.regex.util.TruffleNull;
+import com.oracle.truffle.regex.tregex.parser.flavors.RubyFlags;
 import com.oracle.truffle.regex.util.TruffleReadOnlyKeysArray;
-import com.oracle.truffle.regex.util.TruffleReadOnlyMap;
 
 /**
  * {@link RegexObject} represents a compiled regular expression that can be used to match against
- * input strings. It is the result of executing a {@link RegexEngine}. It exposes the following
- * three properties:
+ * input strings. It is the result of a call to
+ * {@link RegexLanguage#parse(TruffleLanguage.ParsingRequest)}. It exposes the following three
+ * properties:
  * <ol>
  * <li>{@link String} {@code pattern}: the source of the compiled regular expression</li>
  * <li>{@link TruffleObject} {@code flags}: the set of flags passed to the regular expression
@@ -83,6 +82,7 @@ import com.oracle.truffle.regex.util.TruffleReadOnlyMap;
  * <ul>
  * <li>{@link RegexFlags} if the flavor was {@code ECMAScript}</li>
  * <li>{@link PythonFlags} if the flavor was {@code PythonStr} or {@code PythonBytes}</li>
+ * <li>{@link RubyFlags} if the flavor was {@code Ruby}</li>
  * </ul>
  * </li>
  * <li>{@code int groupCount}: number of capture groups present in the regular expression, including
@@ -102,6 +102,15 @@ import com.oracle.truffle.regex.util.TruffleReadOnlyMap;
  * The return value is a {@link RegexResult}. The contents of the {@code exec} can be compiled
  * lazily and so its first invocation might involve a longer delay as the regular expression is
  * compiled on the fly.
+ * <li>{@link TruffleObject} {@code groups}: a Truffle object that has a member for every named
+ * capture group. The value of the member depends on the flavor of regular expressions. In flavors
+ * where all capture groups must have a unique name, the value of the member is a single integer,
+ * the index of the group that bears the member's name. In flavors where it is possible to have
+ * multiple groups of the same name (as in Ruby), the value of the member has array elements that
+ * give the indices of the groups with the member's name.</li>
+ * <li>{@code boolean isBacktracking}: whether or not matching with this regular expression will use
+ * backtracking when matching, which could result in an exponential runtime in the worst case
+ * scenario</li>
  * </ol>
  * <p>
  */
@@ -109,25 +118,37 @@ import com.oracle.truffle.regex.util.TruffleReadOnlyMap;
 public final class RegexObject extends AbstractConstantKeysObject {
 
     static final String PROP_EXEC = "exec";
+    static final String PROP_EXEC_BOOLEAN = "execBoolean";
+    static final String PROP_EXEC_BYTES = "execBytes";
     private static final String PROP_PATTERN = "pattern";
     private static final String PROP_FLAGS = "flags";
     private static final String PROP_GROUP_COUNT = "groupCount";
     private static final String PROP_GROUPS = "groups";
-    private static final TruffleReadOnlyKeysArray KEYS = new TruffleReadOnlyKeysArray(PROP_EXEC, PROP_PATTERN, PROP_FLAGS, PROP_GROUP_COUNT, PROP_GROUPS);
+    private static final String PROP_IS_BACKTRACKING = "isBacktracking";
+    private static final TruffleReadOnlyKeysArray KEYS = new TruffleReadOnlyKeysArray(PROP_EXEC, PROP_EXEC_BOOLEAN, PROP_PATTERN, PROP_FLAGS, PROP_GROUP_COUNT, PROP_GROUPS, PROP_IS_BACKTRACKING);
 
-    private final RegexCompiler compiler;
+    private final RegexLanguage language;
     private final RegexSource source;
-    private final TruffleObject flags;
+    private final AbstractRegexObject flags;
     private final int numberOfCaptureGroups;
-    private final TruffleObject namedCaptureGroups;
-    private Object compiledRegexObject;
+    private final AbstractRegexObject namedCaptureGroups;
+    @CompilationFinal private RegexRootNode execRootNode;
+    @CompilationFinal private RegexRootNode execBooleanRootNode;
+    private final boolean backtracking;
 
-    public RegexObject(RegexCompiler compiler, RegexSource source, TruffleObject flags, int numberOfCaptureGroups, Map<String, Integer> namedCaptureGroups) {
-        this.compiler = compiler;
+    public RegexObject(RegexExecNode execNode, RegexSource source, AbstractRegexObject flags, int numberOfCaptureGroups, AbstractRegexObject namedCaptureGroups) {
+        this.language = execNode.getRegexLanguage();
         this.source = source;
         this.flags = flags;
         this.numberOfCaptureGroups = numberOfCaptureGroups;
-        this.namedCaptureGroups = namedCaptureGroups != null ? new TruffleReadOnlyMap(namedCaptureGroups) : TruffleNull.INSTANCE;
+        this.namedCaptureGroups = namedCaptureGroups;
+        RegexRootNode rootNode = new RegexRootNode(execNode.getRegexLanguage(), execNode);
+        if (execNode.isBooleanMatch()) {
+            this.execBooleanRootNode = rootNode;
+        } else {
+            this.execRootNode = rootNode;
+        }
+        this.backtracking = execNode.isBacktracking();
     }
 
     public RegexSource getSource() {
@@ -146,25 +167,39 @@ public final class RegexObject extends AbstractConstantKeysObject {
         return namedCaptureGroups;
     }
 
-    public Object getCompiledRegexObject() {
-        if (compiledRegexObject == null) {
-            compiledRegexObject = compileRegex();
+    public CallTarget getExecCallTarget() {
+        if (execRootNode == null) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            execRootNode = new RegexRootNode(language, new TRegexCompilationRequest(language, execBooleanRootNode.getSource().withoutBooleanMatch()).compile());
         }
-        return compiledRegexObject;
+        return execRootNode.getCallTarget();
     }
 
-    @TruffleBoundary
-    private Object compileRegex() {
-        return compiler.compile(source);
+    public CallTarget getExecBooleanCallTarget() {
+        if (execBooleanRootNode == null) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            execBooleanRootNode = new RegexRootNode(language, new TRegexCompilationRequest(language, execRootNode.getSource().withBooleanMatch()).compile());
+        }
+        return execBooleanRootNode.getCallTarget();
     }
 
-    public void setCompiledRegexObject(TruffleObject compiledRegexObject) {
-        this.compiledRegexObject = compiledRegexObject;
+    public boolean isBacktracking() {
+        return backtracking;
     }
 
     public RegexObjectExecMethod getExecMethod() {
         // this allocation should get virtualized and optimized away by graal
         return new RegexObjectExecMethod(this);
+    }
+
+    public RegexObjectExecBooleanMethod getExecBooleanMethod() {
+        // this allocation should get virtualized and optimized away by graal
+        return new RegexObjectExecBooleanMethod(this);
+    }
+
+    public RegexObjectExecUTF8Method getExecUTF8Method() {
+        // this allocation should get virtualized and optimized away by graal
+        return new RegexObjectExecUTF8Method(this);
     }
 
     @Override
@@ -173,10 +208,31 @@ public final class RegexObject extends AbstractConstantKeysObject {
     }
 
     @Override
+    public boolean isMemberReadableImpl(String symbol) {
+        switch (symbol) {
+            case PROP_EXEC:
+            case PROP_EXEC_BOOLEAN:
+            case PROP_EXEC_BYTES:
+            case PROP_PATTERN:
+            case PROP_FLAGS:
+            case PROP_GROUP_COUNT:
+            case PROP_GROUPS:
+            case PROP_IS_BACKTRACKING:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    @Override
     public Object readMemberImpl(String symbol) throws UnknownIdentifierException {
         switch (symbol) {
             case PROP_EXEC:
                 return getExecMethod();
+            case PROP_EXEC_BOOLEAN:
+                return getExecBooleanMethod();
+            case PROP_EXEC_BYTES:
+                return getExecUTF8Method();
             case PROP_PATTERN:
                 return getSource().getPattern();
             case PROP_FLAGS:
@@ -185,40 +241,140 @@ public final class RegexObject extends AbstractConstantKeysObject {
                 return getNumberOfCaptureGroups();
             case PROP_GROUPS:
                 return getNamedCaptureGroups();
+            case PROP_IS_BACKTRACKING:
+                return isBacktracking();
             default:
-                CompilerDirectives.transferToInterpreter();
+                CompilerDirectives.transferToInterpreterAndInvalidate();
                 throw UnknownIdentifierException.create(symbol);
         }
     }
 
-    @SuppressWarnings("static-method")
+    private static final String N_METHODS = "3";
+
     @ExportMessage
-    boolean isMemberInvocable(String member,
-                    @Shared("isExecPropNode") @Cached StringEqualsNode isExecPropNode) {
-        return isExecPropNode.execute(member, PROP_EXEC);
+    abstract static class IsMemberInvocable {
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol == cachedSymbol", "result"}, limit = N_METHODS)
+        static boolean cacheIdentity(RegexObject receiver, String symbol,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached("isInvocable(receiver, cachedSymbol)") boolean result) {
+            return result;
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol.equals(cachedSymbol)", "result"}, limit = N_METHODS, replaces = "cacheIdentity")
+        static boolean cacheEquals(RegexObject receiver, String symbol,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached("isInvocable(receiver, cachedSymbol)") boolean result) {
+            return result;
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization(replaces = "cacheEquals")
+        static boolean isInvocable(RegexObject receiver, String symbol) {
+            return PROP_EXEC.equals(symbol) || PROP_EXEC_BOOLEAN.equals(symbol) || PROP_EXEC_BYTES.equals(symbol);
+        }
     }
 
     @ExportMessage
     Object invokeMember(String member, Object[] args,
-                    @Shared("isExecPropNode") @Cached StringEqualsNode isExecPropNode,
-                    @Cached GetCompiledRegexNode getCompiledRegexNode,
-                    @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
                     @Cached ToLongNode toLongNode,
-                    @Cached ExecCompiledRegexNode execNode) throws UnknownIdentifierException, ArityException, UnsupportedTypeException, UnsupportedMessageException {
-        if (!isExecPropNode.execute(member, PROP_EXEC)) {
-            CompilerDirectives.transferToInterpreter();
-            throw UnknownIdentifierException.create(member);
-        }
+                    @Cached InvokeCacheNode invokeCache)
+                    throws UnknownIdentifierException, ArityException, UnsupportedTypeException, UnsupportedMessageException {
         if (args.length != 2) {
-            CompilerDirectives.transferToInterpreter();
-            throw ArityException.create(2, args.length);
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            throw ArityException.create(2, 2, args.length);
         }
-        Object input = expectStringOrTruffleObjectNode.execute(args[0]);
+        Object input = args[0];
         long fromIndex = toLongNode.execute(args[1]);
         if (fromIndex > Integer.MAX_VALUE) {
-            return NoMatchResult.getInstance();
+            return RegexResult.getNoMatchInstance();
         }
-        return execNode.execute(getCompiledRegexNode.execute(this), input, (int) fromIndex);
+        return invokeCache.execute(member, this, input, (int) fromIndex);
+    }
+
+    @ImportStatic(RegexObject.class)
+    @GenerateUncached
+    abstract static class InvokeCacheNode extends Node {
+
+        abstract Object execute(String symbol, RegexObject receiver, Object input, int fromIndex)
+                        throws UnsupportedMessageException, ArityException, UnsupportedTypeException, UnknownIdentifierException;
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol == cachedSymbol", "cachedSymbol.equals(PROP_EXEC)"}, limit = N_METHODS)
+        Object execIdentity(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex);
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol.equals(cachedSymbol)", "cachedSymbol.equals(PROP_EXEC)"}, limit = N_METHODS, replaces = "execIdentity")
+        Object execEquals(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex);
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol == cachedSymbol", "cachedSymbol.equals(PROP_EXEC_BOOLEAN)"}, limit = N_METHODS)
+        boolean execBooleanIdentity(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecBooleanCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex) != RegexResult.getNoMatchInstance();
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol.equals(cachedSymbol)", "cachedSymbol.equals(PROP_EXEC_BOOLEAN)"}, limit = N_METHODS, replaces = "execBooleanIdentity")
+        boolean execBooleanEquals(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecBooleanCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex) != RegexResult.getNoMatchInstance();
+        }
+
+        // DEPRECATED
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol == cachedSymbol", "cachedSymbol.equals(PROP_EXEC_BYTES)"}, limit = N_METHODS)
+        Object execBytesIdentity(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectByteArrayHostObjectNode expectByteArrayHostObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecCallTarget(), expectByteArrayHostObjectNode.execute(input), fromIndex);
+        }
+
+        // DEPRECATED
+        @SuppressWarnings("unused")
+        @Specialization(guards = {"symbol.equals(cachedSymbol)", "cachedSymbol.equals(PROP_EXEC_BYTES)"}, limit = N_METHODS, replaces = "execBytesIdentity")
+        Object execBytesEquals(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached("symbol") String cachedSymbol,
+                        @Cached ExpectByteArrayHostObjectNode expectByteArrayHostObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException {
+            return execNode.execute(receiver.getExecCallTarget(), expectByteArrayHostObjectNode.execute(input), fromIndex);
+        }
+
+        @ReportPolymorphism.Megamorphic
+        @Specialization(replaces = {"execEquals", "execBooleanEquals", "execBytesEquals"})
+        static Object invokeGeneric(String symbol, RegexObject receiver, Object input, int fromIndex,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ExpectByteArrayHostObjectNode expectByteArrayHostObjectNode,
+                        @Cached ExecCompiledRegexNode execNode) throws UnsupportedMessageException, ArityException, UnsupportedTypeException, UnknownIdentifierException {
+            switch (symbol) {
+                case PROP_EXEC:
+                    return execNode.execute(receiver.getExecCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex);
+                case PROP_EXEC_BOOLEAN:
+                    return execNode.execute(receiver.getExecBooleanCallTarget(), expectStringOrTruffleObjectNode.execute(input), fromIndex) != RegexResult.getNoMatchInstance();
+                case PROP_EXEC_BYTES:
+                    return execNode.execute(receiver.getExecCallTarget(), expectByteArrayHostObjectNode.execute(input), fromIndex);
+                default:
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    throw UnknownIdentifierException.create(symbol);
+            }
+        }
     }
 
     @ExportLibrary(InteropLibrary.class)
@@ -242,76 +398,145 @@ public final class RegexObject extends AbstractConstantKeysObject {
 
         @ExportMessage
         Object execute(Object[] args,
-                        @Cached GetCompiledRegexNode getCompiledRegexNode,
                         @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
                         @Cached ToLongNode toLongNode,
                         @Cached ExecCompiledRegexNode execNode) throws ArityException, UnsupportedTypeException, UnsupportedMessageException {
             if (args.length != 2) {
-                CompilerDirectives.transferToInterpreter();
-                throw ArityException.create(2, args.length);
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                throw ArityException.create(2, 2, args.length);
             }
             Object input = expectStringOrTruffleObjectNode.execute(args[0]);
             long fromIndex = toLongNode.execute(args[1]);
             if (fromIndex > Integer.MAX_VALUE) {
-                return NoMatchResult.getInstance();
+                return RegexResult.getNoMatchInstance();
             }
-            try {
-                return execNode.execute(getCompiledRegexNode.execute(getRegexObject()), input, (int) fromIndex);
-            } catch (UnknownIdentifierException e) {
-                CompilerDirectives.transferToInterpreter();
-                throw new RuntimeException(e);
-            }
+            return execNode.execute(getRegexObject().getExecCallTarget(), input, (int) fromIndex);
         }
 
-    }
-
-    @ReportPolymorphism
-    @GenerateUncached
-    abstract static class GetCompiledRegexNode extends Node {
-
-        abstract Object execute(RegexObject receiver);
-
-        @SuppressWarnings("unused")
-        @Specialization(guards = "receiver == cachedReceiver", limit = "4")
-        static Object executeFixed(RegexObject receiver,
-                        @Cached("receiver") RegexObject cachedReceiver,
-                        @Cached("receiver.getCompiledRegexObject()") Object cachedCompiledRegex) {
-            return cachedCompiledRegex;
-        }
-
-        @Specialization(replaces = "executeFixed")
-        static Object executeVarying(RegexObject receiver) {
-            return receiver.getCompiledRegexObject();
+        @TruffleBoundary
+        @Override
+        public String toString() {
+            return "TRegexObjectExecMethod{" + "regex=" + regex + '}';
         }
     }
 
-    @ReportPolymorphism
+    @ExportLibrary(InteropLibrary.class)
+    public static final class RegexObjectExecBooleanMethod extends AbstractRegexObject {
+
+        private final RegexObject regex;
+
+        public RegexObjectExecBooleanMethod(RegexObject regex) {
+            this.regex = regex;
+        }
+
+        public RegexObject getRegexObject() {
+            return regex;
+        }
+
+        @SuppressWarnings("static-method")
+        @ExportMessage
+        boolean isExecutable() {
+            return true;
+        }
+
+        @ExportMessage
+        boolean execute(Object[] args,
+                        @Cached ExpectStringOrTruffleObjectNode expectStringOrTruffleObjectNode,
+                        @Cached ToLongNode toLongNode,
+                        @Cached ExecCompiledRegexNode execNode) throws ArityException, UnsupportedTypeException, UnsupportedMessageException {
+            if (args.length != 2) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                throw ArityException.create(2, 2, args.length);
+            }
+            Object input = expectStringOrTruffleObjectNode.execute(args[0]);
+            long fromIndex = toLongNode.execute(args[1]);
+            if (fromIndex > Integer.MAX_VALUE) {
+                return false;
+            }
+            return execNode.execute(getRegexObject().getExecBooleanCallTarget(), input, (int) fromIndex) != RegexResult.getNoMatchInstance();
+        }
+
+        @TruffleBoundary
+        @Override
+        public String toString() {
+            return "TRegexObjectExecMethod{" + "regex=" + regex + '}';
+        }
+    }
+
+    /**
+     * DEPRECATED. This method is equivalent to {@link RegexObjectExecMethod}, except it expects a
+     * native byte array as input string. This violation of the interop protocol is probably a bad
+     * idea and will be replaced with a Truffle Library soon.
+     */
+    @ExportLibrary(InteropLibrary.class)
+    public static final class RegexObjectExecUTF8Method extends AbstractRegexObject {
+
+        private final RegexObject regex;
+
+        public RegexObjectExecUTF8Method(RegexObject regex) {
+            this.regex = regex;
+        }
+
+        public RegexObject getRegexObject() {
+            return regex;
+        }
+
+        @SuppressWarnings("static-method")
+        @ExportMessage
+        boolean isExecutable() {
+            return true;
+        }
+
+        @ExportMessage
+        Object execute(Object[] args,
+                        @Cached ExpectByteArrayHostObjectNode expectByteArrayHostObjectNode,
+                        @Cached ToLongNode toLongNode,
+                        @Cached ExecCompiledRegexNode execNode) throws ArityException, UnsupportedTypeException, UnsupportedMessageException {
+            RegexObject regexObj = getRegexObject();
+            if (args.length != 2) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                throw ArityException.create(2, 2, args.length);
+            }
+            byte[] input = expectByteArrayHostObjectNode.execute(args[0]);
+            long fromIndex = toLongNode.execute(args[1]);
+            if (fromIndex > Integer.MAX_VALUE) {
+                return RegexResult.getNoMatchInstance();
+            }
+            return execNode.execute(regexObj.getExecCallTarget(), input, (int) fromIndex);
+        }
+
+        @TruffleBoundary
+        @Override
+        public String toString() {
+            return "TRegexObjectExecUTF8Method{" + "regex=" + regex + '}';
+        }
+    }
+
     @ImportStatic(RegexObject.class)
     @GenerateUncached
     abstract static class ExecCompiledRegexNode extends Node {
 
-        abstract Object execute(Object receiver, Object input, int fromIndex)
-                        throws UnsupportedMessageException, ArityException, UnsupportedTypeException, UnknownIdentifierException;
+        abstract Object execute(CallTarget receiver, Object input, int fromIndex) throws UnsupportedMessageException, ArityException, UnsupportedTypeException;
 
         @SuppressWarnings("unused")
-        @Specialization(guards = "receiver == cachedReceiver", limit = "4")
-        static Object executeTRegexFixed(CompiledRegexObject receiver, Object input, int fromIndex,
-                        @Cached("receiver") CompiledRegexObject cachedReceiver,
-                        @Cached("create(cachedReceiver.getCallTarget())") DirectCallNode directCallNode) {
+        @Specialization(guards = "receiver == cachedCallTarget", limit = "4")
+        static Object executeDirectCall(CallTarget receiver, Object input, int fromIndex,
+                        @Cached("receiver") CallTarget cachedCallTarget,
+                        @Cached("create(cachedCallTarget)") DirectCallNode directCallNode) {
             return directCallNode.call(input, fromIndex);
         }
 
-        @Specialization(replaces = "executeTRegexFixed")
-        static Object executeTRegexVarying(CompiledRegexObject receiver, Object input, int fromIndex,
+        @ReportPolymorphism.Megamorphic
+        @Specialization(replaces = "executeDirectCall")
+        static Object executeIndirectCall(CallTarget receiver, Object input, int fromIndex,
                         @Cached IndirectCallNode indirectCallNode) {
-            return indirectCallNode.call(receiver.getCallTarget(), input, fromIndex);
+            return indirectCallNode.call(receiver, input, fromIndex);
         }
+    }
 
-        @SuppressWarnings("unused")
-        @Specialization(guards = "receivers.isMemberInvocable(receiver, PROP_EXEC)", limit = "4")
-        static Object executeForeign(TruffleObject receiver, Object input, int fromIndex,
-                        @CachedLibrary("receiver") InteropLibrary receivers) throws UnsupportedMessageException, ArityException, UnsupportedTypeException, UnknownIdentifierException {
-            return receivers.invokeMember(receiver, "exec", input, fromIndex);
-        }
+    @TruffleBoundary
+    @Override
+    public String toString() {
+        return "TRegexObject{source=" + source + '}';
     }
 }

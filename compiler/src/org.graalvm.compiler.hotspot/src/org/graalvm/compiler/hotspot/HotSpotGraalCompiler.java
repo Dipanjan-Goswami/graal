@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -43,6 +43,7 @@ import org.graalvm.compiler.debug.DebugContext.Activation;
 import org.graalvm.compiler.debug.DebugHandlersFactory;
 import org.graalvm.compiler.debug.DebugOptions;
 import org.graalvm.compiler.hotspot.CompilationCounters.Options;
+import org.graalvm.compiler.hotspot.HotSpotGraalRuntime.HotSpotGC;
 import org.graalvm.compiler.hotspot.meta.HotSpotProviders;
 import org.graalvm.compiler.hotspot.phases.OnStackReplacementPhase;
 import org.graalvm.compiler.java.GraphBuilderPhase;
@@ -52,6 +53,7 @@ import org.graalvm.compiler.nodes.Cancellable;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.StructuredGraph.AllowAssumptions;
 import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration;
+import org.graalvm.compiler.nodes.spi.ProfileProvider;
 import org.graalvm.compiler.options.OptionValues;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
 import org.graalvm.compiler.phases.OptimisticOptimizations.Optimization;
@@ -75,7 +77,7 @@ import jdk.vm.ci.meta.TriState;
 import jdk.vm.ci.runtime.JVMCICompiler;
 import sun.misc.Unsafe;
 
-public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
+public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JVMCICompilerShadow {
 
     private static final Unsafe UNSAFE = GraalUnsafeAccess.getUnsafe();
     private final HotSpotJVMCIRuntime jvmciRuntime;
@@ -106,11 +108,20 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
 
     @Override
     public CompilationRequestResult compileMethod(CompilationRequest request) {
-        return compileMethod(request, true, graalRuntime.getOptions());
+        return compileMethod(this, request);
+    }
+
+    /**
+     * Substituted by
+     * {@code com.oracle.svm.graal.hotspot.libgraal.Target_org_graalvm_compiler_hotspot_HotSpotGraalCompiler}
+     * to create a {@code org.graalvm.libgraal.jni.JNILibGraalScope}.
+     */
+    private static CompilationRequestResult compileMethod(HotSpotGraalCompiler compiler, CompilationRequest request) {
+        return compiler.compileMethod(request, true, compiler.getGraalRuntime().getOptions());
     }
 
     @SuppressWarnings("try")
-    CompilationRequestResult compileMethod(CompilationRequest request, boolean installAsDefault, OptionValues initialOptions) {
+    public CompilationRequestResult compileMethod(CompilationRequest request, boolean installAsDefault, OptionValues initialOptions) {
         try (CompilationContext scope = HotSpotGraalServices.openLocalCompilationContext(request)) {
             if (graalRuntime.isShutdown()) {
                 return HotSpotCompilationRequestResult.failure(String.format("Shutdown entered"), true);
@@ -139,7 +150,7 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
                     compilationCounters.countCompilation(method);
                 }
                 CompilationRequestResult r = null;
-                try (DebugContext debug = graalRuntime.openDebugContext(options, task.getCompilationIdentifier(), method, getDebugHandlersFactories(), DebugContext.DEFAULT_LOG_STREAM);
+                try (DebugContext debug = graalRuntime.openDebugContext(options, task.getCompilationIdentifier(), method, getDebugHandlersFactories(), DebugContext.getDefaultLogStream());
                                 Activation a = debug.activate()) {
                     r = task.runCompilation(debug);
                 }
@@ -172,37 +183,35 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
         return graalRuntime.isShutdown();
     }
 
-    public StructuredGraph createGraph(ResolvedJavaMethod method, int entryBCI, boolean useProfilingInfo, CompilationIdentifier compilationId, OptionValues options, DebugContext debug) {
-        HotSpotBackend backend = graalRuntime.getHostBackend();
-        HotSpotProviders providers = backend.getProviders();
-        final boolean isOSR = entryBCI != JVMCICompiler.INVOCATION_ENTRY_BCI;
-        StructuredGraph graph = method.isNative() || isOSR ? null : providers.getReplacements().getIntrinsicGraph(method, compilationId, debug, this);
-
-        if (graph == null) {
-            SpeculationLog speculationLog = method.getSpeculationLog();
-            if (speculationLog != null) {
-                speculationLog.collectFailedSpeculations();
-            }
-            // @formatter:off
-            graph = new StructuredGraph.Builder(options, debug, AllowAssumptions.ifTrue(OptAssumptions.getValue(options))).
-                            method(method).
-                            cancellable(this).
-                            entryBCI(entryBCI).
-                            speculationLog(speculationLog).
-                            useProfilingInfo(useProfilingInfo).
-                            compilationId(compilationId).build();
-            // @formatter:on
+    public StructuredGraph createGraph(ResolvedJavaMethod method, int entryBCI, ProfileProvider profileProvider, CompilationIdentifier compilationId, OptionValues options, DebugContext debug) {
+        AllowAssumptions allowAssumptions = AllowAssumptions.ifTrue(OptAssumptions.getValue(options));
+        SpeculationLog speculationLog = method.getSpeculationLog();
+        if (speculationLog != null) {
+            speculationLog.collectFailedSpeculations();
         }
-        return graph;
+        /*
+         * For methods that have plugins it would be possible to produces graphs from those plugins
+         * instead of the bytecodees but it's somewhat complicated to cover all the possible cases
+         * and doesn't seem worth the complexity as plugins are already processed at call sites. In
+         * HotSpot plugins are just optimized implementations of the method so compiling them as
+         * root methods isn't required for correctness.
+         */
+
+        // @formatter:off
+        return new StructuredGraph.Builder(options, debug, allowAssumptions).
+                                   method(method).
+                                   cancellable(this).
+                                   entryBCI(entryBCI).
+                                   speculationLog(speculationLog).
+                                   profileProvider(profileProvider).
+                                   compilationId(compilationId).
+                                   build();
+        // @formatter:on
     }
 
-    public CompilationResult compileHelper(CompilationResultBuilderFactory crbf, CompilationResult result, StructuredGraph graph, ResolvedJavaMethod method, int entryBCI, boolean useProfilingInfo,
-                    OptionValues options) {
-        return compileHelper(crbf, result, graph, method, entryBCI, useProfilingInfo, false, options);
-    }
-
-    public CompilationResult compileHelper(CompilationResultBuilderFactory crbf, CompilationResult result, StructuredGraph graph, ResolvedJavaMethod method, int entryBCI, boolean useProfilingInfo,
-                    boolean shouldRetainLocalVariables, OptionValues options) {
+    public CompilationResult compileHelper(CompilationResultBuilderFactory crbf, CompilationResult result, StructuredGraph graph, boolean shouldRetainLocalVariables, OptionValues options) {
+        int entryBCI = graph.getEntryBCI();
+        ResolvedJavaMethod method = graph.method();
         assert options == graph.getOptions();
         HotSpotBackend backend = graalRuntime.getHostBackend();
         HotSpotProviders providers = backend.getProviders();
@@ -210,7 +219,7 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
 
         Suites suites = getSuites(providers, options);
         LIRSuites lirSuites = getLIRSuites(providers, options);
-        ProfilingInfo profilingInfo = useProfilingInfo ? method.getProfilingInfo(!isOSR, isOSR) : DefaultProfilingInfo.get(TriState.FALSE);
+        ProfilingInfo profilingInfo = graph.getProfileProvider() != null ? graph.getProfileProvider().getProfilingInfo(method, !isOSR, isOSR) : DefaultProfilingInfo.get(TriState.FALSE);
         OptimisticOptimizations optimisticOpts = getOptimisticOpts(profilingInfo, options);
 
         /*
@@ -226,23 +235,19 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
         PhaseSuite<HighTierContext> graphBuilderSuite = configGraphBuilderSuite(providers.getSuites().getDefaultGraphBuilderSuite(), shouldDebugNonSafepoints, shouldRetainLocalVariables, isOSR);
         GraalCompiler.compileGraph(graph, method, providers, backend, graphBuilderSuite, optimisticOpts, profilingInfo, suites, lirSuites, result, crbf, true);
 
-        if (!isOSR && useProfilingInfo) {
-            ProfilingInfo profile = profilingInfo;
-            profile.setCompilerIRSize(StructuredGraph.class, graph.getNodeCount());
+        if (!isOSR) {
+            profilingInfo.setCompilerIRSize(StructuredGraph.class, graph.getNodeCount());
         }
 
         return result;
     }
 
-    public CompilationResult compile(ResolvedJavaMethod method,
-                    int entryBCI,
-                    boolean useProfilingInfo,
+    public CompilationResult compile(StructuredGraph graph,
                     boolean shouldRetainLocalVariables,
                     CompilationIdentifier compilationId,
                     DebugContext debug) {
-        StructuredGraph graph = createGraph(method, entryBCI, useProfilingInfo, compilationId, debug.getOptions(), debug);
         CompilationResult result = new CompilationResult(compilationId);
-        return compileHelper(CompilationResultBuilderFactory.Default, result, graph, method, entryBCI, useProfilingInfo, shouldRetainLocalVariables, debug.getOptions());
+        return compileHelper(CompilationResultBuilderFactory.Default, result, graph, shouldRetainLocalVariables, debug.getOptions());
     }
 
     protected OptimisticOptimizations getOptimisticOpts(ProfilingInfo profilingInfo, OptionValues options) {
@@ -250,7 +255,7 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
     }
 
     protected Suites getSuites(HotSpotProviders providers, OptionValues options) {
-        return providers.getSuites().getDefaultSuites(options);
+        return providers.getSuites().getDefaultSuites(options, providers.getLowerer().getTarget().arch);
     }
 
     protected LIRSuites getLIRSuites(HotSpotProviders providers, OptionValues options) {
@@ -321,5 +326,14 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable {
                 }
             }
         };
+    }
+
+    @Override
+    public boolean isGCSupported(int gcIdentifier) {
+        HotSpotGC gc = HotSpotGC.forName(gcIdentifier, graalRuntime.getVMConfig());
+        if (gc != null) {
+            return gc.supported;
+        }
+        return false;
     }
 }

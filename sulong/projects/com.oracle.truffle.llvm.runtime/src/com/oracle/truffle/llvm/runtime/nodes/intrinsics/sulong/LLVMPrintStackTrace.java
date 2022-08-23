@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -33,10 +33,10 @@ import java.util.List;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.CompilerAsserts;
-import com.oracle.truffle.api.TruffleException;
 import com.oracle.truffle.api.TruffleStackTrace;
 import com.oracle.truffle.api.TruffleStackTraceElement;
 import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.source.SourceSection;
@@ -44,11 +44,13 @@ import com.oracle.truffle.llvm.runtime.nodes.base.LLVMBasicBlockNode;
 import com.oracle.truffle.llvm.runtime.nodes.func.LLVMFunctionStartNode;
 import com.oracle.truffle.llvm.runtime.nodes.intrinsics.llvm.LLVMIntrinsic;
 import com.oracle.truffle.llvm.runtime.nodes.intrinsics.llvm.LLVMIntrinsicRootNode.LLVMIntrinsicExpressionNode;
+import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.SulongStackTrace;
 import com.oracle.truffle.llvm.runtime.SulongStackTrace.Element;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMInstrumentableNode;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
+import com.oracle.truffle.llvm.runtime.pointer.LLVMNativePointer;
 
 public abstract class LLVMPrintStackTrace extends LLVMIntrinsic {
     @TruffleBoundary
@@ -56,11 +58,11 @@ public abstract class LLVMPrintStackTrace extends LLVMIntrinsic {
     protected Object doOp() {
         SulongStackTrace trace = getStackTrace(this, "__sulong_print_stacktrace", true);
         List<Element> elements = trace.getTrace();
-        System.err.println("C stack trace:");
+        LLVMContext.stackTraceLog("C stack trace:");
         for (Element element : elements) {
-            System.err.print(element);
+            LLVMContext.stackTraceLog(element.toString());
         }
-        return null;
+        return LLVMNativePointer.createNull();
     }
 
     // method can be used for debugging
@@ -85,6 +87,10 @@ public abstract class LLVMPrintStackTrace extends LLVMIntrinsic {
     }
 
     private static void fillStackTrace(SulongStackTrace stackTrace, Node node) {
+        if (node == null) {
+            return;
+        }
+
         LLVMBasicBlockNode block = NodeUtil.findParent(node, LLVMBasicBlockNode.class);
         LLVMFunctionStartNode f = NodeUtil.findParent(node, LLVMFunctionStartNode.class);
 
@@ -129,17 +135,10 @@ public abstract class LLVMPrintStackTrace extends LLVMIntrinsic {
     }
 
     @SuppressWarnings("serial")
-    private static class CThrowable extends Throwable implements TruffleException {
-        private Node node;
+    private static class CThrowable extends AbstractTruffleException {
 
         CThrowable(Node node, String message) {
-            super(message);
-            this.node = node;
-        }
-
-        @Override
-        public Node getLocation() {
-            return node;
+            super(message, node);
         }
     }
 }

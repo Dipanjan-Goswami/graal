@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,6 +28,7 @@ import static jdk.vm.ci.code.ValueUtil.asAllocatableValue;
 import static jdk.vm.ci.code.ValueUtil.isAllocatableValue;
 import static jdk.vm.ci.code.ValueUtil.isLegal;
 import static jdk.vm.ci.code.ValueUtil.isStackSlot;
+import static org.graalvm.compiler.core.common.GraalOptions.LoopHeaderAlignment;
 import static org.graalvm.compiler.lir.LIRValueUtil.asConstant;
 import static org.graalvm.compiler.lir.LIRValueUtil.isConstantValue;
 import static org.graalvm.compiler.lir.LIRValueUtil.isVariable;
@@ -59,10 +60,9 @@ import org.graalvm.compiler.lir.LabelRef;
 import org.graalvm.compiler.lir.StandardOp;
 import org.graalvm.compiler.lir.StandardOp.BlockEndOp;
 import org.graalvm.compiler.lir.StandardOp.LabelOp;
-import org.graalvm.compiler.lir.StandardOp.ZapRegistersOp;
 import org.graalvm.compiler.lir.SwitchStrategy;
 import org.graalvm.compiler.lir.Variable;
-import org.graalvm.compiler.lir.hashing.Hasher;
+import org.graalvm.compiler.lir.hashing.IntHasher;
 import org.graalvm.compiler.options.Option;
 import org.graalvm.compiler.options.OptionKey;
 import org.graalvm.compiler.options.OptionType;
@@ -88,6 +88,8 @@ import jdk.vm.ci.meta.ValueKind;
  * This class traverses the HIR instructions and generates LIR instructions from them.
  */
 public abstract class LIRGenerator implements LIRGeneratorTool {
+
+    private final int loopHeaderAlignment;
 
     public static class Options {
         // @formatter:off
@@ -120,6 +122,7 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         OptionValues options = res.getLIR().getOptions();
         this.printIrWithLir = !TTY.isSuppressed() && Options.PrintIRWithLIR.getValue(options);
         this.traceLIRGeneratorLevel = TTY.isSuppressed() ? 0 : Options.TraceLIRGeneratorLevel.getValue(options);
+        this.loopHeaderAlignment = LoopHeaderAlignment.getValue(options);
 
         assert arithmeticLIRGen.lirGen == null;
         arithmeticLIRGen.lirGen = this;
@@ -211,14 +214,13 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         return res.getRegisterConfig();
     }
 
-    @Override
     public RegisterAttributes attributes(Register register) {
         return getRegisterConfig().getAttributesMap()[register.number];
     }
 
     @Override
     public Variable emitMove(Value input) {
-        assert !(input instanceof Variable) : "Creating a copy of a variable via this method is not supported (and potentially a bug): " + input;
+        assert !isVariable(input) : "Creating a copy of a variable via this method is not supported (and potentially a bug): " + input;
         Variable result = newVariable(input.getValueKind());
         emitMove(result, input);
         return result;
@@ -286,26 +288,9 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         }
     }
 
-    @Override
-    public Variable load(Value value) {
-        if (!isVariable(value)) {
-            return emitMove(value);
-        }
-        return (Variable) value;
-    }
-
-    @Override
-    public Value loadNonConst(Value value) {
-        if (isConstantValue(value) && !moveFactory.canInlineConstant(asConstant(value))) {
-            return emitMove(value);
-        }
-        return value;
-    }
-
     /**
      * Determines if only oop maps are required for the code generated from the LIR.
      */
-    @Override
     public boolean needOnlyOopMaps() {
         return false;
     }
@@ -318,7 +303,6 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
      * @return the operand representing the ABI defined location used return a value of kind
      *         {@code kind}
      */
-    @Override
     public AllocatableValue resultOperandFor(JavaKind javaKind, ValueKind<?> valueKind) {
         Register reg = getRegisterConfig().getReturnRegister(javaKind);
         assert target().arch.canStoreValue(reg.getRegisterCategory(), valueKind.getPlatformKind()) : reg.getRegisterCategory() + " " + valueKind.getPlatformKind();
@@ -327,7 +311,6 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
 
     NodeSourcePosition currentPosition;
 
-    @Override
     public void setSourcePosition(NodeSourcePosition position) {
         currentPosition = position;
     }
@@ -346,7 +329,6 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         return op;
     }
 
-    @Override
     public boolean hasBlockEnd(AbstractBlockBase<?> block) {
         ArrayList<LIRInstruction> ops = getResult().getLIR().getLIRforBlock(block);
         if (ops.size() == 0) {
@@ -370,7 +352,7 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
             assert res.getLIR().getLIRforBlock(currentBlock) == null : "LIR list already computed for this block";
             res.getLIR().setLIRforBlock(currentBlock, new ArrayList<LIRInstruction>());
 
-            append(new LabelOp(new Label(currentBlock.getId()), currentBlock.isAligned()));
+            append(new LabelOp(new Label(currentBlock.getId()), currentBlock.isAligned() ? loopHeaderAlignment : 0));
 
             if (traceLIRGeneratorLevel >= 1) {
                 TTY.println("BEGIN Generating LIR for block B" + currentBlock.getId());
@@ -400,7 +382,6 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
 
     }
 
-    @Override
     public final BlockScope getBlockScope(AbstractBlockBase<?> block) {
         BlockScopeImpl blockScope = new BlockScopeImpl(block);
         blockScope.doBlockStart();
@@ -425,7 +406,6 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         return matchScope;
     }
 
-    @Override
     public void emitIncomingValues(Value[] params) {
         ((LabelOp) res.getLIR().getLIRforBlock(getCurrentBlock()).get(0)).setIncomingValues(params);
     }
@@ -433,14 +413,11 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
     @Override
     public abstract void emitJump(LabelRef label);
 
-    @Override
     public abstract void emitCompareBranch(PlatformKind cmpKind, Value left, Value right, Condition cond, boolean unorderedIsTrue, LabelRef trueDestination, LabelRef falseDestination,
                     double trueDestinationProbability);
 
-    @Override
     public abstract void emitOverflowCheckBranch(LabelRef overflow, LabelRef noOverflow, LIRKind cmpKind, double overflowProbability);
 
-    @Override
     public abstract void emitIntegerTestBranch(Value left, Value right, LabelRef trueDestination, LabelRef falseDestination, double trueSuccessorProbability);
 
     @Override
@@ -449,11 +426,16 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
     @Override
     public abstract Variable emitIntegerTestMove(Value leftVal, Value right, Value trueValue, Value falseValue);
 
+    /** Loads the target address for indirect {@linkplain #emitForeignCall foreign calls}. */
+    protected Value emitIndirectForeignCallAddress(@SuppressWarnings("unused") ForeignCallLinkage linkage) {
+        return null;
+    }
+
     /**
      * Emits the single call operation at the heart of generating LIR for a
-     * {@linkplain #emitForeignCall(ForeignCallLinkage, LIRFrameState, Value...) foreign call}.
+     * {@linkplain #emitForeignCall foreign call}.
      */
-    protected abstract void emitForeignCallOp(ForeignCallLinkage linkage, Value result, Value[] arguments, Value[] temps, LIRFrameState info);
+    protected abstract void emitForeignCallOp(ForeignCallLinkage linkage, Value targetAddress, Value result, Value[] arguments, Value[] temps, LIRFrameState info);
 
     @Override
     public Variable emitForeignCall(ForeignCallLinkage linkage, LIRFrameState frameState, Value... args) {
@@ -467,6 +449,8 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
             }
         }
 
+        Value targetAddress = emitIndirectForeignCallAddress(linkage);
+
         // move the arguments into the correct location
         CallingConvention linkageCc = linkage.getOutgoingCallingConvention();
         res.getFrameMapBuilder().callsMethod(linkageCc);
@@ -478,8 +462,9 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
             emitMove(loc, arg);
             argLocations[i] = loc;
         }
+
         res.setForeignCall(true);
-        emitForeignCallOp(linkage, linkageCc.getReturn(), argLocations, linkage.getTemporaries(), state);
+        emitForeignCallOp(linkage, targetAddress, linkageCc.getReturn(), argLocations, linkage.getTemporaries(), state);
 
         if (isLegal(linkageCc.getReturn())) {
             return emitMove(linkageCc.getReturn());
@@ -488,14 +473,12 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
         }
     }
 
-    @Override
-    public void emitStrategySwitch(JavaConstant[] keyConstants, double[] keyProbabilities, LabelRef[] keyTargets, LabelRef defaultTarget, Variable value) {
+    public void emitStrategySwitch(JavaConstant[] keyConstants, double[] keyProbabilities, LabelRef[] keyTargets, LabelRef defaultTarget, AllocatableValue value) {
         SwitchStrategy strategy = SwitchStrategy.getBestStrategy(keyProbabilities, keyConstants, keyTargets);
 
         int keyCount = keyConstants.length;
-        double minDensity = 1 / Math.sqrt(strategy.getAverageEffort());
-        Optional<Hasher> hasher = hasherFor(keyConstants, minDensity);
-        double hashTableSwitchDensity = hasher.map(h -> keyCount / (double) h.cardinality()).orElse(0d);
+        Optional<IntHasher> hasher = hasherFor(keyConstants);
+        double hashTableSwitchDensity = hasher.map(h -> (double) keyCount / h.cardinality).orElse(0d);
         // The value range computation below may overflow, so compute it as a long.
         long valueRange = (long) keyConstants[keyCount - 1].asInt() - (long) keyConstants[0].asInt() + 1;
         double tableSwitchDensity = keyCount / (double) valueRange;
@@ -506,15 +489,15 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
          * tableswitch is preferred if better than a certain value that starts at 0.5 and lowers
          * gradually with additional effort.
          */
+        double minDensity = 1 / Math.sqrt(strategy.getAverageEffort());
         if (strategy.getAverageEffort() < 4d || (tableSwitchDensity < minDensity && hashTableSwitchDensity < minDensity)) {
             emitStrategySwitch(strategy, value, keyTargets, defaultTarget);
         } else {
             if (hashTableSwitchDensity > tableSwitchDensity) {
-                Hasher h = hasher.get();
-                int cardinality = h.cardinality();
-                LabelRef[] targets = new LabelRef[cardinality];
-                JavaConstant[] keys = new JavaConstant[cardinality];
-                for (int i = 0; i < cardinality; i++) {
+                IntHasher h = hasher.get();
+                LabelRef[] targets = new LabelRef[h.cardinality];
+                JavaConstant[] keys = new JavaConstant[h.cardinality];
+                for (int i = 0; i < h.cardinality; i++) {
                     keys[i] = JavaConstant.INT_0;
                     targets[i] = defaultTarget;
                 }
@@ -534,27 +517,44 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
                 for (int i = 0; i < keyCount; i++) {
                     targets[keyConstants[i].asInt() - minValue] = keyTargets[i];
                 }
-                emitTableSwitch(minValue, defaultTarget, targets, value);
+                emitRangeTableSwitch(minValue, defaultTarget, targets, value);
             }
         }
     }
 
-    @Override
-    public abstract void emitStrategySwitch(SwitchStrategy strategy, Variable key, LabelRef[] keyTargets, LabelRef defaultTarget);
+    public abstract void emitStrategySwitch(SwitchStrategy strategy, AllocatableValue key, LabelRef[] keyTargets, LabelRef defaultTarget);
 
-    protected abstract void emitTableSwitch(int lowKey, LabelRef defaultTarget, LabelRef[] targets, Value key);
+    protected abstract void emitRangeTableSwitch(int lowKey, LabelRef defaultTarget, LabelRef[] targets, AllocatableValue key);
 
-    @SuppressWarnings("unused")
-    protected Optional<Hasher> hasherFor(JavaConstant[] keyConstants, double minDensity) {
-        return Optional.empty();
+    protected abstract void emitHashTableSwitch(JavaConstant[] keys, LabelRef defaultTarget, LabelRef[] targets, AllocatableValue value, Value hash);
+
+    private static Optional<IntHasher> hasherFor(JavaConstant[] keyConstants) {
+        int[] keys = new int[keyConstants.length];
+        for (int i = 0; i < keyConstants.length; i++) {
+            keys[i] = keyConstants[i].asInt();
+        }
+        return IntHasher.forKeys(keys);
     }
 
-    @SuppressWarnings("unused")
-    protected void emitHashTableSwitch(Hasher hasher, JavaConstant[] keys, LabelRef defaultTarget, LabelRef[] targets, Value value) {
-        throw new UnsupportedOperationException(getClass().getSimpleName() + " doesn't support hash table switches");
+    private void emitHashTableSwitch(IntHasher hasher, JavaConstant[] keys, LabelRef defaultTarget, LabelRef[] targets, AllocatableValue value) {
+        Value hash = value;
+        if (hasher.factor > 1) {
+            Value factor = emitJavaConstant(JavaConstant.forShort(hasher.factor));
+            hash = arithmeticLIRGen.emitMul(hash, factor, false);
+        }
+        if (hasher.shift > 0) {
+            Value shift = emitJavaConstant(JavaConstant.forByte(hasher.shift));
+            hash = arithmeticLIRGen.emitShr(hash, shift);
+        }
+        Value cardinalityAnd = emitJavaConstant(JavaConstant.forInt(hasher.cardinality - 1));
+        hash = arithmeticLIRGen.emitAnd(hash, cardinalityAnd);
+        emitHashTableSwitch(keys, defaultTarget, targets, value, hash);
     }
 
-    @Override
+    /**
+     * Called just before register allocation is performed on the LIR owned by this generator.
+     * Overriding implementations of this method must call the overridden method.
+     */
     public void beforeRegisterAllocation() {
     }
 
@@ -604,16 +604,16 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
     }
 
     @Override
-    public abstract ZapRegistersOp createZapRegisters(Register[] zappedRegisters, JavaConstant[] zapValues);
+    public abstract LIRInstruction createZapRegisters(Register[] zappedRegisters, JavaConstant[] zapValues);
 
     @Override
-    public ZapRegistersOp createZapRegisters() {
+    public LIRInstruction createZapRegisters() {
         Register[] zappedRegisters = getResult().getFrameMap().getRegisterConfig().getAllocatableRegisters().toArray();
         return createZapRegisters(zappedRegisters);
     }
 
     @Override
-    public ZapRegistersOp createZapRegisters(Register[] zappedRegisters) {
+    public LIRInstruction createZapRegisters(Register[] zappedRegisters) {
         JavaConstant[] zapValues = new JavaConstant[zappedRegisters.length];
         for (int i = 0; i < zappedRegisters.length; i++) {
             PlatformKind kind = target().arch.getLargestStorableKind(zappedRegisters[i].getRegisterCategory());
@@ -648,5 +648,17 @@ public abstract class LIRGenerator implements LIRGeneratorTool {
             zapValues[i] = zapValueForKind(kind);
         }
         return createZapArgumentSpace(zappedStack, zapValues);
+    }
+
+    /**
+     * Returns the offset of the array length word in an array object's header.
+     */
+    public abstract int getArrayLengthOffset();
+
+    /**
+     * Returns the offset of the first array element.
+     */
+    public int getArrayBaseOffset(JavaKind elementKind) {
+        return getMetaAccess().getArrayBaseOffset(elementKind);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,6 +47,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.stream.Collectors;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.regex.tregex.automaton.StateSet;
@@ -144,7 +145,7 @@ public final class NFAExport {
             case REGULAR:
                 return "circle";
             default:
-                throw new IllegalStateException();
+                throw CompilerDirectives.shouldNotReachHere();
         }
     }
 
@@ -154,7 +155,7 @@ public final class NFAExport {
     }
 
     private void exportLaTex() throws IOException {
-        StateSet<NFAState> visited = StateSet.create(nfa);
+        StateSet<NFA, NFAState> visited = StateSet.create(nfa);
         writer.write("\\documentclass{standalone}\n" +
                         "\\usepackage[utf8]{inputenc}\n" +
                         "\\usepackage[T1]{fontenc}\n" +
@@ -317,7 +318,7 @@ public final class NFAExport {
             case REGULAR:
                 return "state";
             default:
-                throw new IllegalStateException();
+                throw CompilerDirectives.shouldNotReachHere();
         }
     }
 
@@ -383,13 +384,16 @@ public final class NFAExport {
         if (fullLabels && state.hasPossibleResults()) {
             sb.append("_r").append(state.getPossibleResults());
         }
+        if (fullLabels && state.isMustAdvance()) {
+            sb.append("_ma");
+        }
         return sb.toString();
     }
 
     private String labelTransition(NFAStateTransition transition, int priority) {
         StringBuilder sb = new StringBuilder();
         if (!(transition.getTarget(forward).isFinalState(forward))) {
-            sb.append(transition.getTarget(forward).getCharSet());
+            sb.append(transition.getCodePointSet());
         }
         if (fullLabels) {
             sb.append(", p").append(priority).append(", ").append(transition.getGroupBoundaries());

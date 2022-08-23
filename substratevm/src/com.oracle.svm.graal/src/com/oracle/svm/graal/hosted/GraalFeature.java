@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,6 +44,7 @@ import java.util.function.Predicate;
 
 import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.compiler.api.runtime.GraalRuntime;
+import org.graalvm.compiler.core.common.spi.MetaAccessExtensionProvider;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.Node.NodeIntrinsic;
@@ -52,8 +53,10 @@ import org.graalvm.compiler.java.BytecodeParser;
 import org.graalvm.compiler.java.GraphBuilderPhase;
 import org.graalvm.compiler.lir.phases.LIRSuites;
 import org.graalvm.compiler.loop.phases.ConvertDeoptimizeToGuardPhase;
+import org.graalvm.compiler.nodes.AbstractBeginNode;
 import org.graalvm.compiler.nodes.CallTargetNode.InvokeKind;
 import org.graalvm.compiler.nodes.FixedGuardNode;
+import org.graalvm.compiler.nodes.FixedNode;
 import org.graalvm.compiler.nodes.FrameState;
 import org.graalvm.compiler.nodes.GraphEncoder;
 import org.graalvm.compiler.nodes.Invoke;
@@ -68,6 +71,7 @@ import org.graalvm.compiler.nodes.java.MethodCallTargetNode;
 import org.graalvm.compiler.options.Option;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
+import org.graalvm.compiler.phases.common.IterativeConditionalEliminationPhase;
 import org.graalvm.compiler.phases.common.inlining.InliningUtil;
 import org.graalvm.compiler.phases.tiers.Suites;
 import org.graalvm.compiler.phases.util.Providers;
@@ -75,6 +79,7 @@ import org.graalvm.compiler.truffle.compiler.phases.DeoptimizeOnExceptionPhase;
 import org.graalvm.compiler.word.WordTypes;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.hosted.Feature;
+import org.graalvm.nativeimage.hosted.RuntimeReflection;
 
 import com.oracle.graal.pointsto.BigBang;
 import com.oracle.graal.pointsto.flow.InvokeTypeFlow;
@@ -84,17 +89,25 @@ import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.HostedProviders;
+import com.oracle.graal.pointsto.meta.PointsToAnalysisMethod;
+import com.oracle.graal.pointsto.util.GraalAccess;
+import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.graal.GraalConfiguration;
 import com.oracle.svm.core.graal.code.SubstrateBackend;
+import com.oracle.svm.core.graal.code.SubstrateMetaAccessExtensionProvider;
 import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.graal.meta.SubstrateReplacements;
+import com.oracle.svm.core.graal.nodes.LoweredDeadEndNode;
 import com.oracle.svm.core.graal.stackvalue.StackValueNode;
 import com.oracle.svm.core.jdk.RuntimeSupport;
+import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.core.option.HostedOptionKey;
+import com.oracle.svm.core.option.LocatableMultiOptionValue;
 import com.oracle.svm.core.option.RuntimeOptionValues;
+import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.graal.GraalSupport;
 import com.oracle.svm.graal.SubstrateGraalRuntime;
@@ -108,8 +121,8 @@ import com.oracle.svm.hosted.FeatureImpl.CompilationAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.DuringAnalysisAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 import com.oracle.svm.hosted.NativeImageGenerator;
+import com.oracle.svm.hosted.ProgressReporter;
 import com.oracle.svm.hosted.analysis.Inflation;
-import com.oracle.svm.hosted.c.GraalAccess;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.code.CompilationInfoSupport;
 import com.oracle.svm.hosted.code.SharedRuntimeConfigurationBuilder;
@@ -121,14 +134,15 @@ import com.oracle.svm.hosted.meta.HostedUniverse;
 import com.oracle.svm.hosted.phases.StrengthenStampsPhase;
 import com.oracle.svm.hosted.phases.SubstrateClassInitializationPlugin;
 import com.oracle.svm.hosted.phases.SubstrateGraphBuilderPhase;
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 
 import jdk.vm.ci.meta.DeoptimizationAction;
 import jdk.vm.ci.meta.DeoptimizationReason;
 import jdk.vm.ci.meta.JavaKind;
+import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
+import jdk.vm.ci.services.Services;
 
 /**
  * The main handler for running Graal in the Substrate VM at run time. This feature (and features it
@@ -143,11 +157,8 @@ public final class GraalFeature implements Feature {
         @Option(help = "Print call tree of methods available for runtime compilation")//
         public static final HostedOptionKey<Boolean> PrintRuntimeCompileMethods = new HostedOptionKey<>(false);
 
-        @Option(help = "Print truffle boundaries found during the analysis")//
-        public static final HostedOptionKey<Boolean> PrintStaticTruffleBoundaries = new HostedOptionKey<>(false);
-
         @Option(help = "Maximum number of methods allowed for runtime compilation.")//
-        public static final HostedOptionKey<Integer[]> MaxRuntimeCompileMethods = new HostedOptionKey<>(new Integer[]{});
+        public static final HostedOptionKey<LocatableMultiOptionValue.Strings> MaxRuntimeCompileMethods = new HostedOptionKey<>(new LocatableMultiOptionValue.Strings());
 
         @Option(help = "Enforce checking of maximum number of methods allowed for runtime compilation. Useful for checking in the gate that the number of methods does not go up without a good reason.")//
         public static final HostedOptionKey<Boolean> EnforceMaxRuntimeCompileMethods = new HostedOptionKey<>(false);
@@ -299,30 +310,21 @@ public final class GraalFeature implements Feature {
 
     @Override
     public List<Class<? extends Feature>> getRequiredFeatures() {
-        return Arrays.asList(DeoptimizationFeature.class, FieldsOffsetsFeature.class);
+        if (Services.IS_BUILDING_NATIVE_IMAGE) {
+            return List.of(FieldsOffsetsFeature.class);
+        }
+        return List.of(DeoptimizationFeature.class, FieldsOffsetsFeature.class);
     }
 
     @Override
     public void duringSetup(DuringSetupAccess c) {
-        DuringSetupAccessImpl config = (DuringSetupAccessImpl) c;
-        AnalysisMetaAccess aMetaAccess = config.getMetaAccess();
-
-        try {
-            /*
-             * Check early that the classpath is set up correctly. The base class of SubstrateType
-             * is the NodeClass from Truffle. So we require Truffle on the class path for any images
-             * and tests that use Graal at run time.
-             */
-            aMetaAccess.lookupJavaType(SubstrateType.class);
-        } catch (NoClassDefFoundError ex) {
-            throw VMError.shouldNotReachHere("Building a native image with Graal support requires Truffle on the class path. For unit tests run with 'svmtest', add the option '--truffle'.");
-        }
-
         ImageSingletons.add(GraalSupport.class, new GraalSupport());
-
         if (!ImageSingletons.contains(RuntimeGraalSetup.class)) {
             ImageSingletons.add(RuntimeGraalSetup.class, new SubstrateRuntimeGraalSetup());
         }
+
+        DuringSetupAccessImpl config = (DuringSetupAccessImpl) c;
+        AnalysisMetaAccess aMetaAccess = config.getMetaAccess();
         GraalProviderObjectReplacements providerReplacements = ImageSingletons.lookup(RuntimeGraalSetup.class).getProviderObjectReplacements(aMetaAccess);
         objectReplacer = new GraalObjectReplacer(config.getUniverse(), aMetaAccess, providerReplacements);
         config.registerObjectReplacer(objectReplacer);
@@ -330,8 +332,29 @@ public final class GraalFeature implements Feature {
         config.registerClassReachabilityListener(GraalSupport::registerPhaseStatistics);
     }
 
+    public Map<AnalysisMethod, CallTreeNode> getRuntimeCompiledMethods() {
+        return methods;
+    }
+
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess c) {
+        DebugContext debug = DebugContext.forCurrentThread();
+
+        // box lowering accesses the caches for those classes and thus needs reflective access
+        for (JavaKind kind : new JavaKind[]{JavaKind.Boolean, JavaKind.Byte, JavaKind.Char,
+                        JavaKind.Double, JavaKind.Float, JavaKind.Int, JavaKind.Long, JavaKind.Short}) {
+            RuntimeReflection.register(kind.toBoxedJavaClass());
+            Class<?>[] innerClasses = kind.toBoxedJavaClass().getDeclaredClasses();
+            if (innerClasses != null && innerClasses.length > 0) {
+                RuntimeReflection.register(innerClasses[0]);
+                try {
+                    RuntimeReflection.register(innerClasses[0].getDeclaredField("cache"));
+                } catch (Throwable t) {
+                    throw debug.handle(t);
+                }
+            }
+        }
+
         BeforeAnalysisAccessImpl config = (BeforeAnalysisAccessImpl) c;
 
         GraalSupport.allocatePhaseStatisticsCache();
@@ -341,17 +364,17 @@ public final class GraalFeature implements Feature {
         Function<Providers, SubstrateBackend> backendProvider = GraalSupport.getRuntimeBackendProvider();
         ClassInitializationSupport classInitializationSupport = config.getHostVM().getClassInitializationSupport();
         Providers originalProviders = GraalAccess.getOriginalProviders();
-        runtimeConfigBuilder = ImageSingletons.lookup(RuntimeGraalSetup.class)
-                        .createRuntimeConfigurationBuilder(RuntimeOptionValues.singleton(), config.getHostVM(), config.getUniverse(), config.getMetaAccess(),
-                                        originalProviders.getConstantReflection(), backendProvider, config.getNativeLibraries(), classInitializationSupport)
-                        .build();
+        runtimeConfigBuilder = ImageSingletons.lookup(RuntimeGraalSetup.class).createRuntimeConfigurationBuilder(RuntimeOptionValues.singleton(), config.getHostVM(), config.getUniverse(),
+                        config.getMetaAccess(),
+                        originalProviders.getConstantReflection(), backendProvider, config.getNativeLibraries(), classInitializationSupport, originalProviders.getLoopsDataProvider()).build();
         RuntimeConfiguration runtimeConfig = runtimeConfigBuilder.getRuntimeConfig();
 
         Providers runtimeProviders = runtimeConfig.getProviders();
         WordTypes wordTypes = runtimeConfigBuilder.getWordTypes();
         hostedProviders = new HostedProviders(runtimeProviders.getMetaAccess(), runtimeProviders.getCodeCache(), runtimeProviders.getConstantReflection(), runtimeProviders.getConstantFieldProvider(),
                         runtimeProviders.getForeignCalls(), runtimeProviders.getLowerer(), runtimeProviders.getReplacements(), runtimeProviders.getStampProvider(),
-                        runtimeConfig.getSnippetReflection(), wordTypes, runtimeProviders.getPlatformConfigurationProvider());
+                        runtimeConfig.getSnippetReflection(), wordTypes, runtimeProviders.getPlatformConfigurationProvider(), new GraphPrepareMetaAccessExtensionProvider(),
+                        runtimeProviders.getLoopsDataProvider());
 
         SubstrateGraalRuntime graalRuntime = new SubstrateGraalRuntime();
         objectReplacer.setGraalRuntime(graalRuntime);
@@ -360,10 +383,10 @@ public final class GraalFeature implements Feature {
 
         FeatureHandler featureHandler = config.getFeatureHandler();
         NativeImageGenerator.registerGraphBuilderPlugins(featureHandler, runtimeConfig, hostedProviders, config.getMetaAccess(), config.getUniverse(), null, null, config.getNativeLibraries(),
-                        config.getImageClassLoader(), false, false, ((Inflation) config.getBigBang()).getAnnotationSubstitutionProcessor(), new SubstrateClassInitializationPlugin(config.getHostVM()),
-                        classInitializationSupport, ConfigurationValues.getTarget());
-        DebugContext debug = DebugContext.forCurrentThread();
-        NativeImageGenerator.registerReplacements(debug, featureHandler, runtimeConfig, runtimeConfig.getProviders(), runtimeConfig.getSnippetReflection(), false, true);
+                        config.getImageClassLoader(), ParsingReason.JITCompilation, ((Inflation) config.getBigBang()).getAnnotationSubstitutionProcessor(),
+                        new SubstrateClassInitializationPlugin(config.getHostVM()), ConfigurationValues.getTarget());
+
+        NativeImageGenerator.registerReplacements(debug, featureHandler, runtimeConfig, runtimeConfig.getProviders(), false, true);
         featureHandler.forEachGraalFeature(feature -> feature.registerCodeObserver(runtimeConfig));
         Suites suites = NativeImageGenerator.createSuites(featureHandler, runtimeConfig, runtimeConfig.getSnippetReflection(), false);
         LIRSuites lirSuites = NativeImageGenerator.createLIRSuites(featureHandler, runtimeConfig.getProviders(), false);
@@ -394,7 +417,7 @@ public final class GraalFeature implements Feature {
 
     private static void populateMatchRuleRegistry() {
         GraalSupport.get().setMatchRuleRegistry(new HashMap<>());
-        GraalConfiguration.instance().populateMatchRuleRegistry(GraalSupport.get().getMatchRuleRegistry());
+        GraalConfiguration.runtimeInstance().populateMatchRuleRegistry(GraalSupport.get().getMatchRuleRegistry());
     }
 
     @SuppressWarnings("unused")
@@ -438,9 +461,10 @@ public final class GraalFeature implements Feature {
         AnalysisMethod aMethod = (AnalysisMethod) method;
         SubstrateMethod sMethod = objectReplacer.createMethod(aMethod);
 
-        assert !methods.containsKey(aMethod);
-        methods.put(aMethod, new CallTreeNode(aMethod, aMethod, null, 0, ""));
-        config.registerAsInvoked(aMethod);
+        if (!methods.containsKey(aMethod)) {
+            methods.put(aMethod, new CallTreeNode(aMethod, aMethod, null, 0, ""));
+            config.registerAsRoot(aMethod, true);
+        }
 
         return sMethod;
     }
@@ -461,7 +485,7 @@ public final class GraalFeature implements Feature {
         for (CallTreeNode node : methods.values()) {
             methodsToCompileArr[idx++] = objectReplacer.createMethod(node.implementationMethod);
         }
-        if (GraalSupport.setMethodsToCompile(methodsToCompileArr)) {
+        if (GraalSupport.setMethodsToCompile(config, methodsToCompileArr)) {
             config.requireAnalysisIteration();
         }
 
@@ -471,11 +495,11 @@ public final class GraalFeature implements Feature {
         for (NodeClass<?> nodeClass : nodeClasses) {
             metaAccess.lookupJavaType(nodeClass.getClazz()).registerAsAllocated(null);
         }
-        if (GraalSupport.setGraphEncoding(graphEncoder.getEncoding(), graphEncoder.getObjects(), nodeClasses)) {
+        if (GraalSupport.setGraphEncoding(config, graphEncoder.getEncoding(), graphEncoder.getObjects(), nodeClasses)) {
             config.requireAnalysisIteration();
         }
 
-        if (objectReplacer.updateDataDuringAnalysis(config.getMetaAccess())) {
+        if (objectReplacer.updateDataDuringAnalysis()) {
             config.requireAnalysisIteration();
         }
     }
@@ -502,7 +526,14 @@ public final class GraalFeature implements Feature {
                     return;
                 }
                 parse = true;
-                graph = new StructuredGraph.Builder(debug.getOptions(), debug, AllowAssumptions.YES).method(method).build();
+                graph = new StructuredGraph.Builder(debug.getOptions(), debug, AllowAssumptions.YES)
+                                .method(method)
+                                /*
+                                 * Needed for computation of the list of all runtime compilable
+                                 * methods in TruffleFeature.
+                                 */
+                                .recordInlinedMethods(true)
+                                .build();
             }
 
             try (DebugContext.Scope scope = debug.scope("RuntimeCompile", graph)) {
@@ -524,11 +555,12 @@ public final class GraalFeature implements Feature {
                     return;
                 }
 
-                CanonicalizerPhase.create().apply(graph, hostedProviders);
+                CanonicalizerPhase canonicalizer = CanonicalizerPhase.create();
+                canonicalizer.apply(graph, hostedProviders);
                 if (deoptimizeOnExceptionPredicate != null) {
                     new DeoptimizeOnExceptionPhase(deoptimizeOnExceptionPredicate).apply(graph);
                 }
-                new ConvertDeoptimizeToGuardPhase().apply(graph, hostedProviders);
+                new ConvertDeoptimizeToGuardPhase(canonicalizer).apply(graph, hostedProviders);
 
                 graphEncoder.prepare(graph);
                 node.graph = graph;
@@ -544,13 +576,19 @@ public final class GraalFeature implements Feature {
 
         for (MethodCallTargetNode targetNode : callTargets) {
             AnalysisMethod targetMethod = (AnalysisMethod) targetNode.targetMethod();
-            AnalysisMethod callerMethod = (AnalysisMethod) targetNode.invoke().stateAfter().getMethod();
-            InvokeTypeFlow invokeFlow = callerMethod.getTypeFlow().getOriginalMethodFlows().getInvoke(targetNode.invoke().bci());
+            ResolvedJavaMethod callerMethod = targetNode.invoke().stateAfter().getMethod();
+            Collection<AnalysisMethod> allImplementationMethods;
+            if (callerMethod instanceof PointsToAnalysisMethod) {
+                PointsToAnalysisMethod pointToCalledMethod = (PointsToAnalysisMethod) callerMethod;
+                InvokeTypeFlow invokeFlow = pointToCalledMethod.getTypeFlow().getInvokes().get(targetNode.invoke().bci());
 
-            if (invokeFlow == null) {
-                continue;
+                if (invokeFlow == null) {
+                    continue;
+                }
+                allImplementationMethods = invokeFlow.getCallees();
+            } else {
+                allImplementationMethods = Arrays.asList(method.getImplementations());
             }
-            Collection<AnalysisMethod> allImplementationMethods = invokeFlow.getCallees();
 
             /*
              * Eventually we want to remove all invokes that are unreachable, i.e., have no
@@ -610,6 +648,11 @@ public final class GraalFeature implements Feature {
     }
 
     @Override
+    public void afterAnalysis(AfterAnalysisAccess access) {
+        ProgressReporter.singleton().setNumRuntimeCompiledMethods(methods.size());
+    }
+
+    @Override
     @SuppressWarnings("try")
     public void beforeCompilation(BeforeCompilationAccess c) {
         CompilationAccessImpl config = (CompilationAccessImpl) c;
@@ -617,23 +660,22 @@ public final class GraalFeature implements Feature {
         if (Options.PrintRuntimeCompileMethods.getValue()) {
             printCallTree();
         }
-        System.out.println(methods.size() + " method(s) included for runtime compilation");
-
-        if (Options.PrintStaticTruffleBoundaries.getValue()) {
-            printStaticTruffleBoundaries();
-        }
 
         int maxMethods = 0;
-        for (Integer value : Options.MaxRuntimeCompileMethods.getValue()) {
-            maxMethods += value;
+        for (String value : Options.MaxRuntimeCompileMethods.getValue().values()) {
+            String numberStr = null;
+            try {
+                /* Strip optional comment string from MaxRuntimeCompileMethods value */
+                numberStr = value.split("#")[0];
+                maxMethods += Long.parseLong(numberStr);
+            } catch (NumberFormatException ex) {
+                throw UserError.abort("Invalid value for option 'MaxRuntimeCompileMethods': '%s' is not a valid number", numberStr);
+            }
         }
         if (Options.EnforceMaxRuntimeCompileMethods.getValue() && maxMethods != 0 && methods.size() > maxMethods) {
             printDeepestLevelPath();
             throw VMError.shouldNotReachHere("Number of methods for runtime compilation exceeds the allowed limit: " + methods.size() + " > " + maxMethods);
         }
-
-        HostedMetaAccess hMetaAccess = config.getMetaAccess();
-        runtimeConfigBuilder.updateLazyState(hMetaAccess);
 
         /*
          * Start fresh with a new GraphEncoder, since we are going to optimize all graphs now that
@@ -643,6 +685,9 @@ public final class GraalFeature implements Feature {
 
         StrengthenStampsPhase strengthenStamps = new RuntimeStrengthenStampsPhase(config.getUniverse(), objectReplacer);
         CanonicalizerPhase canonicalizer = CanonicalizerPhase.create();
+        IterativeConditionalEliminationPhase conditionalElimination = new IterativeConditionalEliminationPhase(canonicalizer, true);
+        ConvertDeoptimizeToGuardPhase convertDeoptimizeToGuard = new ConvertDeoptimizeToGuardPhase(canonicalizer);
+
         for (CallTreeNode node : methods.values()) {
             StructuredGraph graph = node.graph;
             if (graph != null) {
@@ -651,8 +696,15 @@ public final class GraalFeature implements Feature {
                     removeUnreachableInvokes(node);
                     strengthenStamps.apply(graph);
                     canonicalizer.apply(graph, hostedProviders);
-                    GraalConfiguration.instance().runAdditionalCompilerPhases(graph, this);
-                    canonicalizer.apply(graph, hostedProviders);
+
+                    conditionalElimination.apply(graph, hostedProviders);
+
+                    /*
+                     * ConvertDeoptimizeToGuardPhase was already executed after parsing, but
+                     * optimizations applied in between can provide new potential.
+                     */
+                    convertDeoptimizeToGuard.apply(graph, hostedProviders);
+
                     graphEncoder.prepare(graph);
                 } catch (Throwable ex) {
                     debug.handle(ex);
@@ -673,9 +725,13 @@ public final class GraalFeature implements Feature {
             }
         }
 
-        GraalSupport.setGraphEncoding(graphEncoder.getEncoding(), graphEncoder.getObjects(), graphEncoder.getNodeClasses());
+        ProgressReporter.singleton().setGraphEncodingByteLength(graphEncoder.getEncoding().length);
+        GraalSupport.setGraphEncoding(config, graphEncoder.getEncoding(), graphEncoder.getObjects(), graphEncoder.getNodeClasses());
 
-        objectReplacer.updateDataDuringAnalysis((AnalysisMetaAccess) hMetaAccess.getWrapped());
+        objectReplacer.updateDataDuringAnalysis();
+
+        /* All the temporary data structures used during encoding are no longer necessary. */
+        graphEncoder = null;
     }
 
     private static void removeUnreachableInvokes(CallTreeNode node) {
@@ -688,18 +744,33 @@ public final class GraalFeature implements Feature {
                 InliningUtil.nonNullReceiver(invoke);
             }
             FixedGuardNode guard = new FixedGuardNode(LogicConstantNode.forBoolean(true, node.graph), DeoptimizationReason.UnreachedCode, DeoptimizationAction.None, true);
-            node.graph.addBeforeFixed(invoke.asNode(), node.graph.add(guard));
+            node.graph.addBeforeFixed(invoke.asFixedNode(), node.graph.add(guard));
         }
     }
 
     private static void registerDeoptEntries(CallTreeNode node) {
         for (FrameState frameState : node.graph.getNodes(FrameState.TYPE)) {
-            if (node.level > 0 && frameState.hasExactlyOneUsage() && frameState.usages().first() == node.graph.start()) {
-                /*
-                 * During method inlining, the FrameState associated with the StartNode disappears.
-                 * Therefore, this frame state cannot be a deoptimization target.
-                 */
-                continue;
+            if (frameState.hasExactlyOneUsage()) {
+                Node usage = frameState.usages().first();
+                if (node.level > 0 && usage == node.graph.start()) {
+                    /*
+                     * During method inlining, the FrameState associated with the StartNode
+                     * disappears. Therefore, this frame state cannot be a deoptimization target.
+                     */
+                    continue;
+                } else if (usage instanceof Invoke && ((Invoke) usage).stateAfter() == frameState) {
+                    /*
+                     * If the FrameState is followed immediately by a dead end, then this state can
+                     * never be reached and does not need to be registered.
+                     */
+                    FixedNode next = ((Invoke) usage).next();
+                    while (next instanceof AbstractBeginNode) {
+                        next = ((AbstractBeginNode) next).next();
+                    }
+                    if (next instanceof LoweredDeadEndNode) {
+                        continue;
+                    }
+                }
             }
 
             /*
@@ -708,7 +779,7 @@ public final class GraalFeature implements Feature {
              */
             for (FrameState inlineState = frameState; inlineState != null; inlineState = inlineState.outerFrameState()) {
                 if (inlineState.bci >= 0) {
-                    CompilationInfoSupport.singleton().registerDeoptEntry(inlineState.getMethod(), inlineState.bci, inlineState.duringCall(), inlineState.rethrowException());
+                    CompilationInfoSupport.singleton().registerDeoptEntry(inlineState);
                 }
             }
         }
@@ -731,7 +802,9 @@ public final class GraalFeature implements Feature {
                  * different: the Invoke has the bci of the invocation bytecode, the FrameState has
                  * the bci of the next bytecode after the invoke.
                  */
-                CompilationInfoSupport.singleton().registerDeoptEntry(invoke.stateAfter().getMethod(), invoke.bci(), true, false);
+                FrameState stateDuring = invoke.stateAfter().duplicateModifiedDuringCall(invoke.bci(), invoke.asNode().getStackKind());
+                assert stateDuring.duringCall() && !stateDuring.rethrowException();
+                CompilationInfoSupport.singleton().registerDeoptEntry(stateDuring);
             }
         }
     }
@@ -755,30 +828,6 @@ public final class GraalFeature implements Feature {
             System.out.println();
             node = node.parent;
         }
-    }
-
-    private void printStaticTruffleBoundaries() {
-        HashSet<ResolvedJavaMethod> foundBoundaries = new HashSet<>();
-        int callSiteCount = 0;
-        int calleeCount = 0;
-        for (CallTreeNode node : methods.values()) {
-            StructuredGraph graph = node.graph;
-            for (MethodCallTargetNode callTarget : graph.getNodes(MethodCallTargetNode.TYPE)) {
-                ResolvedJavaMethod targetMethod = callTarget.targetMethod();
-                TruffleBoundary truffleBoundary = targetMethod.getAnnotation(TruffleBoundary.class);
-                if (truffleBoundary != null) {
-                    ++callSiteCount;
-                    if (foundBoundaries.contains(targetMethod)) {
-                        // nothing to do
-                    } else {
-                        foundBoundaries.add(targetMethod);
-                        System.out.println("Truffle boundary found: " + targetMethod);
-                        calleeCount++;
-                    }
-                }
-            }
-        }
-        System.out.println(String.format("Number of Truffle call boundaries: %d, number of unique called methods outside the boundary: %d", callSiteCount, calleeCount));
     }
 
     private void printCallTree() {
@@ -817,8 +866,8 @@ public final class GraalFeature implements Feature {
         CompilationAccessImpl config = (CompilationAccessImpl) a;
 
         HostedMetaAccess hMetaAccess = config.getMetaAccess();
-        HostedUniverse hUniverse = (HostedUniverse) hMetaAccess.getUniverse();
-        objectReplacer.updateSubstrateDataAfterCompilation(hUniverse);
+        HostedUniverse hUniverse = hMetaAccess.getUniverse();
+        objectReplacer.updateSubstrateDataAfterCompilation(hUniverse, config.getProviders().getConstantFieldProvider());
 
         objectReplacer.registerImmutableObjects(config);
         GraalSupport.registerImmutableObjects(config);
@@ -829,7 +878,7 @@ public final class GraalFeature implements Feature {
     public void afterHeapLayout(AfterHeapLayoutAccess a) {
         AfterHeapLayoutAccessImpl config = (AfterHeapLayoutAccessImpl) a;
         HostedMetaAccess hMetaAccess = config.getMetaAccess();
-        HostedUniverse hUniverse = (HostedUniverse) hMetaAccess.getUniverse();
+        HostedUniverse hUniverse = hMetaAccess.getUniverse();
         objectReplacer.updateSubstrateDataAfterHeapLayout(hUniverse);
     }
 }
@@ -890,5 +939,34 @@ class RuntimeStrengthenStampsPhase extends StrengthenStampsPhase {
         }
 
         return result;
+    }
+}
+
+/**
+ * Same behavior as {@link SubstrateMetaAccessExtensionProvider}, but operating on
+ * {@link AnalysisType} instead of {@link SharedType} since parsing of graphs for runtime
+ * compilation happens in the Analysis universe.
+ */
+class GraphPrepareMetaAccessExtensionProvider implements MetaAccessExtensionProvider {
+
+    @Override
+    public JavaKind getStorageKind(JavaType type) {
+        return ((AnalysisType) type).getStorageKind();
+    }
+
+    @Override
+    public boolean canConstantFoldDynamicAllocation(ResolvedJavaType type) {
+        assert type instanceof AnalysisType : "AnalysisType is required; AnalysisType lazily creates array types of any depth, so type cannot be null";
+        return ((AnalysisType) type).isInstantiated();
+    }
+
+    @Override
+    public boolean isGuaranteedSafepoint(ResolvedJavaMethod method, boolean isDirect) {
+        throw VMError.shouldNotReachHere();
+    }
+
+    @Override
+    public boolean canVirtualize(ResolvedJavaType instanceType) {
+        return true;
     }
 }

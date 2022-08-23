@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,15 +42,37 @@ package com.oracle.truffle.regex;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.regex.errors.ErrorMessages;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 import com.oracle.truffle.regex.util.TruffleReadOnlyKeysArray;
 
+@ExportLibrary(InteropLibrary.class)
 public final class RegexFlags extends AbstractConstantKeysObject implements JsonConvertible {
 
-    private static final TruffleReadOnlyKeysArray KEYS = new TruffleReadOnlyKeysArray("source", "ignoreCase", "multiline", "sticky", "global", "unicode", "dotAll");
+    private static final String PROP_SOURCE = "source";
+    private static final String PROP_IGNORE_CASE = "ignoreCase";
+    private static final String PROP_MULTILINE = "multiline";
+    private static final String PROP_STICKY = "sticky";
+    private static final String PROP_GLOBAL = "global";
+    private static final String PROP_UNICODE = "unicode";
+    private static final String PROP_DOT_ALL = "dotAll";
+    private static final String PROP_HAS_INDICES = "hasIndices";
+
+    private static final TruffleReadOnlyKeysArray KEYS = new TruffleReadOnlyKeysArray(
+                    PROP_SOURCE,
+                    PROP_IGNORE_CASE,
+                    PROP_MULTILINE,
+                    PROP_STICKY,
+                    PROP_GLOBAL,
+                    PROP_UNICODE,
+                    PROP_DOT_ALL,
+                    PROP_HAS_INDICES);
 
     private static final int NONE = 0;
     private static final int IGNORE_CASE = 1;
@@ -59,65 +81,65 @@ public final class RegexFlags extends AbstractConstantKeysObject implements Json
     private static final int GLOBAL = 1 << 3;
     private static final int UNICODE = 1 << 4;
     private static final int DOT_ALL = 1 << 5;
+    private static final int HAS_INDICES = 1 << 6;
 
-    public static final RegexFlags DEFAULT = new RegexFlags("", false, false, false, false, false, false);
+    public static final RegexFlags DEFAULT = new RegexFlags("", NONE);
 
     private final String source;
     private final int value;
 
-    private RegexFlags(String source, boolean ignoreCase, boolean multiline, boolean global, boolean sticky, boolean unicode, boolean dotAll) {
+    private RegexFlags(String source, int value) {
         this.source = source;
-        this.value = (ignoreCase ? IGNORE_CASE : NONE) | (multiline ? MULTILINE : NONE) | (sticky ? STICKY : NONE) | (global ? GLOBAL : NONE) | (unicode ? UNICODE : NONE) | (dotAll ? DOT_ALL : NONE);
+        this.value = value;
+    }
+
+    public static Builder builder() {
+        return new Builder();
     }
 
     @TruffleBoundary
-    public static RegexFlags parseFlags(String source) throws RegexSyntaxException {
-        if (source.isEmpty()) {
+    public static RegexFlags parseFlags(RegexSource source) throws RegexSyntaxException {
+        String flagsStr = source.getFlags();
+        if (flagsStr.isEmpty()) {
             return DEFAULT;
         }
-        boolean ignoreCase = false;
-        boolean multiline = false;
-        boolean global = false;
-        boolean sticky = false;
-        boolean unicode = false;
-        boolean dotAll = false;
-
-        for (int i = 0; i < source.length(); i++) {
-            char ch = source.charAt(i);
-            boolean repeated;
+        int flags = NONE;
+        for (int i = 0; i < flagsStr.length(); i++) {
+            char ch = flagsStr.charAt(i);
             switch (ch) {
                 case 'i':
-                    repeated = ignoreCase;
-                    ignoreCase = true;
+                    flags = addFlag(source, flags, i, IGNORE_CASE);
                     break;
                 case 'm':
-                    repeated = multiline;
-                    multiline = true;
+                    flags = addFlag(source, flags, i, MULTILINE);
                     break;
                 case 'g':
-                    repeated = global;
-                    global = true;
+                    flags = addFlag(source, flags, i, GLOBAL);
                     break;
                 case 'y':
-                    repeated = sticky;
-                    sticky = true;
+                    flags = addFlag(source, flags, i, STICKY);
                     break;
                 case 'u':
-                    repeated = unicode;
-                    unicode = true;
+                    flags = addFlag(source, flags, i, UNICODE);
                     break;
                 case 's':
-                    repeated = dotAll;
-                    dotAll = true;
+                    flags = addFlag(source, flags, i, DOT_ALL);
+                    break;
+                case 'd':
+                    flags = addFlag(source, flags, i, HAS_INDICES);
                     break;
                 default:
-                    throw new RegexSyntaxException(source, "unsupported regex flag: " + ch);
-            }
-            if (repeated) {
-                throw new RegexSyntaxException(source, "repeated regex flag: " + ch);
+                    throw RegexSyntaxException.createFlags(source, ErrorMessages.UNSUPPORTED_FLAG, i);
             }
         }
-        return new RegexFlags(source, ignoreCase, multiline, global, sticky, unicode, dotAll);
+        return new RegexFlags(flagsStr, flags);
+    }
+
+    private static int addFlag(RegexSource source, int flags, int i, int flag) {
+        if ((flags & flag) != 0) {
+            throw RegexSyntaxException.createFlags(source, ErrorMessages.REPEATED_FLAG, i);
+        }
+        return flags | flag;
     }
 
     public String getSource() {
@@ -148,6 +170,10 @@ public final class RegexFlags extends AbstractConstantKeysObject implements Json
         return isSet(DOT_ALL);
     }
 
+    public boolean hasIndices() {
+        return isSet(HAS_INDICES);
+    }
+
     public boolean isNone() {
         return value == NONE;
     }
@@ -174,12 +200,13 @@ public final class RegexFlags extends AbstractConstantKeysObject implements Json
     @TruffleBoundary
     @Override
     public JsonValue toJson() {
-        return Json.obj(Json.prop("ignoreCase", isIgnoreCase()),
-                        Json.prop("multiline", isMultiline()),
-                        Json.prop("global", isGlobal()),
-                        Json.prop("sticky", isSticky()),
-                        Json.prop("unicode", isUnicode()),
-                        Json.prop("dotAll", isDotAll()));
+        return Json.obj(Json.prop(PROP_IGNORE_CASE, isIgnoreCase()),
+                        Json.prop(PROP_MULTILINE, isMultiline()),
+                        Json.prop(PROP_GLOBAL, isGlobal()),
+                        Json.prop(PROP_STICKY, isSticky()),
+                        Json.prop(PROP_UNICODE, isUnicode()),
+                        Json.prop(PROP_DOT_ALL, isDotAll()),
+                        Json.prop(PROP_HAS_INDICES, hasIndices()));
     }
 
     @Override
@@ -188,25 +215,137 @@ public final class RegexFlags extends AbstractConstantKeysObject implements Json
     }
 
     @Override
+    public boolean isMemberReadableImpl(String symbol) {
+        switch (symbol) {
+            case PROP_SOURCE:
+            case PROP_IGNORE_CASE:
+            case PROP_MULTILINE:
+            case PROP_STICKY:
+            case PROP_GLOBAL:
+            case PROP_UNICODE:
+            case PROP_DOT_ALL:
+            case PROP_HAS_INDICES:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    @Override
     public Object readMemberImpl(String symbol) throws UnknownIdentifierException {
         switch (symbol) {
-            case "source":
+            case PROP_SOURCE:
                 return getSource();
-            case "ignoreCase":
+            case PROP_IGNORE_CASE:
                 return isIgnoreCase();
-            case "multiline":
+            case PROP_MULTILINE:
                 return isMultiline();
-            case "sticky":
+            case PROP_STICKY:
                 return isSticky();
-            case "global":
+            case PROP_GLOBAL:
                 return isGlobal();
-            case "unicode":
+            case PROP_UNICODE:
                 return isUnicode();
-            case "dotAll":
+            case PROP_DOT_ALL:
                 return isDotAll();
+            case PROP_HAS_INDICES:
+                return hasIndices();
             default:
-                CompilerDirectives.transferToInterpreter();
+                CompilerDirectives.transferToInterpreterAndInvalidate();
                 throw UnknownIdentifierException.create(symbol);
+        }
+    }
+
+    @TruffleBoundary
+    @ExportMessage
+    @Override
+    public Object toDisplayString(@SuppressWarnings("unused") boolean allowSideEffects) {
+        return "TRegexJSFlags{flags=" + toString() + '}';
+    }
+
+    public static final class Builder {
+
+        private int value;
+
+        private Builder() {
+        }
+
+        public Builder ignoreCase(boolean enabled) {
+            updateFlag(enabled, IGNORE_CASE);
+            return this;
+        }
+
+        public Builder multiline(boolean enabled) {
+            updateFlag(enabled, MULTILINE);
+            return this;
+        }
+
+        public Builder sticky(boolean enabled) {
+            updateFlag(enabled, STICKY);
+            return this;
+        }
+
+        public Builder global(boolean enabled) {
+            updateFlag(enabled, GLOBAL);
+            return this;
+        }
+
+        public Builder unicode(boolean enabled) {
+            updateFlag(enabled, UNICODE);
+            return this;
+        }
+
+        public Builder dotAll(boolean enabled) {
+            updateFlag(enabled, DOT_ALL);
+            return this;
+        }
+
+        public Builder hasIndices(boolean enabled) {
+            updateFlag(enabled, HAS_INDICES);
+            return this;
+        }
+
+        @TruffleBoundary
+        public RegexFlags build() {
+            return new RegexFlags(generateSource(), this.value);
+        }
+
+        private void updateFlag(boolean enabled, int bitMask) {
+            if (enabled) {
+                this.value |= bitMask;
+            } else {
+                this.value &= ~bitMask;
+            }
+        }
+
+        private boolean isSet(int flag) {
+            return (value & flag) != NONE;
+        }
+
+        private String generateSource() {
+            StringBuilder sb = new StringBuilder(7);
+            if (isSet(IGNORE_CASE)) {
+                sb.append("i");
+            }
+            if (isSet(MULTILINE)) {
+                sb.append("m");
+            }
+            if (isSet(STICKY)) {
+                sb.append("y");
+            }
+            if (isSet(GLOBAL)) {
+                sb.append("g");
+            }
+            if (isSet(UNICODE)) {
+                sb.append("u");
+            }
+            if (isSet(DOT_ALL)) {
+                sb.append("s");
+            }
+            if (isSet(HAS_INDICES)) {
+                sb.append("d");
+            }
+            return sb.toString();
         }
     }
 }

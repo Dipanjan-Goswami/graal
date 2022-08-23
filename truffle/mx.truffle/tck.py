@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # The Universal Permissive License (UPL), Version 1.0
@@ -85,8 +85,11 @@ class Mode:
     def compile():
         if not Mode._compile:
             Mode._compile = Mode('compile', [
-                '-Dgraal.TruffleCompileImmediately=true',
-                '-Dgraal.TruffleBackgroundCompilation=false',
+                '-Dpolyglot.engine.AllowExperimentalOptions=true',
+                '-Dpolyglot.engine.Mode=latency',
+                # '-Dpolyglot.engine.CompilationFailureAction=Throw', GR-29208
+                '-Dpolyglot.engine.CompileImmediately=true',
+                '-Dpolyglot.engine.BackgroundCompilation=false',
                 '-Dtck.inlineVerifierInstrument=false'])
         return Mode._compile
 
@@ -120,26 +123,33 @@ class _ClassPathEntry:
 
 class _MvnClassPathEntry(_ClassPathEntry):
 
-    def __init__(self, groupId, artifactId, version, repository=None):
+    def __init__(self, groupId, artifactId, version, required=True, repository=None):
         self.repository = repository
         self.groupId = groupId
         self.artifactId = artifactId
         self.version = version
+        self.required = required
         _ClassPathEntry.__init__(self, None)
 
     def install(self, folder):
         _log(LogLevel.INFO, 'Installing {0}'.format(self))
-        self.pull()
-        install_folder = os.path.join(folder, self.artifactId)
-        os.mkdir(install_folder)
-        self.copy(install_folder)
-        self.path = os.pathsep.join([os.path.join(install_folder, f) for f in os.listdir(install_folder) if f.endswith('.jar')])
+        if self.pull():
+            install_folder = os.path.join(folder, self.artifactId)
+            os.mkdir(install_folder)
+            self.copy(install_folder)
+            self.path = os.pathsep.join([os.path.join(install_folder, f) for f in os.listdir(install_folder) if f.endswith('.jar')])
+        else:
+            self.path = ''
 
     def pull(self):
         process = _MvnClassPathEntry._run_maven(['dependency:get', '-DgroupId=' + self.groupId, '-DartifactId=' + self.artifactId, '-Dversion=' + self.version], self.repository)
         ret_code = process.wait()
         if ret_code != 0:
-            raise Abort('Cannot download artifact {0} '.format(self))
+            if self.required:
+                raise Abort('Cannot download artifact {0} '.format(self))
+            return False
+        else:
+            return True
 
     def copy(self, folder):
         process = _MvnClassPathEntry._run_maven(['dependency:copy', '-Dartifact=' + self.groupId + ':' + self.artifactId + ':' + self.version, '-DoutputDirectory=' + folder], self.repository)
@@ -259,6 +269,7 @@ def _find_unit_tests(cp, pkgs=None):
                         name = name[:len(name) - 6].replace('/', '.')
                         if includes(name):
                             tests.append(name)
+    tests.sort(reverse=True)
     return tests
 
 def _execute_tck_impl(graalvm_home, mode, language_filter, values_filter, tests_filter, cp, truffle_cp, boot_cp, vm_args, debug_port):
@@ -307,11 +318,30 @@ def execute_tck(graalvm_home, mode=Mode.default(), language_filter=None, values_
     if tests_filter and isinstance(tests_filter, str):
         tests_filter = [tests_filter]
 
+    # Interface InlineVerifier defined in truffle-tck-common.jar is used to define the service exposed by the VerifierInstrument.
+    # Instruments are loaded by our custom ClassLoader and if the InlineVerifier interface is loaded by the custom class loader
+    # when the instrument is defined and by the app class loader when the service is looked up, then the lookup fails.
+    # For that reason we used to put the truffle-tck-common.jar together with its dependencies to bootclasspath on JDK8.
+    # On JDK9+ this does not work as one of the dependencies is Graal SDK which is in Java module org.graalvm.sdk, so instead
+    # we patch the org.graalvm.sdk module to include the truffle-tck-common.jar and also its other dependency polyglot-tck.jar.
+    # GR-35018 was filed to resolve this inconvenience.
+    additional_vm_arguments = []
+    jarsToPatch = []
+    for jarPath in cp:
+        if 'polyglot-tck.jar' in jarPath:
+            additional_vm_arguments.append('--add-exports=org.graalvm.sdk/org.graalvm.polyglot.tck=ALL-UNNAMED')
+            jarsToPatch.append(os.path.abspath(jarPath))
+        if 'truffle-tck-common.jar' in jarPath:
+            additional_vm_arguments.append('--add-exports=org.graalvm.sdk/com.oracle.truffle.tck.common.inline=ALL-UNNAMED')
+            jarsToPatch.append(os.path.abspath(jarPath))
+    if jarsToPatch:
+        additional_vm_arguments.extend(['--patch-module', 'org.graalvm.sdk=' + ':'.join(jarsToPatch)])
+
     return _execute_tck_impl(graalvm_home, mode, language_filter, values_filter, tests_filter,
         [_ClassPathEntry(os.path.abspath(e)) for e in cp],
         [_ClassPathEntry(os.path.abspath(e)) for e in truffle_cp],
-        [_ClassPathEntry(os.path.abspath(e)) for e in boot_cp],
-        vm_args if isinstance(vm_args, list) else list(vm_args),
+        [],
+        additional_vm_arguments + (vm_args if isinstance(vm_args, list) else list(vm_args)),
         debug_port)
 
 def set_log_level(log_level):
@@ -324,16 +354,19 @@ def set_log_level(log_level):
     _log_level = log_level
 
 _MVN_DEPENDENCIES = {
-    'JUNIT' : [
-        {'groupId':'junit', 'artifactId':'junit', 'version':'4.12'},
-        {'groupId':'org/hamcrest', 'artifactId':'hamcrest-all', 'version':'1.3'}
+    'TESTS' : [
+        {'groupId':'junit', 'artifactId':'junit', 'version':'4.12', 'required':True},
+        {'groupId':'org/hamcrest', 'artifactId':'hamcrest-all', 'version':'1.3', 'required':True},
+        {'groupId':'org.graalvm.truffle', 'artifactId':'truffle-tck-tests', 'required':False},
     ],
     'TCK' : [
-        {'groupId':'org.graalvm.sdk', 'artifactId':'polyglot-tck'},
-        {'groupId':'org.graalvm.truffle', 'artifactId':'truffle-tck-common'},
+        {'groupId':'org.graalvm.sdk', 'artifactId':'polyglot-tck', 'required':True}
+    ],
+    'COMMON' : [
+        {'groupId':'org.graalvm.truffle', 'artifactId':'truffle-tck-common', 'required':True}
     ],
     'INSTRUMENTS' : [
-        {'groupId':'org.graalvm.truffle', 'artifactId':'truffle-tck-instrumentation'},
+        {'groupId':'org.graalvm.truffle', 'artifactId':'truffle-tck-instrumentation', 'required':True},
     ]
 }
 
@@ -395,9 +428,11 @@ def _main(argv):
         if parsed_args.tck_values:
             values = parsed_args.tck_values.split(',')
         os.mkdir(cache_folder)
-        boot = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version) for e in _MVN_DEPENDENCIES['TCK']]
-        cp = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version) for e in _MVN_DEPENDENCIES['JUNIT']]
-        truffle_cp = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version) for e in _MVN_DEPENDENCIES['INSTRUMENTS']]
+        boot = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version, e['required']) for e in _MVN_DEPENDENCIES['COMMON']]
+        cp = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version, e['required']) for e in _MVN_DEPENDENCIES['TESTS']]
+        truffle_cp = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version, e['required']) for e in _MVN_DEPENDENCIES['INSTRUMENTS']]
+        tck = [_MvnClassPathEntry(e['groupId'], e['artifactId'], e['version'] if 'version' in e else parsed_args.tck_version, e['required']) for e in _MVN_DEPENDENCIES['TCK']]
+        cp.extend(tck)
         if parsed_args.class_path:
             for e in parsed_args.class_path.split(os.pathsep):
                 cp.append(_ClassPathEntry(os.path.abspath(e)))

@@ -24,6 +24,9 @@
  */
 package com.oracle.svm.hosted.phases;
 
+import static com.oracle.svm.core.graal.snippets.DeoptHostedSnippets.AnalysisSpeculation;
+import static com.oracle.svm.core.graal.snippets.DeoptHostedSnippets.AnalysisSpeculationReason;
+
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.core.common.type.TypeReference;
@@ -39,8 +42,10 @@ import org.graalvm.compiler.nodes.extended.ValueAnchorNode;
 import org.graalvm.compiler.phases.Phase;
 import org.graalvm.compiler.phases.common.inlining.InliningUtil;
 
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.nodes.SubstrateMethodCallTargetNode;
 import com.oracle.svm.hosted.meta.HostedMethod;
-import com.oracle.svm.hosted.nodes.SubstrateMethodCallTargetNode;
+import com.oracle.svm.util.ImageBuildStatistics;
 
 import jdk.vm.ci.meta.DeoptimizationAction;
 import jdk.vm.ci.meta.DeoptimizationReason;
@@ -89,7 +94,11 @@ public class DevirtualizeCallsPhase extends Phase {
         }
     }
 
-    private static void unreachableInvoke(StructuredGraph graph, Invoke invoke, SubstrateMethodCallTargetNode callTarget) {
+    private final boolean parseOnce = SubstrateOptions.parseOnce();
+
+    private void unreachableInvoke(StructuredGraph graph, Invoke invoke, SubstrateMethodCallTargetNode callTarget) {
+        assert !parseOnce : "Must be done by StrengthenGraphs";
+
         /*
          * The invoke has no callee, i.e., it is unreachable. We just insert a always-failing guard
          * before the invoke and let dead code elimination remove the invoke and everything after
@@ -98,12 +107,22 @@ public class DevirtualizeCallsPhase extends Phase {
         if (!callTarget.isStatic()) {
             InliningUtil.nonNullReceiver(invoke);
         }
-        graph.addBeforeFixed(invoke.asNode(), graph.add(new FixedGuardNode(LogicConstantNode.forBoolean(true, graph), DeoptimizationReason.UnreachedCode, DeoptimizationAction.None, true)));
-
+        HostedMethod targetMethod = (HostedMethod) callTarget.targetMethod();
+        String message = String.format("The call to %s is not reachable when called from %s.%n", targetMethod.format("%H.%n(%P)"), graph.method().format("%H.%n(%P)"));
+        AnalysisSpeculation speculation = new AnalysisSpeculation(new AnalysisSpeculationReason(message));
+        FixedGuardNode node = new FixedGuardNode(LogicConstantNode.forBoolean(true, graph), DeoptimizationReason.UnreachedCode, DeoptimizationAction.None, speculation, true);
+        graph.addBeforeFixed(invoke.asFixedNode(), graph.add(node));
         graph.getDebug().dump(DebugContext.VERY_DETAILED_LEVEL, graph, "After dead invoke %s", invoke);
     }
 
-    private static void singleCallee(HostedMethod singleCallee, StructuredGraph graph, Invoke invoke, SubstrateMethodCallTargetNode callTarget) {
+    private void singleCallee(HostedMethod singleCallee, StructuredGraph graph, Invoke invoke, SubstrateMethodCallTargetNode callTarget) {
+        assert !parseOnce : "Must be done by StrengthenGraphs";
+
+        if (ImageBuildStatistics.Options.CollectImageBuildStatistics.getValue(graph.getOptions())) {
+            /* Detect devirtualization of the invoke. */
+            ImageBuildStatistics.counters().incDevirtualizedInvokeCounter();
+        }
+
         /*
          * The invoke has only one callee, i.e., the call can be devirtualized to this callee. This
          * allows later inlining of the callee.
@@ -117,7 +136,7 @@ public class DevirtualizeCallsPhase extends Phase {
          * anchor the receiver to the place of the original invoke.
          */
         ValueAnchorNode anchor = graph.add(new ValueAnchorNode(null));
-        graph.addBeforeFixed(invoke.asNode(), anchor);
+        graph.addBeforeFixed(invoke.asFixedNode(), anchor);
         Stamp anchoredReceiverStamp = StampFactory.object(TypeReference.createWithoutAssumptions(singleCallee.getDeclaringClass()));
         ValueNode anchoredReceiver = graph.unique(new PiNode(invoke.getReceiver(), anchoredReceiverStamp, anchor));
         invoke.callTarget().replaceFirstInput(invoke.getReceiver(), anchoredReceiver);

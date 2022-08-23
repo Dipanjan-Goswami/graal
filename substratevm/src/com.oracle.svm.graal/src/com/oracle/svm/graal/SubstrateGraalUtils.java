@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.graal;
 
+import static com.oracle.svm.core.option.RuntimeOptionKey.RuntimeOptionKeyFlag.RelevantForCompilationIsolates;
 import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 
 import java.io.PrintStream;
@@ -127,7 +128,6 @@ public class SubstrateGraalUtils {
             architectureInitialized = true;
             CPUFeatureAccess cpuFeatureAccess = ImageSingletons.lookup(CPUFeatureAccess.class);
             if (cpuFeatureAccess != null) {
-                cpuFeatureAccess.verifyHostSupportsArchitecture(graalBackend.getCodeCache().getTarget().arch);
                 Architecture architecture = graalBackend.getCodeCache().getTarget().arch;
                 cpuFeatureAccess.enableFeatures(architecture);
             }
@@ -140,7 +140,7 @@ public class SubstrateGraalUtils {
 
     public static class Options {
         @Option(help = "Force-dump graphs before compilation")//
-        public static final RuntimeOptionKey<Boolean> ForceDumpGraphsBeforeCompilation = new RuntimeOptionKey<>(false);
+        public static final RuntimeOptionKey<Boolean> ForceDumpGraphsBeforeCompilation = new RuntimeOptionKey<>(false, RelevantForCompilationIsolates);
     }
 
     @SuppressWarnings("try")

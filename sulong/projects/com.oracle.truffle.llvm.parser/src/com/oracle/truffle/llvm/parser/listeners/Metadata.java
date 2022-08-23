@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,9 +29,7 @@
  */
 package com.oracle.truffle.llvm.parser.listeners;
 
-import java.util.HashSet;
-import java.util.Set;
-
+import com.oracle.truffle.llvm.parser.metadata.MDArgList;
 import com.oracle.truffle.llvm.parser.metadata.MDAttachment;
 import com.oracle.truffle.llvm.parser.metadata.MDBaseNode;
 import com.oracle.truffle.llvm.parser.metadata.MDBasicType;
@@ -75,7 +73,10 @@ import com.oracle.truffle.llvm.parser.scanner.RecordBuffer;
 import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
 import com.oracle.truffle.llvm.runtime.types.Type;
 
-public final class Metadata implements ParserListener {
+import java.util.HashSet;
+import java.util.Set;
+
+public class Metadata implements ParserListener {
 
     private static final int METADATA_STRING = 1;
     private static final int METADATA_VALUE = 2;
@@ -97,7 +98,7 @@ public final class Metadata implements ParserListener {
     private static final int METADATA_COMPOSITE_TYPE = 18;
     private static final int METADATA_SUBROUTINE_TYPE = 19;
     private static final int METADATA_COMPILE_UNIT = 20;
-    private static final int METADATA_SUBPROGRAM = 21;
+    protected static final int METADATA_SUBPROGRAM = 21;
     private static final int METADATA_LEXICAL_BLOCK = 22;
     private static final int METADATA_LEXICAL_BLOCK_FILE = 23;
     private static final int METADATA_NAMESPACE = 24;
@@ -118,6 +119,8 @@ public final class Metadata implements ParserListener {
     private static final int METADATA_INDEX = 39;
     private static final int METADATA_LABEL = 40;
     private static final int METADATA_COMMON_BLOCK = 44;
+    private static final int METADATA_GENERIC_SUBRANGE = 45;
+    private static final int METADATA_ARG_LIST = 46;
 
     public Type getTypeById(long id) {
         return types.get(id);
@@ -127,7 +130,7 @@ public final class Metadata implements ParserListener {
         return scope;
     }
 
-    private final IRScope scope;
+    protected final IRScope scope;
 
     private final Set<MDCompositeType> compositeTypes;
 
@@ -149,6 +152,10 @@ public final class Metadata implements ParserListener {
     public void record(RecordBuffer buffer) {
         long[] args = buffer.dumpArray();
         final int opCode = buffer.getId();
+        parseOpcode(buffer, args, opCode);
+    }
+
+    protected void parseOpcode(RecordBuffer buffer, long[] args, final int opCode) {
         switch (opCode) {
             case METADATA_STRING:
                 metadata.add(MDString.create(buffer));
@@ -200,6 +207,7 @@ public final class Metadata implements ParserListener {
                 break;
 
             case METADATA_SUBRANGE:
+            case METADATA_GENERIC_SUBRANGE:
                 metadata.add(MDSubrange.createNewFormat(buffer, metadata));
                 break;
 
@@ -328,6 +336,10 @@ public final class Metadata implements ParserListener {
             case METADATA_INDEX_OFFSET:
             case METADATA_INDEX:
                 // llvm uses these to implement lazy loading, we can safely ignore them
+                break;
+
+            case METADATA_ARG_LIST:
+                metadata.add(MDArgList.create(args, metadata));
                 break;
 
             default:

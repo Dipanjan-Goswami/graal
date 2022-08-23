@@ -1,12 +1,16 @@
-{
-  local jdks = (import "../../common.json").jdks,
-  local labsjdk8 = jdks.oraclejdk8,
+local root_ci = import '../ci.jsonnet';
 
-  jdk8: {
-    downloads+: {
-      JAVA_HOME: labsjdk8,
-    },
-  },
+local wasm_suite_root = root_ci.wasm_suite_root;
+
+local graal_suite_root = root_ci.graal_suite_root;
+
+{
+  local mx = (import "../../graal-common.json").mx_version,
+  local common = (import "../../common.jsonnet"),
+  local common_json = (import "../../common.json"),
+  local utils = (import "../../common-utils.libsonnet"),
+
+  devkits: utils.composable(common_json.devkits),
 
   gate: {
     targets+: ['gate'],
@@ -18,18 +22,17 @@
 
   common: {
     environment+: {
-      MX_PYTHON: 'python3',
+      MX_PYTHON: common_json.deps.common.environment["MX_PYTHON"],
     },
-    packages+: {
-      '00:pip:logilab-common': '==1.4.4',
-      'pip:pylint': '==1.9.3',
+    packages+: common_json.deps.common.packages + {
+      'mx': mx,
       'pip:ninja_syntax': '==1.7.2',
     },
   },
 
   linux: self.common + {
     packages+: {
-      binutils: '>=2.30',
+      "01:binutils": '>=2.30',
       git: '>=1.8.3',
       gcc: '==8.3.0',
       'gcc-build-essentials': '==8.3.0', # GCC 4.9.0 fails on cluster
@@ -37,7 +40,20 @@
       llvm: '==8.0.1',
       nodejs: '==8.9.4',
     },
-    capabilities+: ['linux', 'amd64'],
+    capabilities+: ['linux'],
+  },
+
+  windows: self.common + {
+    capabilities+: ['windows'],
+  },
+
+  amd64: {
+    capabilities+: ['amd64'],
+  },
+
+  aarch64: {
+    capabilities+: ['aarch64'],
+    timelimit: '1:30:00'
   },
 
   eclipse: {
@@ -57,44 +73,52 @@
 
   wabt: {
     downloads+: {
-      WABT_DIR: {name: 'wabt', version: '1.0.12', platformspecific: true},
+      WABT_DIR: {name: 'wabt', version: '1.0.23', platformspecific: true},
     },
   },
 
   emsdk: {
+    docker: {
+      "image": "phx.ocir.io/oraclelabs2/c_graal/buildslave:buildslave_ol7",
+      "mount_modules": true
+    },
     downloads+: {
-      EMSDK_DIR: {name: 'emsdk', version: '1.39.3', platformspecific: true},
+      EMSDK_DIR: {name: 'emsdk', version: '1.39.13', platformspecific: true},
     },
     environment+: {
-      EMCC_DIR: '$EMSDK_DIR/fastcomp/emscripten/',
-      NODE_DIR: '$EMSDK_DIR/node/12.9.1_64bit/',
+      EMCC_DIR: '$EMSDK_DIR/emscripten/master/'
+    }
+  },
+
+  ocamlbuild: {
+    docker: {
+      "image": "phx.ocir.io/oraclelabs2/c_graal/buildslave:buildslave_ol7",
+      "mount_modules": true
+    },
+    downloads+: {
+      OCAML_DIR: {name: 'ocamlbuild', version: '0.14.0', platformspecific: true},
+    },
+    environment+: {
+      PATH: "$OCAML_DIR/bin:$PATH",
+      OCAMLLIB: "$OCAML_DIR/lib/ocaml"
     },
   },
 
-  local gate_cmd       = ['mx', '--strict-compliance', 'gate', '--strict-mode', '--tags', '${GATE_TAGS}'],
-  local gate_cmd_jvmci = ['mx', '--strict-compliance', '--dynamicimports', '/compiler', '--jdk', 'jvmci', 'gate', '--strict-mode', '--tags', '${GATE_TAGS}'],
+  local gate_cmd      = ['mx', '--strict-compliance', 'gate', '--strict-mode', '--tags', '${GATE_TAGS}'],
+  local gate_cmd_full = ['mx', '--strict-compliance', '--dynamicimports', graal_suite_root, 'gate', '--strict-mode', '--tags', '${GATE_TAGS}'],
 
   setup_common: {
     setup+: [
-      ['cd', 'wasm'],
+      ['cd', wasm_suite_root],
       ['mx', 'sversions'],
     ],
   },
 
-  setup_emsdk: {
+  setup_emsdk: self.setup_common + {
     setup+: [
       ['set-export', 'ROOT_DIR', ['pwd']],
       ['set-export', 'EM_CONFIG', '$ROOT_DIR/.emscripten-config'],
-      ['cd', '$SUITE'],
-      [
-        './generate_em_config',
-        '$EM_CONFIG',
-        '$EMSDK_DIR/myfastcomp/emscripten-fastcomp/bin/',
-        '$EMSDK_DIR/myfastcomp/old-binaryen/',
-        '$EMSDK_DIR/fastcomp/emscripten/',
-        ['which', 'node'],
-      ],
-      ['mx', 'sversions'],
+      ['mx', 'emscripten-init', '$EM_CONFIG', '$EMSDK_DIR']
     ],
   },
 
@@ -102,33 +126,33 @@
     run+: [
       gate_cmd,
     ],
-    timelimit: '35:00',
+    timelimit: '45:00',
   },
 
-  gate_graalwasm_jvmci: {
+  gate_graalwasm_full: {
     setup+: [
-      ['cd', 'wasm'],
+      ['cd', wasm_suite_root],
       ['mx', 'sversions'],
     ],
     run+: [
-      gate_cmd_jvmci
+      gate_cmd_full
     ],
-    timelimit: '35:00',
+    timelimit: '1:00:00',
   },
 
-  gate_graalwasm_emsdk_jvmci: self.setup_emsdk + {
+  gate_graalwasm_emsdk_full: self.setup_emsdk + {
     run+: [
-      gate_cmd_jvmci
+      gate_cmd_full
     ],
-    timelimit: '35:00',
+    timelimit: '45:00',
   },
 
-  bench_graalwasm_emsdk_jvmci: self.setup_emsdk + {
+  bench_graalwasm_emsdk_full: self.setup_emsdk + {
     environment+: {
       BENCH_RESULTS_FILE_PATH : 'bench-results.json',
     },
     setup+: [
-      ['mx', '--dy', '/compiler', 'build', '--all'],
+      ['mx', '--dy', graal_suite_root, 'build', '--all'],
     ],
     run+: [
       [
@@ -143,8 +167,12 @@
     capabilities+: ['x52'],
   },
 
-  jdk8_gate_linux_eclipse_jdt : self.jdk8 + self.gate + self.linux + self.eclipse + self.jdt,
-  jdk8_gate_linux_wabt        : self.jdk8 + self.gate + self.linux + self.wabt,
-  jdk8_gate_linux_wabt_emsdk  : self.jdk8 + self.gate + self.linux + self.wabt + self.emsdk,
-  jdk8_bench_linux_wabt_emsdk : self.jdk8 + self.bench + self.linux + self.wabt + self.emsdk,
+  jdk17_gate_linux_eclipse_jdt              : common.labsjdk17 + self.gate  + self.linux   + self.eclipse + self.jdt,
+  jdk17_gate_linux_wabt                     : common.labsjdk17 + self.gate  + self.linux   + self.wabt,
+  jdk17_gate_linux_wabt_emsdk               : common.labsjdk17 + self.gate  + self.linux   + self.wabt    + self.emsdk,
+  jdk17_gate_linux_wabt_emsdk_ocamlbuild    : common.labsjdk17 + self.gate  + self.linux   + self.wabt    + self.emsdk + self.ocamlbuild,
+  jdk17_bench_linux_wabt_emsdk              : common.labsjdk17 + self.bench + self.linux   + self.wabt    + self.emsdk,
+  jdk17_gate_windows_wabt                   : common.labsjdk17 + self.gate  + self.windows + self.wabt,
+
+  jdk11_gate_linux_wabt                     : common.labsjdk11 + self.gate  + self.linux   + self.wabt,
 }

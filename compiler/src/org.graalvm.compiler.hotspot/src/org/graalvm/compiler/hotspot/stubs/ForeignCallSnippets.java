@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,20 +25,19 @@
 package org.graalvm.compiler.hotspot.stubs;
 
 import static jdk.vm.ci.meta.DeoptimizationReason.RuntimeConstraint;
-import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfigBase.INJECTED_VMCONFIG;
+import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_VMCONFIG;
 import static org.graalvm.compiler.hotspot.replacements.HotSpotReplacementsUtil.clearPendingException;
 import static org.graalvm.compiler.hotspot.replacements.HotSpotReplacementsUtil.getPendingException;
 import static org.graalvm.compiler.hotspot.replacements.HotSpotReplacementsUtil.loadHubIntrinsic;
-import static org.graalvm.compiler.hotspot.replacements.HotSpotReplacementsUtil.verifyOops;
 import static org.graalvm.compiler.hotspot.stubs.StubUtil.fatal;
 
 import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.compiler.api.replacements.Fold.InjectedParameter;
 import org.graalvm.compiler.api.replacements.Snippet;
-import org.graalvm.compiler.debug.DebugHandlersFactory;
 import org.graalvm.compiler.hotspot.GraalHotSpotVMConfig;
 import org.graalvm.compiler.hotspot.meta.HotSpotProviders;
 import org.graalvm.compiler.hotspot.nodes.DeoptimizeCallerNode;
+import org.graalvm.compiler.hotspot.replacements.HotSpotReplacementsUtil;
 import org.graalvm.compiler.hotspot.word.KlassPointer;
 import org.graalvm.compiler.nodes.NamedLocationIdentity;
 import org.graalvm.compiler.nodes.PiNode;
@@ -53,7 +52,6 @@ import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.WordFactory;
 
-import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.meta.DeoptimizationAction;
 
 public class ForeignCallSnippets implements Snippets {
@@ -64,8 +62,8 @@ public class ForeignCallSnippets implements Snippets {
         final SnippetInfo getAndClearObjectResult = snippet(ForeignCallSnippets.class, "getAndClearObjectResult", OBJECT_RESULT_LOCATION);
         final SnippetInfo verifyObject = snippet(ForeignCallSnippets.class, "verifyObject");
 
-        public Templates(OptionValues options, Iterable<DebugHandlersFactory> factories, HotSpotProviders providers, TargetDescription target) {
-            super(options, factories, providers, providers.getSnippetReflection(), target);
+        public Templates(OptionValues options, HotSpotProviders providers) {
+            super(options, providers);
         }
     }
 
@@ -87,15 +85,15 @@ public class ForeignCallSnippets implements Snippets {
      */
     @Snippet
     public static Object verifyObject(Object object) {
-        if (verifyOops(INJECTED_VMCONFIG)) {
-            Word verifyOopCounter = WordFactory.unsigned(verifyOopCounterAddress(INJECTED_VMCONFIG));
+        if (HotSpotReplacementsUtil.verifyOops(INJECTED_VMCONFIG)) {
+            Word verifyOopCounter = WordFactory.unsigned(HotSpotReplacementsUtil.verifyOopCounterAddress(INJECTED_VMCONFIG));
             verifyOopCounter.writeInt(0, verifyOopCounter.readInt(0) + 1);
 
             Pointer oop = Word.objectToTrackedPointer(object);
             if (object != null) {
                 GuardingNode anchorNode = SnippetAnchorNode.anchor();
                 // make sure object is 'reasonable'
-                if (!oop.and(WordFactory.unsigned(verifyOopMask(INJECTED_VMCONFIG))).equal(WordFactory.unsigned(verifyOopBits(INJECTED_VMCONFIG)))) {
+                if (!oop.and(WordFactory.unsigned(HotSpotReplacementsUtil.verifyOopMask(INJECTED_VMCONFIG))).equal(WordFactory.unsigned(HotSpotReplacementsUtil.verifyOopBits(INJECTED_VMCONFIG)))) {
                     fatal("oop not in heap: %p", oop.rawValue());
                 }
 
@@ -106,11 +104,6 @@ public class ForeignCallSnippets implements Snippets {
             }
         }
         return object;
-    }
-
-    @Fold
-    static long verifyOopCounterAddress(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.verifyOopCounterAddress;
     }
 
     @Fold

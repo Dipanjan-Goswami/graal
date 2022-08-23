@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,71 +29,48 @@
  */
 package com.oracle.truffle.llvm.tests.bitcodeformat;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import com.oracle.truffle.llvm.tests.pipe.CaptureNativeOutput;
-import com.oracle.truffle.llvm.tests.pipe.CaptureOutput;
-import com.oracle.truffle.llvm.tests.util.ProcessUtil;
 import org.graalvm.polyglot.Context;
-
-import com.oracle.truffle.llvm.tests.options.TestOptions;
-import com.oracle.truffle.tck.TruffleRunner;
-import org.junit.Assume;
-import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
-import org.junit.runners.Parameterized;
-
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import com.oracle.truffle.llvm.tests.CommonTestUtils;
+import com.oracle.truffle.llvm.tests.TestCaseCollector;
+import com.oracle.truffle.llvm.tests.options.TestOptions;
+import com.oracle.truffle.llvm.tests.pipe.CaptureNativeOutput;
+import com.oracle.truffle.llvm.tests.pipe.CaptureOutput;
+import com.oracle.truffle.llvm.tests.util.ProcessUtil;
+import com.oracle.truffle.tck.TruffleRunner;
 
 @RunWith(Parameterized.class)
+@Parameterized.UseParametersRunnerFactory(CommonTestUtils.ExcludingParametersFactory.class)
 public class BitcodeFormatTest {
 
     @ClassRule public static TruffleRunner.RunWithPolyglotRule runWithPolyglot = new TruffleRunner.RunWithPolyglotRule();
 
-    private static final Path testBase = Paths.get(TestOptions.TEST_SUITE_PATH, "bitcodeformat");
-
-    enum OS {
-        Darwin,
-        Linux,
-        Solaris;
-
-        private static OS findCurrent() {
-            final String name = System.getProperty("os.name");
-            if (name.equals("Linux")) {
-                return Linux;
-            }
-            if (name.equals("SunOS")) {
-                return Solaris;
-            }
-            if (name.equals("Mac OS X") || name.equals("Darwin")) {
-                return Darwin;
-            }
-            throw new IllegalArgumentException("unknown OS: " + name);
-        }
-
-        private static final OS current = findCurrent();
-
-        public static OS getCurrent() {
-            return current;
-        }
-    }
+    private static final Path testBase = Paths.get(TestOptions.getTestDistribution("SULONG_EMBEDDED_TEST_SUITES"), "bitcodeformat");
 
     protected Map<String, String> getContextOptions() {
-        return Collections.emptyMap();
+        HashMap<String, String> options = new HashMap<>();
+        options.put("llvm.verifyBitcode", "false");
+        options.put("log.llvm.BitcodeVerifier.level", "OFF");
+        return options;
     }
 
     protected Function<Context.Builder, CaptureOutput> getCaptureOutput() {
@@ -113,23 +90,20 @@ public class BitcodeFormatTest {
         assertEquals("Hello, World!\n", result.getStdOutput());
     }
 
-    @Parameters(name = "{0}")
+    @Parameters(name = "{1}")
     public static Collection<Object[]> data() throws IOException {
-        return Files.list(testBase).map(f -> new Object[]{f.getFileName()}).collect(Collectors.toList());
+        TestCaseCollector.ExcludeMap excluded = TestCaseCollector.getExcludedTests(BitcodeFormatTest.class);
+        return Files.list(testBase).filter(v -> !v.endsWith("KERNEL32.dll")).map(f -> new Object[]{f, f.getFileName().toString(), excluded.get(f.getFileName().toString())}).collect(
+                        Collectors.toList());
     }
 
-    @Parameter(0) public Path value;
-
-    @Before
-    public void checkOS() {
-        OS os = OS.getCurrent();
-        Assume.assumeTrue("Linux only test", os != OS.Darwin || !value.toString().contains("linux-link"));
-        Assume.assumeTrue("Darwin only test", os == OS.Darwin || !value.toString().contains("darwin-link"));
-    }
+    @Parameter(value = 0) public Path path;
+    @Parameter(value = 1) public String testName;
+    @Parameter(value = 2) public String exclusionReason;
 
     @Test
-    public void checkNumbers() throws IOException {
-        runCandidate(testBase.resolve(value));
+    public void test() throws IOException {
+        runCandidate(path);
     }
 
 }

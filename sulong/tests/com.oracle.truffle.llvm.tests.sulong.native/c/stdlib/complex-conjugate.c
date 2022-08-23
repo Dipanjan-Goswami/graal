@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -31,34 +31,43 @@
 #include <complex.h>
 #include <stdlib.h>
 
+#ifndef _WIN32
+#define _Dcomplex double complex
+#define _DCOMPLEX_(x, y) ((double) (x) + (double) (y) *I)
+#define _Fcomplex float complex
+#define _FCOMPLEX_(x, y) ((float) (x) + (float) (y) *I)
+#define conjf conj
+#endif
+
 void testDouble() {
-  volatile double complex z1 = 1.0 + 3.0 * I;
-  volatile double complex z2 = 0.0 + 0.0 * I;
-  volatile double complex conjugate1 = conj(z1);
-  volatile double complex conjugate2 = conj(z2);
-  if (creal(conjugate1) != 1.00 | cimag(conjugate1) != -3.0) {
-    abort();
-  }
-  if (creal(conjugate2) != 0.00 | cimag(conjugate2) != 0.0) {
-    abort();
-  }
+    volatile _Dcomplex z1 = _DCOMPLEX_(1.0, 3.0);
+    volatile _Dcomplex z2 = _DCOMPLEX_(0.0, 0.0);
+    volatile _Dcomplex conjugate1 = conj(z1);
+    volatile _Dcomplex conjugate2 = conj(z2);
+    if (creal(conjugate1) != 1.00 | cimag(conjugate1) != -3.0) {
+        abort();
+    }
+    if (creal(conjugate2) != 0.00 | cimag(conjugate2) != 0.0) {
+        abort();
+    }
 }
 
 void testFloat() {
-  volatile float complex z1 = 1.0 + 3.0 * I;
-  volatile float complex z2 = 0.0 + 0.0 * I;
-  volatile float complex conjugate1 = conj(z1);
-  volatile float complex conjugate2 = conj(z2);
-  if (crealf(conjugate1) != 1.00 | cimagf(conjugate1) != -3.0) {
-    abort();
-  }
-  if (crealf(conjugate2) != 0.00 | cimagf(conjugate2) != 0.0) {
-    abort();
-  }
+    volatile _Fcomplex z1 = _FCOMPLEX_(1.0, 3.0);
+    volatile _Fcomplex z2 = _FCOMPLEX_(0.0, 0.0);
+    volatile _Fcomplex conjugate1 = conjf(z1);
+    volatile _Fcomplex conjugate2 = conjf(z2);
+    if (crealf(conjugate1) != 1.00 | cimagf(conjugate1) != -3.0) {
+        abort();
+    }
+    if (crealf(conjugate2) != 0.00 | cimagf(conjugate2) != 0.0) {
+        abort();
+    }
 }
 
 int main() {
-  testDouble();
-  // testFloat();
-  return 0;
+    testDouble();
+    testFloat();
+
+    return 0;
 }

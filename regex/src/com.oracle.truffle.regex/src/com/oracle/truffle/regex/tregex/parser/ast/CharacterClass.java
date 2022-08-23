@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,8 +48,9 @@ import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.regex.charset.CodePointSet;
 import com.oracle.truffle.regex.tregex.TRegexOptions;
 import com.oracle.truffle.regex.tregex.automaton.StateSet;
-import com.oracle.truffle.regex.tregex.buffer.CharArrayBuffer;
-import com.oracle.truffle.regex.tregex.parser.RegexParser;
+import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
+import com.oracle.truffle.regex.tregex.parser.JSRegexParser;
+import com.oracle.truffle.regex.tregex.string.AbstractStringBuffer;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
 import com.oracle.truffle.regex.tregex.util.json.JsonValue;
@@ -65,14 +66,14 @@ import com.oracle.truffle.regex.tregex.util.json.JsonValue;
  * Note that {@link CharacterClass} nodes and the {@link CodePointSet}s that they rely on can only
  * match characters from the Basic Multilingual Plane (and whose code point fits into 16-bit
  * integers). Any term which matches characters outside of the Basic Multilingual Plane is expanded
- * by {@link RegexParser} into a more complex expression which matches the individual code units
+ * by {@link JSRegexParser} into a more complex expression which matches the individual code units
  * that would make up the UTF-16 encoding of those characters.
  */
 public class CharacterClass extends QuantifiableTerm {
 
     private CodePointSet charSet;
     // look-behind groups which might match the same character as this CharacterClass node
-    private StateSet<LookBehindAssertion> lookBehindEntries;
+    private StateSet<SubTreeIndex, LookBehindAssertion> lookBehindEntries;
 
     /**
      * Creates a new {@link CharacterClass} node which matches the set of characters specified by
@@ -82,14 +83,19 @@ public class CharacterClass extends QuantifiableTerm {
         this.charSet = charSet;
     }
 
-    private CharacterClass(CharacterClass copy) {
+    private CharacterClass(CharacterClass copy, CodePointSet charSet) {
         super(copy);
-        charSet = copy.charSet;
+        this.charSet = charSet;
     }
 
     @Override
-    public CharacterClass copy(RegexAST ast, boolean recursive) {
-        return ast.register(new CharacterClass(this));
+    public CharacterClass copy(RegexAST ast) {
+        return ast.register(new CharacterClass(this, charSet));
+    }
+
+    @Override
+    public CharacterClass copyRecursive(RegexAST ast, CompilationBuffer compilationBuffer) {
+        return ast.register(new CharacterClass(this, ast.getEncoding().getFullSet().createIntersection(charSet, compilationBuffer)));
     }
 
     @Override
@@ -128,7 +134,7 @@ public class CharacterClass extends QuantifiableTerm {
 
     public void addLookBehindEntry(RegexAST ast, LookBehindAssertion lookBehindEntry) {
         if (lookBehindEntries == null) {
-            lookBehindEntries = StateSet.create(ast.getLookArounds());
+            lookBehindEntries = StateSet.create(ast.getSubtrees());
         }
         lookBehindEntries.add(lookBehindEntry);
     }
@@ -149,31 +155,19 @@ public class CharacterClass extends QuantifiableTerm {
         return lookBehindEntries;
     }
 
-    public void extractSingleChar(CharArrayBuffer literal, CharArrayBuffer mask) {
-        CodePointSet c = charSet;
-        char c1 = (char) c.getLo(0);
-        if (c.matches2CharsWith1BitDifference()) {
-            int c2 = c.size() == 1 ? c.getHi(0) : c.getLo(1);
-            literal.add((char) (c1 | c2));
-            mask.add((char) (c1 ^ c2));
+    public void extractSingleChar(AbstractStringBuffer literal, AbstractStringBuffer mask) {
+        if (charSet.matchesSingleChar()) {
+            literal.append(charSet.getMin());
+            assert mask.getEncoding().getEncodedSize(0) == 1;
+            for (int i = 0; i < mask.getEncoding().getEncodedSize(charSet.getMin()); i++) {
+                mask.append(0);
+            }
         } else {
-            assert c.matchesSingleChar();
-            literal.add(c1);
-            mask.add((char) 0);
-        }
-    }
-
-    public void extractSingleChar(char[] literal, char[] mask, int i) {
-        CodePointSet c = charSet;
-        char c1 = (char) c.getLo(0);
-        if (c.matches2CharsWith1BitDifference()) {
-            int c2 = c.size() == 1 ? c.getHi(0) : c.getLo(1);
-            literal[i] = (char) (c1 | c2);
-            mask[i] = (char) (c1 ^ c2);
-        } else {
-            assert c.matchesSingleChar();
-            literal[i] = c1;
-            mask[i] = (char) 0;
+            assert charSet.matches2CharsWith1BitDifference();
+            int c1 = charSet.getMin();
+            int c2 = charSet.getMax();
+            literal.appendOR(c1, c2);
+            mask.appendXOR(c1, c2);
         }
     }
 

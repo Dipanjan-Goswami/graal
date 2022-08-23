@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,14 @@
  */
 package com.oracle.truffle.api.instrumentation;
 
-import java.io.PrintStream;
+import java.lang.ref.WeakReference;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.locks.Lock;
+import java.util.logging.Level;
 
 import com.oracle.truffle.api.Assumption;
 import com.oracle.truffle.api.CompilerAsserts;
@@ -53,12 +55,10 @@ import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.TruffleLogger;
 import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.frame.FrameSlot;
-import com.oracle.truffle.api.frame.FrameSlotTypeException;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.InstrumentableNode.WrapperNode;
-import com.oracle.truffle.api.instrumentation.InstrumentationHandler.EngineInstrumenter;
 import com.oracle.truffle.api.instrumentation.InstrumentationHandler.InstrumentClientInstrumenter;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.Node;
@@ -67,6 +67,7 @@ import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.nodes.NodeVisitor;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.strings.TruffleString;
 
 /**
  * <p>
@@ -128,7 +129,24 @@ public final class ProbeNode extends Node {
     // returned from chain nodes whose bindings ignore the unwind
     private static final Object UNWIND_ACTION_IGNORED = new Object();
 
+    static class RetiredNodeReference {
+        private final WeakReference<Node> node;
+        private final Set<Class<? extends Tag>> materializeTags;
+        final RetiredNodeReference next;
+
+        RetiredNodeReference(Node node, Set<Class<? extends Tag>> materializeTags, RetiredNodeReference next) {
+            this.node = new WeakReference<>(node);
+            this.materializeTags = materializeTags;
+            this.next = next;
+        }
+
+        Node getNode() {
+            return node.get();
+        }
+    }
+
     private final InstrumentationHandler handler;
+    private volatile RetiredNodeReference retiredNodeReference;
     @CompilationFinal private volatile EventContext context;
 
     @Child private volatile ProbeNode.EventChainNode chain;
@@ -144,6 +162,45 @@ public final class ProbeNode extends Node {
     ProbeNode(InstrumentationHandler handler, SourceSection sourceSection) {
         this.handler = handler;
         this.context = new EventContext(this, sourceSection);
+    }
+
+    RetiredNodeReference getRetiredNodeReference() {
+        return retiredNodeReference;
+    }
+
+    void clearRetiredNodeReference() {
+        retiredNodeReference = null;
+    }
+
+    private boolean hasNewTags(Node retiredNode, Set<Class<? extends Tag>> materializeTags) {
+        Set<Class<? extends Tag>> allSeenMaterializeTags = retiredNodeReference.next == null ? retiredNodeReference.materializeTags : new HashSet<>(retiredNodeReference.materializeTags);
+
+        RetiredNodeReference nodeRef = retiredNodeReference;
+        while (nodeRef != null) {
+            if (allSeenMaterializeTags != nodeRef.materializeTags) {
+                allSeenMaterializeTags.addAll(nodeRef.materializeTags);
+            }
+            Node nodeRefNode = nodeRef.getNode();
+            assert nodeRefNode == null || nodeRefNode != retiredNode : "The same retired node must not be set more than once!";
+            assert !nodeRef.materializeTags.equals(materializeTags) : "Retired node must be set at most once for the same set of tags!";
+            nodeRef = nodeRef.next;
+        }
+        return !allSeenMaterializeTags.containsAll(materializeTags);
+    }
+
+    void setRetiredNode(Node retiredNode, Set<Class<? extends Tag>> materializeTags) {
+        if (retiredNodeReference == null) {
+            retiredNodeReference = new RetiredNodeReference(retiredNode, materializeTags, null);
+        } else {
+            /*
+             * The following check does not check all illegal materializations, because seen
+             * materialize tags are not recorded before the AST is first executed.
+             */
+            assert hasNewTags(retiredNode, materializeTags) : "There should always be some new materialize tag!";
+            RetiredNodeReference previousRetiredNodeReference = retiredNodeReference;
+            RetiredNodeReference newRetiredNodeReference = new RetiredNodeReference(retiredNode, materializeTags, previousRetiredNodeReference);
+            retiredNodeReference = newRetiredNodeReference;
+        }
     }
 
     /**
@@ -276,7 +333,7 @@ public final class ProbeNode extends Node {
     WrapperNode findWrapper() throws AssertionError {
         Node parent = getParent();
         if (!(parent instanceof WrapperNode)) {
-            CompilerDirectives.transferToInterpreter();
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             if (parent == null) {
                 throw new AssertionError("Probe node disconnected from AST.");
             } else {
@@ -313,17 +370,28 @@ public final class ProbeNode extends Node {
             if (localVersion != null && localVersion.isValid()) {
                 return this.chain;
             }
-            nextChain = handler.createBindings(frame, ProbeNode.this);
-            if (nextChain == null) {
-                // chain is null -> remove wrapper;
-                // Note: never set child nodes to null, can cause races
-                InstrumentationHandler.removeWrapper(ProbeNode.this);
-                return null;
-            }
+            EventBinding.Source<?>[] executionBindingsSnapshot;
+            do {
+                executionBindingsSnapshot = handler.getExecutionBindingsSnapshot();
+                nextChain = handler.createBindings(frame, ProbeNode.this, executionBindingsSnapshot);
+                if (nextChain == null) {
+                    // chain is null -> remove wrapper;
+                    // Note: never set child nodes to null, can cause races
+                    if (retiredNodeReference == null) {
+                        InstrumentationHandler.removeWrapper(ProbeNode.this);
+                        return null;
+                    } else {
+                        oldChain = this.chain;
+                        this.chain = null;
+                    }
+                } else {
+                    oldChain = this.chain;
+                    this.chain = insert(nextChain);
+                }
+                this.version = Truffle.getRuntime().createAssumption("Instruments unchanged");
+            } while (executionBindingsSnapshot != handler.getExecutionBindingsSnapshot());
 
-            oldChain = this.chain;
-            this.chain = insert(nextChain);
-            this.version = Truffle.getRuntime().createAssumption("Instruments unchanged");
+            assert context.validEventContextOnLazyUpdate();
         } finally {
             lock.unlock();
         }
@@ -352,7 +420,7 @@ public final class ProbeNode extends Node {
     }
 
     Iterator<ExecutionEventNode> lookupExecutionEventNodes(Collection<EventBinding<? extends ExecutionEventNodeFactory>> bindings) {
-        return new Iterator<ExecutionEventNode>() {
+        return new Iterator<>() {
 
             private EventChainNode chainNode = ProbeNode.this.chain;
             private EventProviderChainNode nextNode;
@@ -404,7 +472,6 @@ public final class ProbeNode extends Node {
         return new InputValueChainNode(binding, probe, context, index);
     }
 
-    @SuppressWarnings("deprecation")
     private static boolean throwIllegalASTAssertion(EventProviderWithInputChainNode parentChain, EventContext parentContext, EventBinding.Source<?> binding, RootNode rootNode,
                     Set<Class<?>> providedTags, int index) {
         StringBuilder msg = new StringBuilder();
@@ -446,7 +513,7 @@ public final class ProbeNode extends Node {
                     if (node.getParent() == null) {
                         msg.append("null parent = ");
                     } else {
-                        String fieldName = NodeUtil.findChildField(node.getParent(), node).getName();
+                        String fieldName = NodeUtil.findChildFieldName(node.getParent(), node);
                         msg.append(node.getParent().getClass().getSimpleName() + "." + fieldName + " = ");
                     }
 
@@ -558,15 +625,6 @@ public final class ProbeNode extends Node {
                 throw new IllegalStateException(String.format("Returned EventNode %s was already adopted by another AST.", eventNode));
             }
         } catch (Throwable t) {
-            if (t instanceof InstrumentException) {
-                CompilerDirectives.transferToInterpreter();
-                throw new IllegalStateException(
-                                String.format("Error propagation is not supported in %s.create(%s). "//
-                                                + "Errors propagated in this method may result in an AST that never stabilizes. "//
-                                                + "Propagate the error in one of the execution event node events like onEnter, onInputValue, onReturn or onReturnExceptional to resolve this problem.",
-                                                ExecutionEventNodeFactory.class.getSimpleName(),
-                                                EventContext.class.getSimpleName()));
-            }
             exceptionEventForClientInstrument(binding, "ProbeNodeFactory.create", t);
             return null;
         }
@@ -574,8 +632,9 @@ public final class ProbeNode extends Node {
     }
 
     /**
-     * Handles exceptions from non-language instrumentation code that must not be allowed to alter
-     * guest language execution semantics. Normal response is to log and continue.
+     * Previously, by default, all instruments did log their exceptions. They now by default throw,
+     * but we still want to respect if engine.InstrumentExceptionsAreThrown is explicitly set to
+     * false. This can be a workaround if an instrument fails but the execution should continue.
      */
     @TruffleBoundary
     static void exceptionEventForClientInstrument(EventBinding.Source<?> b, String eventName, Throwable t) {
@@ -583,19 +642,20 @@ public final class ProbeNode extends Node {
             // Terminates guest language execution immediately
             throw (ThreadDeath) t;
         }
-        final Object polyglotEngine = InstrumentAccessor.engineAccess().getCurrentPolyglotEngine();
-        if (b.getInstrumenter() instanceof EngineInstrumenter || (polyglotEngine != null && InstrumentAccessor.engineAccess().isInstrumentExceptionsAreThrown(polyglotEngine))) {
+        // we only want to ever log for probes of instruments
+        if (!(b.getInstrumenter() instanceof InstrumentClientInstrumenter)) {
             throw sthrow(RuntimeException.class, t);
         }
-        // Exception is a failure in (non-language) instrumentation code; log and continue
         InstrumentClientInstrumenter instrumenter = (InstrumentClientInstrumenter) b.getInstrumenter();
-
+        Object probeInstrument = instrumenter.getEnv().getPolyglotInstrument();
+        if (InstrumentAccessor.engineAccess().isInstrumentExceptionsAreThrown(probeInstrument)) {
+            throw sthrow(RuntimeException.class, t);
+        }
+        // fetch default logger for instrument of the current probe
+        TruffleLogger logger = InstrumentAccessor.engineAccess().getLogger(probeInstrument, null);
         String message = String.format("Event %s failed for instrument class %s and listener/factory %s.", //
                         eventName, instrumenter.getInstrumentClassName(), b.getElement());
-
-        Exception exception = new Exception(message, t);
-        PrintStream stream = new PrintStream(instrumenter.getEnv().err());
-        exception.printStackTrace(stream);
+        logger.log(Level.SEVERE, message, t);
     }
 
     /** @since 0.12 */
@@ -615,8 +675,9 @@ public final class ProbeNode extends Node {
                             clazz == Double.class ||
                             clazz == Character.class ||
                             clazz == Boolean.class ||
-                            clazz == String.class)) {
-                CompilerDirectives.transferToInterpreter();
+                            clazz == String.class ||
+                            clazz == TruffleString.class)) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
                 ClassCastException ccex = new ClassCastException(clazz.getName() + " isn't allowed Truffle interop type!");
                 if (binding.isLanguageBinding()) {
                     throw ccex;
@@ -752,7 +813,6 @@ public final class ProbeNode extends Node {
         private static final int SEEN_EXCEPTION_ON_INPUT_VALUE = 0b1000;
         private static final int SEEN_EXCEPTION_ON_UNWIND = 0b10000;
         private static final int SEEN_EXCEPTION_HAS_NEXT = 0b100000;
-        private static final int SEEN_EXCEPTION_INSTRUMENT = 0b1000000;
         private static final int SEEN_EXCEPTION_OTHER = 0b10000000;
 
         private static final int SEEN_UNWIND_ON_ENTER = 0b100000000;
@@ -812,7 +872,7 @@ public final class ProbeNode extends Node {
                     chainNode.innerOnDispose(context, frame);
                 } catch (Throwable t) {
                     // no profiling necessary
-                    prevError = chainNode.handleError(context, "onDispose", prevError, t);
+                    prevError = chainNode.handleError("onDispose", prevError, t);
                 }
                 chainNode = chainNode.next;
             }
@@ -821,7 +881,7 @@ public final class ProbeNode extends Node {
             }
         }
 
-        private RuntimeException handleError(EventContext context, String eventName, RuntimeException previousError, Throwable newError) {
+        private RuntimeException handleError(String eventName, RuntimeException previousError, Throwable newError) {
             if (binding.isLanguageBinding()) {
                 if (previousError != null) {
                     profileBranch(SEEN_EXCEPTION_HAS_NEXT);
@@ -830,18 +890,6 @@ public final class ProbeNode extends Node {
                 }
                 return (RuntimeException) newError;
             } else {
-                if (newError instanceof InstrumentException) {
-                    profileBranch(SEEN_EXCEPTION_INSTRUMENT);
-                    if (((InstrumentException) newError).context == context) {
-                        RuntimeException unwrapped = ((InstrumentException) newError).delegate;
-                        if (previousError != null) {
-                            profileBranch(SEEN_EXCEPTION_HAS_NEXT);
-                            addSuppressedException(previousError, unwrapped);
-                            return previousError;
-                        }
-                        return unwrapped;
-                    }
-                }
                 profileBranch(SEEN_EXCEPTION_OTHER);
                 exceptionEventForClientInstrument(binding, eventName, newError);
             }
@@ -868,7 +916,7 @@ public final class ProbeNode extends Node {
                     unwind = handleUnwind(current, unwind, ex);
                 } catch (Throwable t) {
                     current.profileBranch(SEEN_EXCEPTION_ON_ENTER);
-                    prevError = current.handleError(context, "onEnter", prevError, t);
+                    prevError = current.handleError("onEnter", prevError, t);
                 }
                 current = current.next;
             }
@@ -897,7 +945,7 @@ public final class ProbeNode extends Node {
                     unwind = handleUnwind(current, unwind, ex);
                 } catch (Throwable t) {
                     current.profileBranch(SEEN_EXCEPTION_ON_INPUT_VALUE);
-                    prevError = current.handleError(context, "onInputValue", prevError, t);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
                 current = current.previous;
             }
@@ -950,7 +998,7 @@ public final class ProbeNode extends Node {
                     unwind = handleUnwind(current, unwind, ex);
                 } catch (Throwable t) {
                     current.profileBranch(SEEN_EXCEPTION_ON_RETURN);
-                    prevError = current.handleError(context, "onInputValue", prevError, t);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
                 current = current.previous;
             }
@@ -978,7 +1026,7 @@ public final class ProbeNode extends Node {
                     unwind = handleUnwind(current, unwind, ex);
                 } catch (Throwable t) {
                     current.profileBranch(SEEN_EXCEPTION_ON_RETURN_EXCEPTIONAL);
-                    prevError = current.handleError(context, "onInputValue", prevError, t);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
                 current = current.previous;
             }
@@ -1055,7 +1103,7 @@ public final class ProbeNode extends Node {
                         nextRet = current.innerOnUnwind(context, frame, current.getInfo(unwind));
                     } catch (Throwable t) {
                         current.profileBranch(SEEN_EXCEPTION_ON_UNWIND);
-                        prevError = current.handleError(context, "onUnwind", prevError, t);
+                        prevError = current.handleError("onUnwind", prevError, t);
                     }
                     if (nextRet != null) {
                         assert checkInteropType(nextRet, current.binding);
@@ -1132,7 +1180,7 @@ public final class ProbeNode extends Node {
     static class EventProviderWithInputChainNode extends EventProviderChainNode {
 
         static final Object[] EMPTY_ARRAY = new Object[0];
-        @CompilationFinal(dimensions = 1) private volatile FrameSlot[] inputSlots;
+        @CompilationFinal(dimensions = 1) private volatile int[] inputSlots;
         @CompilationFinal private volatile FrameDescriptor sourceFrameDescriptor;
         final int inputBaseIndex;
         final int inputCount;
@@ -1172,7 +1220,7 @@ public final class ProbeNode extends Node {
                 initializeSlots(frame);
             }
             assert sourceFrameDescriptor == frame.getFrameDescriptor() : "Unstable frame descriptor used by the language.";
-            frame.setObject(inputSlots[inputIndex], value);
+            frame.setAuxiliarySlot(inputSlots[inputIndex], value);
         }
 
         private void initializeSlots(VirtualFrame frame) {
@@ -1184,10 +1232,10 @@ public final class ProbeNode extends Node {
                         InstrumentationHandler.trace("SLOTS: Adding %s save slots for binding %s%n", inputCount, getBinding().getElement());
                     }
                     FrameDescriptor frameDescriptor = frame.getFrameDescriptor();
-                    FrameSlot[] slots = new FrameSlot[inputCount];
+                    int[] slots = new int[inputCount];
                     for (int i = 0; i < inputCount; i++) {
                         int slotIndex = inputBaseIndex + i;
-                        slots[i] = frameDescriptor.findOrAddFrameSlot(new SavedInputValueID(getBinding(), slotIndex));
+                        slots[i] = frameDescriptor.findOrAddAuxiliarySlot(new SavedInputValueID(getBinding(), slotIndex));
                     }
                     this.sourceFrameDescriptor = frameDescriptor;
                     this.inputSlots = slots;
@@ -1210,7 +1258,6 @@ public final class ProbeNode extends Node {
             lock.lock();
             try {
                 if (inputSlots != null) {
-                    FrameSlot[] slots = inputSlots;
                     inputSlots = null;
 
                     RootNode rootNode = context.getInstrumentedNode().getRootNode();
@@ -1220,14 +1267,9 @@ public final class ProbeNode extends Node {
                     FrameDescriptor descriptor = rootNode.getFrameDescriptor();
                     assert descriptor != null;
 
-                    for (FrameSlot slot : slots) {
-                        FrameSlot resolvedSlot = descriptor.findFrameSlot(slot.getIdentifier());
-                        if (resolvedSlot != null) {
-                            descriptor.removeFrameSlot(slot.getIdentifier());
-                        } else {
-                            // slot might be shared and already removed by another event provider
-                            // node.
-                        }
+                    for (int i = 0; i < inputCount; i++) {
+                        int slotIndex = inputBaseIndex + i;
+                        descriptor.disableAuxiliarySlot(new SavedInputValueID(getBinding(), slotIndex));
                     }
                 }
             } finally {
@@ -1250,33 +1292,28 @@ public final class ProbeNode extends Node {
 
         @ExplodeLoop
         private void clearSlots(VirtualFrame frame) {
-            FrameSlot[] slots = inputSlots;
+            int[] slots = inputSlots;
             if (slots != null) {
                 if (frame.getFrameDescriptor() == sourceFrameDescriptor) {
-                    for (int i = 0; i < slots.length; i++) {
-                        frame.setObject(slots[i], null);
+                    for (int slot : slots) {
+                        frame.setAuxiliarySlot(slot, null);
                     }
                 }
             }
         }
 
         protected final Object getSavedInputValue(VirtualFrame frame, int inputIndex) {
-            try {
-                verifyIndex(inputIndex);
-                if (inputSlots == null) {
-                    // never saved any value
-                    return null;
-                }
-                return frame.getObject(inputSlots[inputIndex]);
-            } catch (FrameSlotTypeException e) {
-                CompilerDirectives.transferToInterpreter();
-                throw new AssertionError(e);
+            verifyIndex(inputIndex);
+            if (inputSlots == null) {
+                // never saved any value
+                return null;
             }
+            return frame.getAuxiliarySlot(inputSlots[inputIndex]);
         }
 
         @ExplodeLoop
         protected final Object[] getSavedInputValues(VirtualFrame frame) {
-            FrameSlot[] slots = inputSlots;
+            int[] slots = inputSlots;
             if (slots == null) {
                 return EMPTY_ARRAY;
             }
@@ -1284,12 +1321,7 @@ public final class ProbeNode extends Node {
             if (frame.getFrameDescriptor() == sourceFrameDescriptor) {
                 inputValues = new Object[slots.length];
                 for (int i = 0; i < slots.length; i++) {
-                    try {
-                        inputValues[i] = frame.getObject(slots[i]);
-                    } catch (FrameSlotTypeException e) {
-                        CompilerDirectives.transferToInterpreter();
-                        throw new AssertionError(e);
-                    }
+                    inputValues[i] = frame.getAuxiliarySlot(slots[i]);
                 }
             } else {
                 inputValues = new Object[inputSlots.length];

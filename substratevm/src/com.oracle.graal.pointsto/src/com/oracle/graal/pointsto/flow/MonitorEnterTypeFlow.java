@@ -24,53 +24,29 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.java.MonitorEnterNode;
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.flow.context.BytecodeLocation;
-import com.oracle.graal.pointsto.meta.AnalysisMethod;
-import com.oracle.graal.pointsto.meta.AnalysisType;
-import com.oracle.graal.pointsto.typestate.TypeState;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 
-public class MonitorEnterTypeFlow extends TypeFlow<MonitorEnterNode> {
+import jdk.vm.ci.code.BytecodePosition;
 
-    private final BytecodeLocation location;
-    private final AnalysisMethod method;
+public class MonitorEnterTypeFlow extends TypeFlow<BytecodePosition> {
 
-    public MonitorEnterTypeFlow(BigBang bb, MonitorEnterNode source, BytecodeLocation monitorLocation, AnalysisMethod method) {
-        super(source, null);
-        this.location = monitorLocation;
-        this.method = method;
+    public MonitorEnterTypeFlow(BytecodePosition position, PointsToAnalysis bb) {
+        super(position, null);
         this.addUse(bb, bb.getAllSynchronizedTypeFlow());
     }
 
-    @Override
-    public TypeState filter(BigBang bb, TypeState newState) {
-        /* Check if the type is allowed to be used for synchronization. */
-        int bci = source.getNodeSourcePosition() != null ? source.getNodeSourcePosition().getBCI() : 0;
-        for (AnalysisType type : newState.types()) {
-            bb.checkUnsupportedSynchronization(method, bci, type);
-        }
-        return newState;
-    }
-
-    public BytecodeLocation getLocation() {
-        return location;
-    }
-
-    public AnalysisMethod getMethod() {
-        return method;
+    public BytecodePosition getLocation() {
+        return source;
     }
 
     @Override
-    public TypeFlow<MonitorEnterNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return this;
     }
 
     @Override
     public String toString() {
-        StringBuilder str = new StringBuilder();
-        str.append("MonitorEnterFlow<").append(getState()).append(">");
-        return str.toString();
+        return "MonitorEnterFlow<" + getState() + ">";
     }
 
 }

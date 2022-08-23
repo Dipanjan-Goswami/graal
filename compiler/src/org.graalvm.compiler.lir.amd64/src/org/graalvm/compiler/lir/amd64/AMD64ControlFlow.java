@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,16 +37,19 @@ import static org.graalvm.compiler.lir.LIRInstruction.OperandFlag.ILLEGAL;
 import static org.graalvm.compiler.lir.LIRInstruction.OperandFlag.REG;
 import static org.graalvm.compiler.lir.LIRInstruction.OperandFlag.STACK;
 
+import java.util.Arrays;
 import java.util.function.IntConsumer;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import org.graalvm.compiler.asm.Label;
 import org.graalvm.compiler.asm.amd64.AMD64Address;
-import org.graalvm.compiler.asm.amd64.AMD64Address.Scale;
+import org.graalvm.compiler.core.common.Stride;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.ConditionFlag;
 import org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize;
 import org.graalvm.compiler.asm.amd64.AMD64MacroAssembler;
 import org.graalvm.compiler.code.CompilationResult.JumpTable;
+import org.graalvm.compiler.code.CompilationResult.JumpTable.EntryFormat;
 import org.graalvm.compiler.core.common.NumUtil;
 import org.graalvm.compiler.core.common.calc.Condition;
 import org.graalvm.compiler.debug.GraalError;
@@ -55,7 +58,6 @@ import org.graalvm.compiler.lir.LIRInstructionClass;
 import org.graalvm.compiler.lir.LabelRef;
 import org.graalvm.compiler.lir.Opcode;
 import org.graalvm.compiler.lir.StandardOp;
-import org.graalvm.compiler.lir.StandardOp.BlockEndOp;
 import org.graalvm.compiler.lir.StandardOp.ImplicitNullCheck;
 import org.graalvm.compiler.lir.SwitchStrategy;
 import org.graalvm.compiler.lir.SwitchStrategy.BaseSwitchClosure;
@@ -63,7 +65,6 @@ import org.graalvm.compiler.lir.Variable;
 import org.graalvm.compiler.lir.asm.CompilationResultBuilder;
 
 import jdk.vm.ci.amd64.AMD64;
-import jdk.vm.ci.amd64.AMD64.CPUFeature;
 import jdk.vm.ci.amd64.AMD64Kind;
 import jdk.vm.ci.code.Register;
 import jdk.vm.ci.meta.AllocatableValue;
@@ -73,30 +74,6 @@ import jdk.vm.ci.meta.VMConstant;
 import jdk.vm.ci.meta.Value;
 
 public class AMD64ControlFlow {
-
-    public static final class ReturnOp extends AMD64BlockEndOp implements BlockEndOp {
-        public static final LIRInstructionClass<ReturnOp> TYPE = LIRInstructionClass.create(ReturnOp.class);
-        @Use({REG, ILLEGAL}) protected Value x;
-
-        public ReturnOp(Value x) {
-            super(TYPE);
-            this.x = x;
-        }
-
-        @Override
-        public void emitCode(CompilationResultBuilder crb, AMD64MacroAssembler masm) {
-            crb.frameContext.leave(crb);
-            /*
-             * We potentially return to the interpreter, and that's an AVX-SSE transition. The only
-             * live value at this point should be the return value in either rax, or in xmm0 with
-             * the upper half of the register unused, so we don't destroy any value here.
-             */
-            if (masm.supports(CPUFeature.AVX)) {
-                masm.vzeroupper();
-            }
-            masm.ret(0);
-        }
-    }
 
     public static class BranchOp extends AMD64BlockEndOp implements StandardOp.BranchOp {
         public static final LIRInstructionClass<BranchOp> TYPE = LIRInstructionClass.create(BranchOp.class);
@@ -289,6 +266,8 @@ public class AMD64ControlFlow {
             super(TYPE, intCond(cond), trueDestination, falseDestination, trueDestinationProbability);
             assert size == DWORD || size == QWORD;
             this.size = size;
+
+            assert x.getPlatformKind().getVectorLength() == 1;
 
             this.x = x;
             this.y = y;
@@ -555,25 +534,39 @@ public class AMD64ControlFlow {
     public static final class FloatBranchOp extends BranchOp {
         public static final LIRInstructionClass<FloatBranchOp> TYPE = LIRInstructionClass.create(FloatBranchOp.class);
         protected boolean unorderedIsTrue;
+        protected boolean isSelfEqualsCheck;
 
         public FloatBranchOp(Condition condition, boolean unorderedIsTrue, LabelRef trueDestination, LabelRef falseDestination, double trueDestinationProbability) {
+            this(condition, unorderedIsTrue, trueDestination, falseDestination, trueDestinationProbability, false);
+        }
+
+        public FloatBranchOp(Condition condition, boolean unorderedIsTrue, LabelRef trueDestination, LabelRef falseDestination, double trueDestinationProbability, boolean isSelfEqualsCheck) {
             super(TYPE, floatCond(condition), trueDestination, falseDestination, trueDestinationProbability);
             this.unorderedIsTrue = unorderedIsTrue;
+            this.isSelfEqualsCheck = isSelfEqualsCheck;
         }
 
         @Override
         protected void jcc(AMD64MacroAssembler masm, boolean negate, LabelRef target) {
-            ConditionFlag condition1 = negate ? condition.negate() : condition;
-            boolean unorderedIsTrue1 = negate ? !unorderedIsTrue : unorderedIsTrue;
             Label label = target.label();
             Label endLabel = new Label();
-            if (unorderedIsTrue1 && !trueOnUnordered(condition1)) {
-                masm.jcc(ConditionFlag.Parity, label);
-            } else if (!unorderedIsTrue1 && trueOnUnordered(condition1)) {
-                masm.jccb(ConditionFlag.Parity, endLabel);
+            if (isSelfEqualsCheck) {
+                // The condition is x == x, i.e., !isNaN(x).
+                assert !unorderedIsTrue;
+                ConditionFlag notNaN = negate ? ConditionFlag.Parity : ConditionFlag.NoParity;
+                masm.jcc(notNaN, label);
+                masm.bind(endLabel);
+            } else {
+                ConditionFlag condition1 = negate ? condition.negate() : condition;
+                boolean unorderedIsTrue1 = negate ? !unorderedIsTrue : unorderedIsTrue;
+                if (unorderedIsTrue1 && !trueOnUnordered(condition1)) {
+                    masm.jcc(ConditionFlag.Parity, label);
+                } else if (!unorderedIsTrue1 && trueOnUnordered(condition1)) {
+                    masm.jccb(ConditionFlag.Parity, endLabel);
+                }
+                masm.jcc(condition1, label);
+                masm.bind(endLabel);
             }
-            masm.jcc(condition1, label);
-            masm.bind(endLabel);
         }
     }
 
@@ -582,15 +575,16 @@ public class AMD64ControlFlow {
         protected final Constant[] keyConstants;
         private final LabelRef[] keyTargets;
         private LabelRef defaultTarget;
-        @Alive({REG}) protected Value key;
-        @Temp({REG, ILLEGAL}) protected Value scratch;
+        @Alive({REG}) protected AllocatableValue key;
+        @Temp({REG, ILLEGAL}) protected AllocatableValue scratch;
         protected final SwitchStrategy strategy;
 
-        public StrategySwitchOp(SwitchStrategy strategy, LabelRef[] keyTargets, LabelRef defaultTarget, Value key, Value scratch) {
+        public StrategySwitchOp(SwitchStrategy strategy, LabelRef[] keyTargets, LabelRef defaultTarget, AllocatableValue key, AllocatableValue scratch) {
             this(TYPE, strategy, keyTargets, defaultTarget, key, scratch);
         }
 
-        protected StrategySwitchOp(LIRInstructionClass<? extends StrategySwitchOp> c, SwitchStrategy strategy, LabelRef[] keyTargets, LabelRef defaultTarget, Value key, Value scratch) {
+        protected StrategySwitchOp(LIRInstructionClass<? extends StrategySwitchOp> c, SwitchStrategy strategy, LabelRef[] keyTargets, LabelRef defaultTarget, AllocatableValue key,
+                        AllocatableValue scratch) {
             super(c);
             this.strategy = strategy;
             this.keyConstants = strategy.getKeyConstants();
@@ -648,8 +642,8 @@ public class AMD64ControlFlow {
         }
     }
 
-    public static final class TableSwitchOp extends AMD64BlockEndOp {
-        public static final LIRInstructionClass<TableSwitchOp> TYPE = LIRInstructionClass.create(TableSwitchOp.class);
+    public static final class RangeTableSwitchOp extends AMD64BlockEndOp {
+        public static final LIRInstructionClass<RangeTableSwitchOp> TYPE = LIRInstructionClass.create(RangeTableSwitchOp.class);
         private final int lowKey;
         private final LabelRef defaultTarget;
         private final LabelRef[] targets;
@@ -657,9 +651,10 @@ public class AMD64ControlFlow {
         @Temp({REG, HINT}) protected Value idxScratch;
         @Temp protected Value scratch;
 
-        public TableSwitchOp(final int lowKey, final LabelRef defaultTarget, final LabelRef[] targets, Value index, Variable scratch, Variable idxScratch) {
+        public RangeTableSwitchOp(final int lowKey, final LabelRef defaultTarget, final LabelRef[] targets, Value index, Variable scratch, Variable idxScratch) {
             super(TYPE);
             this.lowKey = lowKey;
+            assert defaultTarget != null;
             this.defaultTarget = defaultTarget;
             this.targets = targets;
             this.index = index;
@@ -688,16 +683,18 @@ public class AMD64ControlFlow {
             }
 
             // Jump to default target if index is not within the jump table
-            if (defaultTarget != null) {
-                masm.jcc(ConditionFlag.Above, defaultTarget.label());
-            }
+            masm.jcc(ConditionFlag.Above, defaultTarget.label());
 
+            emitJumpTable(crb, masm, scratchReg, idxScratchReg, lowKey, highKey, Arrays.stream(targets).map(LabelRef::label));
+        }
+
+        public static void emitJumpTable(CompilationResultBuilder crb, AMD64MacroAssembler masm, Register scratchReg, Register idxScratchReg, int lowKey, int highKey, Stream<Label> targets) {
             // Set scratch to address of jump table
             masm.leaq(scratchReg, new AMD64Address(AMD64.rip, 0));
             final int afterLea = masm.position();
 
             // Load jump table entry into scratch and jump to it
-            masm.movslq(idxScratchReg, new AMD64Address(scratchReg, idxScratchReg, Scale.Times4, 0));
+            masm.movslq(idxScratchReg, new AMD64Address(scratchReg, idxScratchReg, Stride.S4, 0));
             masm.addq(scratchReg, idxScratchReg);
             masm.jmp(scratchReg);
 
@@ -711,8 +708,7 @@ public class AMD64ControlFlow {
             masm.emitInt(jumpTablePos - afterLea, leaDisplacementPosition);
 
             // Emit jump table entries
-            for (LabelRef target : targets) {
-                Label label = target.label();
+            targets.forEach(label -> {
                 int offsetToJumpTableBase = masm.position() - jumpTablePos;
                 if (label.isBound()) {
                     int imm32 = label.position() - jumpTablePos;
@@ -724,9 +720,9 @@ public class AMD64ControlFlow {
                     masm.emitShort(offsetToJumpTableBase);
                     masm.emitByte(0); // padding to make jump table entry 4 bytes wide
                 }
-            }
+            });
 
-            JumpTable jt = new JumpTable(jumpTablePos, lowKey, highKey, 4);
+            JumpTable jt = new JumpTable(jumpTablePos, lowKey, highKey, EntryFormat.OFFSET_ONLY);
             crb.compilationResult.addAnnotation(jt);
         }
     }
@@ -736,12 +732,12 @@ public class AMD64ControlFlow {
         private final JavaConstant[] keys;
         private final LabelRef defaultTarget;
         private final LabelRef[] targets;
-        @Alive protected Value value;
-        @Alive protected Value hash;
-        @Temp({REG}) protected Value entryScratch;
-        @Temp({REG}) protected Value scratch;
+        @Alive({REG}) protected AllocatableValue value;
+        @Alive({REG}) protected AllocatableValue hash;
+        @Temp({REG}) protected AllocatableValue entryScratch;
+        @Temp({REG}) protected AllocatableValue scratch;
 
-        public HashTableSwitchOp(final JavaConstant[] keys, final LabelRef defaultTarget, LabelRef[] targets, Value value, Value hash, Variable scratch, Variable entryScratch) {
+        public HashTableSwitchOp(final JavaConstant[] keys, final LabelRef defaultTarget, LabelRef[] targets, AllocatableValue value, AllocatableValue hash, Variable scratch, Variable entryScratch) {
             super(TYPE);
             this.keys = keys;
             this.defaultTarget = defaultTarget;
@@ -768,7 +764,7 @@ public class AMD64ControlFlow {
             if (defaultTarget != null) {
 
                 // Move the table entry (two DWORDs) into a QWORD
-                masm.movq(entryScratchReg, new AMD64Address(scratchReg, indexReg, Scale.Times8, 0));
+                masm.movq(entryScratchReg, new AMD64Address(scratchReg, indexReg, Stride.S8, 0));
 
                 // Jump to the default target if the first DWORD (original key) doesn't match the
                 // current key. Accounts for hash collisions with unknown keys
@@ -780,17 +776,14 @@ public class AMD64ControlFlow {
 
                 // The jump table has a single DWORD with the label address if there's no
                 // default target
-                masm.movslq(entryScratchReg, new AMD64Address(scratchReg, indexReg, Scale.Times4, 0));
+                masm.movslq(entryScratchReg, new AMD64Address(scratchReg, indexReg, Stride.S4, 0));
             }
             masm.addq(scratchReg, entryScratchReg);
             masm.jmp(scratchReg);
 
             // Inserting padding so that jump the table address is aligned
-            if (defaultTarget != null) {
-                masm.align(8);
-            } else {
-                masm.align(4);
-            }
+            EntryFormat entryFormat = defaultTarget == null ? EntryFormat.OFFSET_ONLY : EntryFormat.VALUE_AND_OFFSET;
+            masm.align(entryFormat.size);
 
             // Patch LEA instruction above now that we know the position of the jump table
             // this is ugly but there is no better way to do this given the assembler API
@@ -818,7 +811,7 @@ public class AMD64ControlFlow {
                 }
             }
 
-            JumpTable jt = new JumpTable(jumpTablePos, keys[0].asInt(), keys[keys.length - 1].asInt(), 4);
+            JumpTable jt = new JumpTable(jumpTablePos, 0, keys.length - 1, entryFormat);
             crb.compilationResult.addAnnotation(jt);
         }
     }
@@ -877,7 +870,7 @@ public class AMD64ControlFlow {
 
         @Override
         public void emitCode(CompilationResultBuilder crb, AMD64MacroAssembler masm) {
-            cmove(crb, masm, result, false, condition, false, trueValue, falseValue);
+            cmove(crb, masm, result, false, condition, false, trueValue, falseValue, false);
         }
     }
 
@@ -889,31 +882,35 @@ public class AMD64ControlFlow {
         @Alive({REG}) protected Value falseValue;
         private final ConditionFlag condition;
         private final boolean unorderedIsTrue;
+        private final boolean isSelfEqualsCheck;
 
-        public FloatCondMoveOp(Variable result, Condition condition, boolean unorderedIsTrue, Variable trueValue, Variable falseValue) {
+        public FloatCondMoveOp(Variable result, Condition condition, boolean unorderedIsTrue, AllocatableValue trueValue, AllocatableValue falseValue, boolean isSelfEqualsCheck) {
             super(TYPE);
             this.result = result;
             this.condition = floatCond(condition);
             this.unorderedIsTrue = unorderedIsTrue;
             this.trueValue = trueValue;
             this.falseValue = falseValue;
+            this.isSelfEqualsCheck = isSelfEqualsCheck;
         }
 
         @Override
         public void emitCode(CompilationResultBuilder crb, AMD64MacroAssembler masm) {
-            cmove(crb, masm, result, true, condition, unorderedIsTrue, trueValue, falseValue);
+            cmove(crb, masm, result, true, condition, unorderedIsTrue, trueValue, falseValue, isSelfEqualsCheck);
         }
     }
 
     private static void cmove(CompilationResultBuilder crb, AMD64MacroAssembler masm, Value result, boolean isFloat, ConditionFlag condition, boolean unorderedIsTrue, Value trueValue,
-                    Value falseValue) {
+                    Value falseValue, boolean isSelfEqualsCheck) {
         // check that we don't overwrite an input operand before it is used.
         assert !result.equals(trueValue);
 
+        // The isSelfEqualsCheck condition is x == x, i.e., !isNaN(x).
+        ConditionFlag moveCondition = (isSelfEqualsCheck ? ConditionFlag.NoParity : condition);
         AMD64Move.move(crb, masm, result, falseValue);
-        cmove(crb, masm, result, condition, trueValue);
+        cmove(crb, masm, result, moveCondition, trueValue);
 
-        if (isFloat) {
+        if (isFloat && !isSelfEqualsCheck) {
             if (unorderedIsTrue && !trueOnUnordered(condition)) {
                 cmove(crb, masm, result, ConditionFlag.Parity, trueValue);
             } else if (!unorderedIsTrue && trueOnUnordered(condition)) {

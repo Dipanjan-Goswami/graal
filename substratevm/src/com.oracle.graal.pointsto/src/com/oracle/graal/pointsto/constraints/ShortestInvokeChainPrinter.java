@@ -31,8 +31,10 @@ import java.util.LinkedList;
 import java.util.Map;
 
 import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.flow.InvokeTypeFlow;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
+
+import com.oracle.graal.pointsto.meta.InvokeInfo;
+import jdk.vm.ci.code.BytecodePosition;
 
 public final class ShortestInvokeChainPrinter {
 
@@ -40,9 +42,9 @@ public final class ShortestInvokeChainPrinter {
 
         protected final Element parent;
         protected final AnalysisMethod method;
-        protected final InvokeTypeFlow invoke;
+        protected final InvokeInfo invoke;
 
-        protected Element(AnalysisMethod method, Element parent, InvokeTypeFlow invoke) {
+        protected Element(AnalysisMethod method, Element parent, InvokeInfo invoke) {
             this.parent = parent;
             this.method = method;
             this.invoke = invoke;
@@ -69,7 +71,7 @@ public final class ShortestInvokeChainPrinter {
             Element methodElement = visited.get(method);
             assert methodElement != null;
 
-            for (InvokeTypeFlow invoke : method.getTypeFlow().getInvokes()) {
+            for (InvokeInfo invoke : method.getInvokes()) {
                 for (AnalysisMethod callee : invoke.getCallees()) {
 
                     if (visited.containsKey(callee)) {
@@ -95,7 +97,8 @@ public final class ShortestInvokeChainPrinter {
         Element cur = start;
         out.print("\tat " + cur.method.asStackTraceElement(0));
         while (cur.parent != null) {
-            out.print("\n\tat " + cur.parent.method.asStackTraceElement(cur.invoke.getSource().invoke().bci()));
+            BytecodePosition source = cur.invoke.getPosition();
+            out.print("\n\tat " + source.getMethod().asStackTraceElement(source.getBCI()));
             cur = cur.parent;
         }
     }

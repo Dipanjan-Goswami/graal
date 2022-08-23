@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 package com.oracle.truffle.api.interop;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+
 /**
  * Common super class for exceptions that can occur when sending {@link InteropLibrary interop
  * messages}. This super class is used to catch any kind of these exceptions.
@@ -49,16 +51,64 @@ package com.oracle.truffle.api.interop;
  */
 public abstract class InteropException extends Exception {
 
-    InteropException(String string) {
-        super(string);
+    InteropException(String message, Throwable cause) {
+        super(message, cause);
+        assert validateCause(cause);
     }
 
-    InteropException(Exception cause) {
-        super(cause);
+    InteropException(String message) {
+        super(message);
     }
 
-    InteropException() {
-        super();
+    /**
+     * Returns the cause of an interop exception.
+     *
+     * {@inheritDoc}
+     *
+     * @since 20.2
+     */
+    @Override
+    @TruffleBoundary
+    // GR-23961 - after language adoption we should make this non-synchronized as initCause is not
+    // longer used
+    public final synchronized Throwable getCause() {
+        return super.getCause();
+    }
+
+    /**
+     * Initializes the casue for an interop exception. Will no longer be supported as of 20.3. Pass
+     * in the cause using the interop constructors instead.
+     *
+     * @deprecated Do no longer use the cause will be initialized finally.
+     * @since 20.2
+     */
+    @Override
+    @Deprecated(since = "20.2")
+    @TruffleBoundary
+    public final synchronized Throwable initCause(Throwable cause) {
+        return super.initCause(cause);
+    }
+
+    /**
+     * No stack trace for interop exceptions.
+     *
+     * @since 20.2
+     */
+    @SuppressWarnings("sync-override")
+    @Override
+    public final Throwable fillInStackTrace() {
+        return this;
+    }
+
+    @TruffleBoundary
+    private static boolean validateCause(Throwable t) {
+        if (t == null) {
+            return true;
+        }
+        if (!InteropAccessor.EXCEPTION.isException(t)) {
+            throw new IllegalArgumentException("Cause exception must extend AbstractTruffleException but was " + t.getClass() + ".");
+        }
+        return true;
     }
 
     private static final long serialVersionUID = -5173354806966156285L;

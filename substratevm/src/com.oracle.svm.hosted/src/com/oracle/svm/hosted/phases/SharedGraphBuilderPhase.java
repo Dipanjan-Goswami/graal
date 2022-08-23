@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,36 +24,46 @@
  */
 package com.oracle.svm.hosted.phases;
 
+import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.compiler.core.common.calc.Condition;
 import org.graalvm.compiler.core.common.type.StampPair;
+import org.graalvm.compiler.graph.Node.NodeIntrinsic;
+import org.graalvm.compiler.java.BciBlockMapping;
 import org.graalvm.compiler.java.BytecodeParser;
+import org.graalvm.compiler.java.FrameStateBuilder;
 import org.graalvm.compiler.java.GraphBuilderPhase;
+import org.graalvm.compiler.nodes.BeginNode;
 import org.graalvm.compiler.nodes.CallTargetNode.InvokeKind;
-import org.graalvm.compiler.nodes.ConstantNode;
+import org.graalvm.compiler.nodes.calc.IsNullNode;
+import org.graalvm.compiler.nodes.extended.BranchProbabilityNode;
+import org.graalvm.compiler.nodes.IfNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.graphbuilderconf.GeneratedInvocationPlugin;
 import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration;
 import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderPlugin;
 import org.graalvm.compiler.nodes.graphbuilderconf.IntrinsicContext;
 import org.graalvm.compiler.nodes.java.MethodCallTargetNode;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
+import org.graalvm.compiler.replacements.SnippetTemplate;
 import org.graalvm.compiler.word.WordTypes;
 
+import com.oracle.graal.pointsto.constraints.TypeInstantiationException;
 import com.oracle.graal.pointsto.constraints.UnresolvedElementException;
-import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
-import com.oracle.svm.core.meta.SubstrateObjectConstant;
-import com.oracle.svm.core.option.SubstrateOptionsParser;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.deopt.DeoptimizationSupport;
+import com.oracle.svm.core.meta.SharedMethod;
+import com.oracle.svm.core.nodes.SubstrateMethodCallTargetNode;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.core.util.UserError.UserException;
 import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.ExceptionSynthesizer;
-import com.oracle.svm.hosted.HostedConfiguration;
-import com.oracle.svm.hosted.NativeImageOptions;
+import com.oracle.svm.hosted.LinkAtBuildTimeSupport;
 
-import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaField;
 import jdk.vm.ci.meta.JavaKind;
+import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaMethod;
 import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.JavaTypeProfile;
@@ -69,21 +79,27 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
         this.wordTypes = wordTypes;
     }
 
+    @Override
+    protected void run(StructuredGraph graph) {
+        super.run(graph);
+        assert wordTypes == null || wordTypes.ensureGraphContainsNoWordTypeReferences(graph);
+    }
+
     public abstract static class SharedBytecodeParser extends BytecodeParser {
 
         private final boolean explicitExceptionEdges;
-        private final boolean allowIncompleteClassPath;
+        private final boolean linkAtBuildTime;
 
         protected SharedBytecodeParser(GraphBuilderPhase.Instance graphBuilderInstance, StructuredGraph graph, BytecodeParser parent, ResolvedJavaMethod method, int entryBCI,
                         IntrinsicContext intrinsicContext, boolean explicitExceptionEdges) {
-            this(graphBuilderInstance, graph, parent, method, entryBCI, intrinsicContext, explicitExceptionEdges, NativeImageOptions.AllowIncompleteClasspath.getValue());
+            this(graphBuilderInstance, graph, parent, method, entryBCI, intrinsicContext, explicitExceptionEdges, LinkAtBuildTimeSupport.singleton().linkAtBuildTime(method.getDeclaringClass()));
         }
 
         protected SharedBytecodeParser(GraphBuilderPhase.Instance graphBuilderInstance, StructuredGraph graph, BytecodeParser parent, ResolvedJavaMethod method, int entryBCI,
-                        IntrinsicContext intrinsicContext, boolean explicitExceptionEdges, boolean allowIncompleteClasspath) {
+                        IntrinsicContext intrinsicContext, boolean explicitExceptionEdges, boolean linkAtBuildTime) {
             super(graphBuilderInstance, graph, parent, method, entryBCI, intrinsicContext);
             this.explicitExceptionEdges = explicitExceptionEdges;
-            this.allowIncompleteClassPath = allowIncompleteClasspath;
+            this.linkAtBuildTime = linkAtBuildTime;
         }
 
         @Override
@@ -102,13 +118,38 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
             return getWordTypes() != null;
         }
 
+        /**
+         * {@link Fold} and {@link NodeIntrinsic} can be deferred during parsing/decoding. Only by
+         * the end of {@linkplain SnippetTemplate#instantiate Snippet instantiation} do they need to
+         * have been processed.
+         *
+         * This is how SVM handles snippets. They are parsed with plugins disabled and then encoded
+         * and stored in the image. When the snippet is needed at runtime the graph is decoded and
+         * the plugins are run during the decoding process. If they aren't handled at this point
+         * then they will never be handled.
+         */
+        @Override
+        public boolean canDeferPlugin(GeneratedInvocationPlugin plugin) {
+            return plugin.getSource().equals(Fold.class) || plugin.getSource().equals(NodeIntrinsic.class);
+        }
+
         @Override
         protected JavaMethod lookupMethodInPool(int cpi, int opcode) {
             JavaMethod result = super.lookupMethodInPool(cpi, opcode);
             if (result == null) {
-                throw VMError.shouldNotReachHere("Discovered an unresolved calee while parsing " + method.asStackTraceElement(bci()) + '.');
+                throw VMError.shouldNotReachHere("Discovered an unresolved callee while parsing " + method.asStackTraceElement(bci()) + '.');
             }
             return result;
+        }
+
+        /**
+         * Native image can suffer high contention when synchronizing resolution and initialization
+         * of a type referenced by a constant pool entry. Such synchronization should be unnecessary
+         * for native-image.
+         */
+        @Override
+        protected Object loadReferenceTypeLock() {
+            return null;
         }
 
         @Override
@@ -116,11 +157,11 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
             try {
                 super.maybeEagerlyResolve(cpi, bytecode);
             } catch (UnresolvedElementException e) {
-                if (e.getCause() instanceof NoClassDefFoundError) {
+                if (e.getCause() instanceof LinkageError || e.getCause() instanceof IllegalAccessError) {
                     /*
-                     * Ignore NoClassDefFoundError if thrown from eager resolution attempt. This is
-                     * usually followed by a call to ConstantPool.lookupType() which should return
-                     * an UnresolvedJavaType which we know how to deal with.
+                     * Ignore LinkageError if thrown from eager resolution attempt. This is usually
+                     * followed by a call to ConstantPool.lookupType() which should return an
+                     * UnresolvedJavaType which we know how to deal with.
                      */
                 } else {
                     throw e;
@@ -132,14 +173,29 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
         protected JavaType maybeEagerlyResolve(JavaType type, ResolvedJavaType accessingClass) {
             try {
                 return super.maybeEagerlyResolve(type, accessingClass);
-            } catch (NoClassDefFoundError e) {
+            } catch (LinkageError e) {
                 /*
-                 * Type resolution fails if the type is missing. Just erase the type by returning
-                 * the Object type. This is the same handling as in WrappedConstantPool, which is
-                 * not triggering when parsing is done with the HotSpot universe instead of the
-                 * AnalysisUniverse.
+                 * Type resolution fails if the type is missing or has an incompatible change. Just
+                 * erase the type by returning the Object type. This is the same handling as in
+                 * WrappedConstantPool, which is not triggering when parsing is done with the
+                 * HotSpot universe instead of the AnalysisUniverse.
                  */
                 return getMetaAccess().lookupJavaType(Object.class);
+            }
+        }
+
+        @Override
+        protected void handleIllegalNewInstance(JavaType type) {
+            /*
+             * If linkAtBuildTime was set for type, report the error during image building,
+             * otherwise defer the error reporting to runtime.
+             */
+            if (linkAtBuildTime) {
+                String message = "Cannot instantiate " + type.toJavaName() + ". " +
+                                LinkAtBuildTimeSupport.singleton().errorMessageFor(method.getDeclaringClass());
+                throw new TypeInstantiationException(message);
+            } else {
+                ExceptionSynthesizer.throwException(this, InstantiationError.class, type.toJavaName());
             }
         }
 
@@ -160,12 +216,42 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
 
         @Override
         protected void handleUnresolvedInstanceOf(JavaType type, ValueNode object) {
+            // The INSTANCEOF byte code refers to a type that could not be resolved.
+            // INSTANCEOF must not throw an exception if the object is null.
+            BeginNode nullObj = graph.add(new BeginNode());
+            BeginNode nonNullObj = graph.add(new BeginNode());
+            append(new IfNode(graph.addOrUniqueWithInputs(IsNullNode.create(object)),
+                            nullObj, nonNullObj, BranchProbabilityNode.NOT_FREQUENT_PROFILE));
+
+            // Case where the object is not null, and type could not be resolved: Throw an
+            // exception.
+            lastInstr = nonNullObj;
             handleUnresolvedType(type);
+
+            // Case where the object is null: INSTANCEOF does not care about the type.
+            // Push zero to the byte code stack, then continue running normally.
+            lastInstr = nullObj;
+            frameState.push(JavaKind.Int, appendConstant(JavaConstant.INT_0));
         }
 
         @Override
         protected void handleUnresolvedCheckCast(JavaType type, ValueNode object) {
+            // The CHECKCAST byte code refers to a type that could not be resolved.
+            // CHECKCAST must throw an exception if, and only if, the object is not null.
+            BeginNode nullObj = graph.add(new BeginNode());
+            BeginNode nonNullObj = graph.add(new BeginNode());
+            append(new IfNode(graph.addOrUniqueWithInputs(IsNullNode.create(object)),
+                            nullObj, nonNullObj, BranchProbabilityNode.NOT_FREQUENT_PROFILE));
+
+            // Case where the object is not null, and type could not be resolved: Throw an
+            // exception.
+            lastInstr = nonNullObj;
             handleUnresolvedType(type);
+
+            // Case where the object is null: CHECKCAST does not care about the type.
+            // Push "null" to the byte code stack, then continue running normally.
+            lastInstr = nullObj;
+            frameState.push(JavaKind.Object, appendConstant(JavaConstant.NULL_POINTER));
         }
 
         @Override
@@ -195,13 +281,13 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
 
         private void handleUnresolvedType(JavaType type) {
             /*
-             * If --allow-incomplete-classpath is set defer the error reporting to runtime,
-             * otherwise report the error during image building.
+             * If linkAtBuildTime was set for type, report the error during image building,
+             * otherwise defer the error reporting to runtime.
              */
-            if (allowIncompleteClassPath) {
-                ExceptionSynthesizer.throwNoClassDefFoundError(this, type.toJavaName());
-            } else {
+            if (linkAtBuildTime) {
                 reportUnresolvedElement("type", type.toJavaName());
+            } else {
+                ExceptionSynthesizer.throwException(this, NoClassDefFoundError.class, type.toJavaName());
             }
         }
 
@@ -212,13 +298,13 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
                 handleUnresolvedType(declaringClass);
             } else {
                 /*
-                 * If --allow-incomplete-classpath is set defer the error reporting to runtime,
-                 * otherwise report the error during image building.
+                 * If linkAtBuildTime was set for type, report the error during image building,
+                 * otherwise defer the error reporting to runtime.
                  */
-                if (allowIncompleteClassPath) {
-                    ExceptionSynthesizer.throwNoSuchFieldError(this, field.format("%H.%n"));
-                } else {
+                if (linkAtBuildTime) {
                     reportUnresolvedElement("field", field.format("%H.%n"));
+                } else {
+                    ExceptionSynthesizer.throwException(this, NoSuchFieldError.class, field.format("%H.%n"));
                 }
             }
         }
@@ -230,22 +316,20 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
                 handleUnresolvedType(declaringClass);
             } else {
                 /*
-                 * If --allow-incomplete-classpath is set defer the error reporting to runtime,
-                 * otherwise report the error during image building.
+                 * If linkAtBuildTime was set for type, report the error during image building,
+                 * otherwise defer the error reporting to runtime.
                  */
-                if (allowIncompleteClassPath) {
-                    ExceptionSynthesizer.throwNoSuchMethodError(this, javaMethod.format("%H.%n(%P)"));
-                } else {
+                if (linkAtBuildTime) {
                     reportUnresolvedElement("method", javaMethod.format("%H.%n(%P)"));
+                } else {
+                    ExceptionSynthesizer.throwException(this, NoSuchMethodError.class, javaMethod.format("%H.%n(%P)"));
                 }
             }
         }
 
-        private static void reportUnresolvedElement(String elementKind, String elementAsString) {
-            String message = "Discovered unresolved " + elementKind + " during parsing: " + elementAsString +
-                            ". To diagnose the issue you can use the " +
-                            SubstrateOptionsParser.commandArgument(NativeImageOptions.AllowIncompleteClasspath, "+") +
-                            " option. The missing " + elementKind + " is then reported at run time when it is accessed the first time.";
+        private void reportUnresolvedElement(String elementKind, String elementAsString) {
+            String message = "Discovered unresolved " + elementKind + " during parsing: " + elementAsString + ". " +
+                            LinkAtBuildTimeSupport.singleton().errorMessageFor(method.getDeclaringClass());
             throw new UnresolvedElementException(message);
         }
 
@@ -264,26 +348,11 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
             if (checkWordTypes()) {
                 if ((x.getStackKind() == JavaKind.Object && y.getStackKind() == getWordTypes().getWordKind()) ||
                                 (x.getStackKind() == getWordTypes().getWordKind() && y.getStackKind() == JavaKind.Object)) {
-                    throw UserError.abort("Should not compare Word to Object in condition at " + method.format("%H.%n(%p)") + " in " + method.asStackTraceElement(bci()));
+                    throw UserError.abort("Should not compare Word to Object in condition at %s in %s", method, method.asStackTraceElement(bci()));
                 }
             }
 
             super.genIf(x, cond, y);
-        }
-
-        @Override
-        protected boolean shouldComplementProbability() {
-            /*
-             * Probabilities from AOT profiles are about canonical conditions as they are coming
-             * from Graal IR. That is, they are collected after `BytecodeParser` has done conversion
-             * to Graal IR. Unfortunately, `BytecodeParser` assumes that probabilities are about
-             * original conditions and loads them before conversion to Graal IR.
-             *
-             * Therefore, in order to maintain correct probabilities we need to prevent
-             * `BytecodeParser` from complementing probability during transformations such as
-             * negation of a condition, or elimination of logical negation.
-             */
-            return !HostedConfiguration.instance().isUsingAOTProfiles();
         }
 
         @Override
@@ -296,7 +365,7 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
                 checkWordType(args[i + (isStatic ? 0 : 1)], targetMethod.getSignature().getParameterType(i, null), "call argument");
             }
 
-            return super.createMethodCallTarget(invokeKind, targetMethod, args, returnStamp, profile);
+            return new SubstrateMethodCallTargetNode(invokeKind, targetMethod, args, returnStamp, profile, null, profile);
         }
 
         @Override
@@ -312,9 +381,9 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
                 boolean isWordValue = value.getStackKind() == getWordTypes().getWordKind();
 
                 if (isWordTypeExpected && !isWordValue) {
-                    throw UserError.abort("Expected Word but got Object for " + reason + " in " + method.asStackTraceElement(bci()));
+                    throw UserError.abort("Expected Word but got Object for %s in %s", reason, method.asStackTraceElement(bci()));
                 } else if (!isWordTypeExpected && isWordValue) {
-                    throw UserError.abort("Expected Object but got Word for " + reason + " in " + method.asStackTraceElement(bci()));
+                    throw UserError.abort("Expected Object but got Word for %s in %s", reason, method.asStackTraceElement(bci()));
                 }
             }
         }
@@ -335,17 +404,49 @@ public abstract class SharedGraphBuilderPhase extends GraphBuilderPhase.Instance
         }
 
         @Override
-        public void notifyReplacedCall(ResolvedJavaMethod targetMethod, ConstantNode node) {
-            JavaConstant constant = node.asJavaConstant();
-            if (getMetaAccess() instanceof AnalysisMetaAccess && constant.getJavaKind() == JavaKind.Object && constant.isNonNull()) {
-                SubstrateObjectConstant sValue = (SubstrateObjectConstant) node.asJavaConstant();
-                sValue.setRoot(targetMethod);
+        public boolean isPluginEnabled(GraphBuilderPlugin plugin) {
+            return true;
+        }
+
+        protected static boolean isDeoptimizationEnabled() {
+            return DeoptimizationSupport.enabled() && !SubstrateUtil.isBuildingLibgraal();
+        }
+
+        protected boolean isMethodDeoptTarget() {
+            return method instanceof SharedMethod && ((SharedMethod) method).isDeoptTarget();
+        }
+
+        @Override
+        protected boolean asyncExceptionLiveness() {
+            /*
+             * If deoptimization is enabled, then must assume that any method can deoptimize at any
+             * point while throwing an exception.
+             */
+            return isDeoptimizationEnabled();
+        }
+
+        @Override
+        protected void clearNonLiveLocalsAtTargetCreation(BciBlockMapping.BciBlock block, FrameStateBuilder state) {
+            /*
+             * In order to match potential DeoptEntryNodes, within runtime compiled code it is not
+             * possible to clear non-live locals at the start of a exception dispatch block if
+             * deoptimizations can be present, as exception dispatch blocks have the same deopt bci
+             * as the exception.
+             */
+            if ((!(isDeoptimizationEnabled() && block instanceof BciBlockMapping.ExceptionDispatchBlock)) || isMethodDeoptTarget()) {
+                super.clearNonLiveLocalsAtTargetCreation(block, state);
             }
         }
 
         @Override
-        public boolean isPluginEnabled(GraphBuilderPlugin plugin) {
-            return true;
+        protected void clearNonLiveLocalsAtLoopExitCreation(BciBlockMapping.BciBlock block, FrameStateBuilder state) {
+            /*
+             * In order to match potential DeoptEntryNodes, within runtime compiled code it is not
+             * possible to clear non-live locals when deoptimizations can be present.
+             */
+            if (!isDeoptimizationEnabled() || isMethodDeoptTarget()) {
+                super.clearNonLiveLocalsAtLoopExitCreation(block, state);
+            }
         }
     }
 }

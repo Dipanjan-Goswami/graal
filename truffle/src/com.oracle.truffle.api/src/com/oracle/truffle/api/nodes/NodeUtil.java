@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,14 +48,17 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.NoSuchElementException;
+import java.util.Map;
 import java.util.Objects;
 
 import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.TruffleOptions;
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.nodes.Node.Child;
+import com.oracle.truffle.api.nodes.Node.Children;
 import com.oracle.truffle.api.source.SourceSection;
 
 /**
@@ -68,81 +71,6 @@ public final class NodeUtil {
     private NodeUtil() {
     }
 
-    static final ThreadLocal<Object> CURRENT_ENCAPSULATING_NODE = NodeAccessor.ACCESSOR.createFastThreadLocal();
-
-    static Iterator<Node> makeIterator(Node node) {
-        return node.getNodeClass().makeIterator(node);
-    }
-
-    /** @since 0.8 or earlier */
-    public static Iterator<Node> makeRecursiveIterator(Node node) {
-        return new RecursiveNodeIterator(node);
-    }
-
-    private static final class RecursiveNodeIterator implements Iterator<Node> {
-        private final List<Iterator<Node>> iteratorStack = new ArrayList<>();
-
-        RecursiveNodeIterator(final Node node) {
-            iteratorStack.add(new Iterator<Node>() {
-
-                private boolean visited;
-
-                public void remove() {
-                    throw new UnsupportedOperationException();
-                }
-
-                public Node next() {
-                    if (visited) {
-                        throw new NoSuchElementException();
-                    }
-                    visited = true;
-                    return node;
-                }
-
-                public boolean hasNext() {
-                    return !visited;
-                }
-            });
-        }
-
-        public boolean hasNext() {
-            return peekIterator() != null;
-        }
-
-        public Node next() {
-            Iterator<Node> iterator = peekIterator();
-            if (iterator == null) {
-                throw new NoSuchElementException();
-            }
-
-            Node node = iterator.next();
-            if (node != null) {
-                Iterator<Node> childIterator = makeIterator(node);
-                if (childIterator.hasNext()) {
-                    iteratorStack.add(childIterator);
-                }
-            }
-            return node;
-        }
-
-        private Iterator<Node> peekIterator() {
-            int tos = iteratorStack.size() - 1;
-            while (tos >= 0) {
-                Iterator<Node> iterable = iteratorStack.get(tos);
-                if (iterable.hasNext()) {
-                    return iterable;
-                } else {
-                    iteratorStack.remove(tos--);
-                }
-            }
-            return null;
-        }
-
-        public void remove() {
-            throw new UnsupportedOperationException();
-        }
-    }
-
     /** @since 0.8 or earlier */
     @SuppressWarnings("unchecked")
     public static <T extends Node> T cloneNode(T orig) {
@@ -152,16 +80,24 @@ public final class NodeUtil {
     static Node deepCopyImpl(Node orig) {
         CompilerAsserts.neverPartOfCompilation("do not call Node.deepCopyImpl from compiled code");
         final Node clone = orig.copy();
+        if (!sameType(clone, orig)) {
+            throw CompilerDirectives.shouldNotReachHere(String.format("Invalid return type after copy(): orig.getClass() = %s, clone.getClass() = %s",
+                            orig.getClass(), clone == null ? "null" : clone.getClass()));
+        }
         NodeClass nodeClass = clone.getNodeClass();
-
         clone.setParent(null);
 
-        for (Object field : nodeClass.getNodeFields()) {
+        for (Object field : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(field)) {
                 Node child = (Node) nodeClass.getFieldObject(field, orig);
                 if (child != null) {
                     Node clonedChild = child.deepCopy();
                     clonedChild.setParent(clone);
+                    if (!sameType(child, clonedChild)) {
+                        throw CompilerDirectives.shouldNotReachHere(
+                                        String.format("Invalid return type after deepCopy(): orig.getClass() = %s, orig.fieldName = '%s', child.getClass() = %s, clonedChild.getClass() = %s",
+                                                        orig.getClass(), nodeClass.getFieldName(field), child.getClass(), clonedChild.getClass()));
+                    }
                     nodeClass.putFieldObject(field, clone, clonedChild);
                 }
             } else if (nodeClass.isChildrenField(field)) {
@@ -173,6 +109,11 @@ public final class NodeUtil {
                         for (int i = 0; i < children.length; i++) {
                             if (children[i] != null) {
                                 Node clonedChild = ((Node) children[i]).deepCopy();
+                                if (!sameType(children[i], clonedChild)) {
+                                    throw CompilerDirectives.shouldNotReachHere(String.format(
+                                                    "Invalid return type after deepCopy(): orig.getClass() = %s, orig.fieldName = '%s', children[i].getClass() = %s, clonedChild.getClass() = %s",
+                                                    orig.getClass(), nodeClass.getFieldName(field), children[i].getClass(), clonedChild == null ? "null" : clonedChild.getClass()));
+                                }
                                 clonedChild.setParent(clone);
                                 clonedChildren[i] = clonedChild;
                             }
@@ -185,7 +126,13 @@ public final class NodeUtil {
             } else if (nodeClass.isCloneableField(field)) {
                 Object cloneable = nodeClass.getFieldObject(field, clone);
                 if (cloneable != null && cloneable == nodeClass.getFieldObject(field, orig)) {
-                    nodeClass.putFieldObject(field, clone, ((NodeCloneable) cloneable).clone());
+                    Object clonedClonable = ((NodeCloneable) cloneable).clone();
+                    if (!sameType(cloneable, clonedClonable)) {
+                        throw CompilerDirectives.shouldNotReachHere(
+                                        String.format("Invalid return type after clone(): orig.getClass() = %s, orig.fieldName = '%s', cloneable.getClass() = %s, clonedCloneable.getClass() =%s",
+                                                        orig.getClass(), nodeClass.getFieldName(field), cloneable.getClass(), clonedClonable == null ? "null" : clonedClonable.getClass()));
+                    }
+                    nodeClass.putFieldObject(field, clone, clonedClonable);
                 }
             } else if (nodeClass.nodeFieldsOrderedByKind()) {
                 break;
@@ -194,13 +141,20 @@ public final class NodeUtil {
         return clone;
     }
 
+    private static boolean sameType(Object clone, Object orig) {
+        if (clone == null || orig == null) {
+            return clone == orig;
+        }
+        return clone.getClass() == orig.getClass();
+    }
+
     /** @since 0.8 or earlier */
     public static List<Node> findNodeChildren(Node node) {
         CompilerAsserts.neverPartOfCompilation("do not call Node.findNodeChildren from compiled code");
         List<Node> nodes = new ArrayList<>();
         NodeClass nodeClass = node.getNodeClass();
 
-        for (Object nodeField : nodeClass.getNodeFields()) {
+        for (Object nodeField : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(nodeField)) {
                 Object child = nodeClass.getFieldObject(nodeField, node);
                 if (child != null) {
@@ -233,48 +187,12 @@ public final class NodeUtil {
         return replaceChild(parent, oldChild, newChild, false);
     }
 
-    /**
-     * Returns the current encapsulating node for non {@link Node#isAdoptable() adoptable} nodes.
-     *
-     * @since 19.0
-     */
-    @TruffleBoundary
-    public static Node getCurrentEncapsulatingNode() {
-        return (Node) CURRENT_ENCAPSULATING_NODE.get();
-    }
-
-    /**
-     * Utility to push the current encapsulating Node for nodes that are not
-     * {@link Node#isAdoptable() adoptable}.
-     *
-     * @since 19.0
-     */
-    @TruffleBoundary
-    public static Node pushEncapsulatingNode(Node node) {
-        assert node == null || node.isAdoptable() : "Node must be adoptable to be pushed as encapsulating node.";
-        assert node == null || node.getRootNode() != null : "Node must be adopted by a RootNode to be pushed as encapsulating node.";
-        Object prev = CURRENT_ENCAPSULATING_NODE.get();
-        CURRENT_ENCAPSULATING_NODE.set(node);
-        return (Node) prev;
-    }
-
-    /**
-     * Utility to push the pop encapsulating Node for nodes that are not {@link Node#isAdoptable()
-     * adoptable}.
-     *
-     * @since 19.0
-     */
-    @TruffleBoundary
-    public static void popEncapsulatingNode(Node prev) {
-        CURRENT_ENCAPSULATING_NODE.set(prev);
-    }
-
     /*
      * Fast version of child adoption.
      */
     static void adoptChildrenHelper(Node currentNode) {
         NodeClass clazz = currentNode.getNodeClass();
-        for (Object field : clazz.getNodeFields()) {
+        for (Object field : clazz.getNodeFieldArray()) {
             if (clazz.isChildField(field)) {
                 Object child = clazz.getFieldObject(field, currentNode);
                 if (child != null) {
@@ -312,7 +230,7 @@ public final class NodeUtil {
     static int adoptChildrenAndCountHelper(Node currentNode) {
         int count = 0;
         NodeClass clazz = currentNode.getNodeClass();
-        for (Object field : clazz.getNodeFields()) {
+        for (Object field : clazz.getNodeFieldArray()) {
             if (clazz.isChildField(field)) {
                 Object child = clazz.getFieldObject(field, currentNode);
                 if (child != null) {
@@ -343,7 +261,19 @@ public final class NodeUtil {
         CompilerAsserts.neverPartOfCompilation("do not replace Node child from compiled code");
         NodeClass nodeClass = parent.getNodeClass();
 
-        for (Object nodeField : nodeClass.getNodeFields()) {
+        /*
+         * It is also important to check the old node for replacement, because we exclude non
+         * replaceable nodes from the node subtype analysis in TruffleBaseFeature.
+         */
+        if (!oldChild.getNodeClass().isReplaceAllowed()) {
+            throw new IllegalArgumentException(String.format("Replaced node type '%s' does not allow replacement.", oldChild.getClass().getName()));
+        }
+
+        if (!newChild.getNodeClass().isReplaceAllowed()) {
+            throw new IllegalArgumentException(String.format("Replacing node type '%s' does not allow replacement.", newChild.getClass().getName()));
+        }
+
+        for (Object nodeField : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(nodeField)) {
                 if (nodeClass.getFieldObject(nodeField, parent) == oldChild) {
                     if (adopt) {
@@ -383,24 +313,95 @@ public final class NodeUtil {
     }
 
     /**
+     * Finds the field in a parent node and returns its name. Utility for debugging and tracing
+     * purposes.
+     *
+     * @since 22.2
+     */
+    public static String findChildFieldName(Node parent, Node child) {
+        return getNodeFieldName(parent, child, null);
+    }
+
+    /**
+     * Finds and retrieves all field names of a node class. This is a utility intended for debugging
+     * and tracing purposes.
+     *
+     * @since 22.2
+     */
+    public static List<String> collectFieldNames(Class<? extends Node> clazz) {
+        NodeClass nodeClass = NodeClass.get(clazz);
+        Object[] fields = nodeClass.getNodeFieldArray();
+        String[] fieldNames = new String[fields.length];
+        for (int i = 0; i < fields.length; i++) {
+            fieldNames[i] = nodeClass.getFieldName(fields[i]);
+        }
+        return Arrays.asList(fieldNames);
+    }
+
+    /**
+     * Finds and retrieves all {@link Child} and {@link Children} annotated field names and values.
+     * This is a utility intended for debugging and tracing purposes.
+     *
+     * @since 22.2
+     */
+    public static Map<String, Node> collectNodeChildren(Node node) {
+        LinkedHashMap<String, Node> nodes = new LinkedHashMap<>();
+        NodeClass nodeClass = NodeClass.get(node);
+
+        for (Object field : nodeClass.getNodeFieldArray()) {
+            if (nodeClass.isChildField(field)) {
+                Object value = nodeClass.getFieldObject(field, node);
+                if (value != null) {
+                    nodes.put(nodeClass.getFieldName(field), (Node) value);
+                }
+            } else if (nodeClass.isChildrenField(field)) {
+                Object value = nodeClass.getFieldObject(field, node);
+                if (value != null) {
+                    Object[] children = (Object[]) value;
+                    for (int i = 0; i < children.length; i++) {
+                        if (children[i] != null) {
+                            nodes.put(nodeClass.getFieldName(field) + "[" + i + "]", (Node) children[i]);
+                        }
+                    }
+                }
+            }
+        }
+        return Collections.unmodifiableMap(nodes);
+    }
+
+    /**
+     * Finds and retrieves all properties of a node. Properties of a node are all fields not
+     * annotated with {@link Child} or {@link Children}. This is a utility intended for debugging
+     * and tracing purposes.
+     *
+     * @since 22.2
+     */
+    public static Map<String, Object> collectNodeProperties(Node node) {
+        LinkedHashMap<String, Object> nodes = new LinkedHashMap<>();
+        NodeClass nodeClass = NodeClass.get(node);
+        for (Object field : nodeClass.getNodeFieldArray()) {
+            if (!nodeClass.isChildField(field) && !nodeClass.isChildrenField(field)) {
+                nodes.put(nodeClass.getFieldName(field), nodeClass.getFieldValue(field, node));
+            }
+        }
+        return Collections.unmodifiableMap(nodes);
+    }
+
+    /**
      * Finds the field in a parent node, if any, that holds a specified child node.
      *
      * @return the field (possibly an array) holding the child, {@code null} if not found.
      * @since 0.8 or earlier
      */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public static NodeFieldAccessor findChildField(Node parent, Node child) {
+    static Object findChildField(Node parent, Node child) {
         assert child != null;
         NodeClass parentNodeClass = parent.getNodeClass();
 
-        for (NodeFieldAccessor field : parentNodeClass.getFields()) {
-            if (field.getKind() == NodeFieldAccessor.NodeFieldKind.CHILD) {
-                if (field.getObject(parent) == child) {
-                    return field;
-                }
-            } else if (field.getKind() == NodeFieldAccessor.NodeFieldKind.CHILDREN) {
-                Object arrayObject = field.getObject(parent);
+        for (Object field : parentNodeClass.getNodeFieldArray()) {
+            if (parentNodeClass.isChildField(field)) {
+                return field;
+            } else if (parentNodeClass.isChildrenField(field)) {
+                Object arrayObject = parentNodeClass.getFieldValue(field, child);
                 if (arrayObject != null) {
                     Object[] array = (Object[]) arrayObject;
                     for (int i = 0; i < array.length; i++) {
@@ -425,9 +426,12 @@ public final class NodeUtil {
                 return false;
             }
             NodeClass nodeClass = parent.getNodeClass();
-            for (Object field : nodeClass.getNodeFields()) {
+            for (Object field : nodeClass.getNodeFieldArray()) {
                 if (nodeClass.isChildField(field)) {
                     if (nodeClass.getFieldObject(field, parent) == oldChild) {
+                        if (!oldChild.getNodeClass().isReplaceAllowed() || !newChild.getNodeClass().isReplaceAllowed()) {
+                            return false;
+                        }
                         return nodeClass.getFieldType(field).isAssignableFrom(newChild.getClass());
                     }
                 } else if (nodeClass.isChildrenField(field)) {
@@ -436,6 +440,9 @@ public final class NodeUtil {
                         Object[] array = (Object[]) arrayObject;
                         for (int i = 0; i < array.length; i++) {
                             if (array[i] == oldChild) {
+                                if (!oldChild.getNodeClass().isReplaceAllowed() || !newChild.getNodeClass().isReplaceAllowed()) {
+                                    return false;
+                                }
                                 return nodeClass.getFieldType(field).getComponentType().isAssignableFrom(newChild.getClass());
                             }
                         }
@@ -461,7 +468,7 @@ public final class NodeUtil {
         Objects.requireNonNull(visitor);
         NodeClass nodeClass = parent.getNodeClass();
 
-        for (Object field : nodeClass.getNodeFields()) {
+        for (Object field : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(field)) {
                 Object child = nodeClass.getFieldObject(field, parent);
                 if (child != null) {
@@ -493,7 +500,7 @@ public final class NodeUtil {
     static boolean forEachChildRecursive(Node parent, NodeVisitor visitor) {
         NodeClass nodeClass = parent.getNodeClass();
 
-        for (Object field : nodeClass.getNodeFields()) {
+        for (Object field : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(field)) {
                 if (!visitChild((Node) nodeClass.getFieldObject(field, parent), visitor)) {
                     return false;
@@ -759,7 +766,7 @@ public final class NodeUtil {
 
     private static String getNodeFieldName(Node parent, Node node, String defaultName) {
         NodeClass nodeClass = parent.getNodeClass();
-        for (Object field : nodeClass.getNodeFields()) {
+        for (Object field : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(field)) {
                 if (nodeClass.getFieldObject(field, parent) == node) {
                     return nodeClass.getFieldName(field);
@@ -832,7 +839,7 @@ public final class NodeUtil {
         String sep = "";
         p.print("(");
         NodeClass nodeClass = NodeClass.get(node);
-        for (Object field : nodeClass.getNodeFields()) {
+        for (Object field : nodeClass.getNodeFieldArray()) {
             if (nodeClass.isChildField(field) || nodeClass.isChildrenField(field)) {
                 childFields.add(field);
             } else {
@@ -848,7 +855,7 @@ public final class NodeUtil {
 
         if (childFields.size() != 0) {
             p.print(" {");
-            for (Object field : nodeClass.getNodeFields()) {
+            for (Object field : nodeClass.getNodeFieldArray()) {
                 printNewLine(p, level);
                 p.print(nodeClass.getFieldName(field));
 
@@ -902,7 +909,8 @@ public final class NodeUtil {
             return "";
         }
         if (section.getSource() == null) {
-            // TODO we can remove this block if SourceSection#createUnavailable was removed, because
+            // TODO GR-38632 we can remove this block if SourceSection#createUnavailable was
+            // removed, because
             // then source cannot become null anymore.
             return "source: <unknown>";
         }
@@ -967,7 +975,8 @@ public final class NodeUtil {
         }
 
         if (sourceSection.getSource() == null) {
-            // TODO we can remove this block if SourceSection#createUnavailable was removed, because
+            // TODO GR-38632 we can remove this block if SourceSection#createUnavailable was
+            // removed, because
             // then source cannot become null anymore.
             return "at <Unknown>";
         } else {
@@ -1011,6 +1020,59 @@ public final class NodeUtil {
             currentFrom = currentFrom.getSuperclass();
         }
         return true;
+    }
+
+    /**
+     * Fails with an assertion if the exact {@link Node#getClass() node type} is used as a parent.
+     * Returns <code>true</code> if the node is <code>null</code>.
+     *
+     * @since 21.2
+     */
+    public static boolean assertRecursion(Node node, int maxRecursion) {
+        if (node == null) {
+            // not adopted nothing we can do
+            return true;
+        }
+        Node parent = node.getParent();
+        int counter = 0;
+        while (parent != null) {
+            if (node.getClass() == parent.getClass() && counter++ == maxRecursion) {
+                // found recursion
+                throw new AssertionError(String.format("Invalid recursion detected. Path to recursion: %n%s", printRecursionPath(node, node.getClass())));
+            }
+            parent = parent.getParent();
+        }
+        return true;
+    }
+
+    private static String printRecursionPath(Node node, Class<?> recursiveType) {
+        StringBuilder path = new StringBuilder();
+        path.append("     ").append(node.getClass().getTypeName()).append(System.lineSeparator());
+        Node current = node;
+        Node parent = node.getParent();
+        do {
+            path.append("  <- ");
+            if (parent != null) {
+                String fieldName = findChildFieldName(parent, current);
+                path.append(parent.getClass().getTypeName());
+                if (fieldName != null) {
+                    path.append(".");
+                    path.append(fieldName);
+                }
+                if (parent.getClass() == recursiveType) {
+                    path.append(" <-recursion-detected->");
+                }
+            }
+            current = parent;
+            if (current != null) {
+                parent = current.getParent();
+            }
+            if (parent != null) {
+                path.append(System.lineSeparator());
+            }
+        } while (parent != null);
+
+        return path.toString();
     }
 
     private static final class NodeCounter implements NodeVisitor {

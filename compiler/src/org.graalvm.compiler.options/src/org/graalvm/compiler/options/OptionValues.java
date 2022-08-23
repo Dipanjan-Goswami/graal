@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -140,7 +140,7 @@ public class OptionValues {
     }
 
     public static String toString(UnmodifiableEconomicMap<OptionKey<?>, Object> values) {
-        Comparator<OptionKey<?>> comparator = new Comparator<OptionKey<?>>() {
+        Comparator<OptionKey<?>> comparator = new Comparator<>() {
             @Override
             public int compare(OptionKey<?> o1, OptionKey<?> o2) {
                 return o1.getName().compareTo(o2.getName());

@@ -24,7 +24,6 @@
  */
 package org.graalvm.component.installer.remote;
 
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -37,6 +36,7 @@ import java.util.ServiceLoader;
 import java.util.stream.Collectors;
 import org.graalvm.component.installer.model.CatalogContents;
 import org.graalvm.component.installer.CommandInput;
+import org.graalvm.component.installer.Commands;
 import org.graalvm.component.installer.CommonConstants;
 import org.graalvm.component.installer.ComponentCollection;
 import org.graalvm.component.installer.Feedback;
@@ -107,11 +107,7 @@ public class RemoteCatalogDownloader implements SoftwareChannel {
         }
         String[] parts = overrideSpec.split("\\|"); // NOI18N
         for (String s : parts) {
-            try {
-                sources.add(new SoftwareChannelSource(s));
-            } catch (MalformedURLException ex) {
-                feedback.error("REMOTE_FailedToParseParameter", ex, s); // NOI18N
-            }
+            sources.add(new SoftwareChannelSource(s)); // NOI18N
         }
         return sources;
     }
@@ -136,7 +132,7 @@ public class RemoteCatalogDownloader implements SoftwareChannel {
         return channelSources;
     }
 
-    private static final Comparator<String> CHANNEL_KEY_COMPARATOR = new Comparator<String>() {
+    private static final Comparator<String> CHANNEL_KEY_COMPARATOR = new Comparator<>() {
         @Override
         public int compare(String o1, String o2) {
             String k1 = o1.substring(CommonConstants.CAP_CATALOG_PREFIX.length());
@@ -202,8 +198,8 @@ public class RemoteCatalogDownloader implements SoftwareChannel {
 
     List<SoftwareChannelSource> readChannelSources() {
         List<SoftwareChannelSource> res;
-        Map<String, String> lcEnv = lowercaseMap(System.getenv());
-        res = readChannelSources(CommonConstants.ENV_VARIABLE_PREFIX, lcEnv);
+        Map<String, String> lcEnv = lowercaseMap(input.parameters(false));
+        res = readChannelSources(CommonConstants.ENV_VARIABLE_PREFIX.toLowerCase(Locale.ENGLISH), lcEnv);
         if (res != null && !res.isEmpty()) {
             return res;
         }
@@ -219,7 +215,7 @@ public class RemoteCatalogDownloader implements SoftwareChannel {
             return mergedStorage;
         }
         mergedStorage = new MergeStorage(input.getLocalRegistry(), feedback);
-
+        mergedStorage.setIgnoreCatalogErrors(input.hasOption(Commands.OPTION_IGNORE_CATALOG_ERRORS));
         for (SoftwareChannelSource spec : getChannelSources()) {
             SoftwareChannel ch = null;
             for (SoftwareChannel.Factory f : factories) {
@@ -229,7 +225,7 @@ public class RemoteCatalogDownloader implements SoftwareChannel {
                 }
             }
             if (ch != null) {
-                mergedStorage.addChannel(ch);
+                mergedStorage.addChannel(spec, ch);
             }
         }
         return mergedStorage;

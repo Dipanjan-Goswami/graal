@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -35,7 +35,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.llvm.tests.interop.values.BoxedStringValue;
 import com.oracle.truffle.tck.TruffleRunner;
 import com.oracle.truffle.tck.TruffleRunner.Inject;
@@ -52,11 +51,11 @@ public class StringTest extends InteropTestBase {
     private static final int UNICODE_LENGTH_UTF8 = StandardCharsets.UTF_8.encode(UNICODE_STRING).limit();
     private static final int UNICODE_LENGTH_UTF32 = Charset.forName("utf-32").encode(UNICODE_STRING).limit();
 
-    private static TruffleObject testLibrary;
+    private static Object testLibrary;
 
     @BeforeClass
     public static void loadTestBitcode() {
-        testLibrary = InteropTestBase.loadTestBitcodeInternal("stringTest");
+        testLibrary = loadTestBitcodeInternal("stringTest.c");
     }
 
     public class TestStringSizeNode extends SulongTestNode {

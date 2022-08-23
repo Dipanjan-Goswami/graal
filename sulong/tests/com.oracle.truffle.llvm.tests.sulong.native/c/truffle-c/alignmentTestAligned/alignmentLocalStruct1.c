@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -28,16 +28,22 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include <stdlib.h>
+#include <stdint.h>
 
 int main() {
-  char a;
+    char a;
 
-  struct {
-    int a;
-  } test;
-  char *ptr = &a;
-  if ((long)&test % __alignof__(test) != 0) {
-    abort();
-  }
-  return 0;
+    struct {
+        int a;
+    } test;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-variable"
+    char *ptr = &a;
+#pragma clang diagnostic pop
+
+    if ((int64_t) &test % __alignof__(test) != 0) {
+        abort();
+    }
+    return 0;
 }

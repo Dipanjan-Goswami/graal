@@ -30,6 +30,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -146,7 +147,7 @@ public final class MemoryTracer implements Closeable {
      */
     public synchronized void setCollecting(boolean collecting) {
         if (closed) {
-            throw new IllegalStateException("Memory Tracer is already closed.");
+            throw new ProfilerException("Memory Tracer is already closed.");
         }
         if (this.collecting != collecting) {
             this.collecting = collecting;
@@ -188,14 +189,14 @@ public final class MemoryTracer implements Closeable {
         return Collections.unmodifiableMap(returnValue);
     }
 
-    Supplier<Payload> payloadFactory = new Supplier<Payload>() {
+    Supplier<Payload> payloadFactory = new Supplier<>() {
         @Override
         public Payload get() {
             return new Payload();
         }
     };
 
-    Function<Payload, Payload> copyPayload = new Function<Payload, Payload>() {
+    Function<Payload, Payload> copyPayload = new Function<>() {
         @Override
         public Payload apply(Payload payload) {
             Payload copy = new Payload();
@@ -207,7 +208,7 @@ public final class MemoryTracer implements Closeable {
         }
     };
 
-    BiConsumer<Payload, Payload> mergePayload = new BiConsumer<Payload, Payload>() {
+    BiConsumer<Payload, Payload> mergePayload = new BiConsumer<>() {
         @Override
         public void accept(Payload source, Payload dest) {
             dest.totalAllocations += source.totalAllocations;
@@ -262,7 +263,7 @@ public final class MemoryTracer implements Closeable {
     public synchronized void setStackLimit(int stackLimit) {
         verifyConfigAllowed();
         if (stackLimit < 1) {
-            throw new IllegalArgumentException(String.format("Invalid stack limit %s.", stackLimit));
+            throw new ProfilerException(String.format(Locale.ENGLISH, "Invalid stack limit %s.", stackLimit));
         }
         this.stackLimit = stackLimit;
     }
@@ -295,6 +296,7 @@ public final class MemoryTracer implements Closeable {
     @Override
     public synchronized void close() {
         assert Thread.holdsLock(this);
+        closed = true;
         if (stacksBinding != null) {
             stacksBinding.dispose();
             stacksBinding = null;
@@ -307,9 +309,9 @@ public final class MemoryTracer implements Closeable {
     private void verifyConfigAllowed() {
         assert Thread.holdsLock(this);
         if (closed) {
-            throw new IllegalStateException("Memory Tracer is already closed.");
+            throw new ProfilerException("Memory Tracer is already closed.");
         } else if (collecting) {
-            throw new IllegalStateException("Cannot change tracer configuration while collecting. Call setCollecting(false) to disable collection first.");
+            throw new ProfilerException("Cannot change tracer configuration while collecting. Call setCollecting(false) to disable collection first.");
         }
     }
 

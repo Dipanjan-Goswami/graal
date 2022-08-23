@@ -24,9 +24,12 @@
  */
 package com.oracle.svm.core.posix.headers;
 
+import static org.graalvm.nativeimage.c.function.CFunction.Transition.NO_TRANSITION;
+
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.type.CDoublePointer;
 
 // Checkstyle: stop
 
@@ -36,6 +39,12 @@ import org.graalvm.nativeimage.c.type.CCharPointer;
 @CContext(PosixDirectives.class)
 public class Stdlib {
 
+    @CFunction(transition = NO_TRANSITION)
+    public static native CCharPointer getenv(CCharPointer name);
+
     @CFunction
     public static native CCharPointer realpath(CCharPointer name, CCharPointer resolved);
+
+    @CFunction
+    public static native int getloadavg(CDoublePointer loadavg, int nelem);
 }

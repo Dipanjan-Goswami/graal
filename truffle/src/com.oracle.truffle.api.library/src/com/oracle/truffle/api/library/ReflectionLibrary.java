@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -126,11 +126,13 @@ public abstract class ReflectionLibrary extends Library {
      */
     @Abstract
     @SuppressWarnings("unused")
+    @TruffleBoundary
     public Object send(Object receiver, Message message, Object... args) throws Exception {
         throw new AbstractMethodError();
     }
 
     private static final LibraryFactory<ReflectionLibrary> FACTORY = LibraryFactory.resolve(ReflectionLibrary.class);
+    static final ReflectionLibrary UNCACHED = FACTORY.getUncached();
 
     /**
      * Returns the library factory for {@link ReflectionLibrary}.
@@ -139,6 +141,28 @@ public abstract class ReflectionLibrary extends Library {
      */
     public static LibraryFactory<ReflectionLibrary> getFactory() {
         return FACTORY;
+    }
+
+    /**
+     * Returns the uncached automatically dispatched version of the reflection library. This is a
+     * short-cut for calling <code>ReflectionLibrary.getFactory().getUncached()</code>.
+     *
+     * @see LibraryFactory#getUncached()
+     * @since 21.3
+     */
+    public static ReflectionLibrary getUncached() {
+        return UNCACHED;
+    }
+
+    /**
+     * Returns the uncached manually dispatched version of the reflection library. This is a
+     * short-cut for calling <code>ReflectionLibrary.getFactory().getUncached(v)</code>.
+     *
+     * @see LibraryFactory#getUncached(Object)
+     * @since 21.3
+     */
+    public static ReflectionLibrary getUncached(Object v) {
+        return FACTORY.getUncached(v);
     }
 
 }
@@ -152,10 +176,10 @@ final class ReflectionLibraryDefault {
     static class Send {
 
         @Specialization(guards = {"message == cachedMessage", "cachedLibrary.accepts(receiver)"}, limit = "LIMIT")
-        static Object doSendCached(Object receiver, Message message, Object[] args,
+        static Object doSendCached(Object receiver, @SuppressWarnings("unused") Message message, Object[] args,
                         @Cached("message") Message cachedMessage,
                         @Cached("createLibrary(message, receiver)") Library cachedLibrary) throws Exception {
-            return message.getFactory().genericDispatch(cachedLibrary, receiver, cachedMessage, args, 0);
+            return cachedMessage.getFactory().genericDispatch(cachedLibrary, receiver, cachedMessage, args, 0);
         }
 
         static Library createLibrary(Message message, Object receiver) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,8 @@ package org.graalvm.compiler.hotspot.phases;
 
 import static org.graalvm.compiler.phases.common.DeadCodeEliminationPhase.Optionality.Required;
 
+import java.util.Optional;
+
 import org.graalvm.compiler.core.common.PermanentBailoutException;
 import org.graalvm.compiler.core.common.cfg.Loop;
 import org.graalvm.compiler.core.common.type.ObjectStamp;
@@ -36,8 +38,6 @@ import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.iterators.NodeIterable;
-import org.graalvm.compiler.loop.LoopEx;
-import org.graalvm.compiler.loop.LoopsData;
 import org.graalvm.compiler.loop.phases.LoopTransformations;
 import org.graalvm.compiler.nodeinfo.InputType;
 import org.graalvm.compiler.nodeinfo.Verbosity;
@@ -46,6 +46,7 @@ import org.graalvm.compiler.nodes.EntryProxyNode;
 import org.graalvm.compiler.nodes.FixedGuardNode;
 import org.graalvm.compiler.nodes.FixedNode;
 import org.graalvm.compiler.nodes.FrameState;
+import org.graalvm.compiler.nodes.GraphState;
 import org.graalvm.compiler.nodes.LogicNode;
 import org.graalvm.compiler.nodes.LoopBeginNode;
 import org.graalvm.compiler.nodes.NodeView;
@@ -64,12 +65,15 @@ import org.graalvm.compiler.nodes.java.InstanceOfNode;
 import org.graalvm.compiler.nodes.java.MonitorEnterNode;
 import org.graalvm.compiler.nodes.java.MonitorExitNode;
 import org.graalvm.compiler.nodes.java.MonitorIdNode;
+import org.graalvm.compiler.nodes.loop.LoopEx;
+import org.graalvm.compiler.nodes.loop.LoopsData;
+import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.nodes.util.GraphUtil;
 import org.graalvm.compiler.options.Option;
 import org.graalvm.compiler.options.OptionKey;
 import org.graalvm.compiler.options.OptionType;
 import org.graalvm.compiler.options.OptionValues;
-import org.graalvm.compiler.phases.Phase;
+import org.graalvm.compiler.phases.BasePhase;
 import org.graalvm.compiler.phases.common.DeadCodeEliminationPhase;
 import org.graalvm.compiler.serviceprovider.SpeculationReasonGroup;
 
@@ -80,7 +84,7 @@ import jdk.vm.ci.meta.SpeculationLog;
 import jdk.vm.ci.meta.SpeculationLog.SpeculationReason;
 import jdk.vm.ci.runtime.JVMCICompiler;
 
-public class OnStackReplacementPhase extends Phase {
+public class OnStackReplacementPhase extends BasePhase<CoreProviders> {
 
     public static class Options {
         // @formatter:off
@@ -103,8 +107,13 @@ public class OnStackReplacementPhase extends Phase {
     private static final SpeculationReasonGroup OSR_LOCAL_SPECULATIONS = new SpeculationReasonGroup("OSRLocal", int.class, Stamp.class, int.class);
 
     @Override
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return ALWAYS_APPLICABLE;
+    }
+
+    @Override
     @SuppressWarnings("try")
-    protected void run(StructuredGraph graph) {
+    protected void run(StructuredGraph graph, CoreProviders providers) {
         DebugContext debug = graph.getDebug();
         if (graph.getEntryBCI() == JVMCICompiler.INVOCATION_ENTRY_BCI) {
             // This happens during inlining in a OSR method, because the same phase plan will be
@@ -119,7 +128,7 @@ public class OnStackReplacementPhase extends Phase {
         int iterations = 0;
 
         final EntryMarkerNode originalOSRNode = getEntryMarker(graph);
-        final LoopBeginNode originalOSRLoop = osrLoop(originalOSRNode);
+        final LoopBeginNode originalOSRLoop = osrLoop(originalOSRNode, providers);
         final boolean currentOSRWithLocks = osrWithLocks(originalOSRNode);
 
         if (originalOSRLoop == null) {
@@ -137,7 +146,7 @@ public class OnStackReplacementPhase extends Phase {
 
         do {
             osr = getEntryMarker(graph);
-            LoopsData loops = new LoopsData(graph);
+            LoopsData loops = providers.getLoopsDataProvider().getLoopsData(graph);
             // Find the loop that contains the EntryMarker
             Loop<Block> l = loops.getCFG().getNodeToBlock().get(osr).getLoop();
             if (l == null) {
@@ -204,7 +213,8 @@ public class OnStackReplacementPhase extends Phase {
                     }
                     // Speculate on the OSRLocal stamps that could be more precise.
                     SpeculationReason reason = OSR_LOCAL_SPECULATIONS.createSpeculationReason(osrState.bci, narrowedStamp, i);
-                    if (graph.getSpeculationLog().maySpeculate(reason) && osrLocal instanceof OSRLocalNode && value.getStackKind().equals(JavaKind.Object) && !narrowedStamp.isUnrestricted()) {
+                    if (graph.getSpeculationLog().maySpeculate(reason) && osrLocal instanceof OSRLocalNode && value.getStackKind().equals(JavaKind.Object) &&
+                                    !narrowedStamp.isUnrestricted()) {
                         // Add guard.
                         LogicNode check = graph.addOrUniqueWithInputs(InstanceOfNode.createHelper((ObjectStamp) narrowedStamp, osrLocal, null, null));
                         SpeculationLog.Speculation constant = graph.getSpeculationLog().speculate(reason);
@@ -223,8 +233,8 @@ public class OnStackReplacementPhase extends Phase {
                 }
             }
 
-            osr.replaceAtUsages(InputType.Guard, osrStart);
-            osr.replaceAtUsages(InputType.Anchor, osrStart);
+            osr.replaceAtUsages(osrStart, InputType.Guard);
+            osr.replaceAtUsages(osrStart, InputType.Anchor);
         }
         debug.dump(DebugContext.DETAILED_LEVEL, graph, "OnStackReplacement after replacing entry proxies");
         GraphUtil.killCFG(start);
@@ -238,6 +248,7 @@ public class OnStackReplacementPhase extends Phase {
                     MonitorIdNode id = osrState.monitorIdAt(i);
                     ValueNode lockedObject = osrState.lockAt(i);
                     OSRMonitorEnterNode osrMonitorEnter = graph.add(new OSRMonitorEnterNode(lockedObject, id));
+                    osrMonitorEnter.setStateAfter(osrStart.stateAfter());
                     for (Node usage : id.usages()) {
                         if (usage instanceof AccessMonitorNode) {
                             AccessMonitorNode access = (AccessMonitorNode) usage;
@@ -290,9 +301,9 @@ public class OnStackReplacementPhase extends Phase {
         return osr;
     }
 
-    private static LoopBeginNode osrLoop(EntryMarkerNode osr) {
+    private static LoopBeginNode osrLoop(EntryMarkerNode osr, CoreProviders providers) {
         // Check that there is an OSR loop for the OSR begin
-        LoopsData loops = new LoopsData(osr.graph());
+        LoopsData loops = providers.getLoopsDataProvider().getLoopsData(osr.graph());
         Loop<Block> l = loops.getCFG().getNodeToBlock().get(osr).getLoop();
         if (l == null) {
             return null;

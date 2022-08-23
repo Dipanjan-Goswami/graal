@@ -33,32 +33,45 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.graalvm.component.installer.Feedback;
 import org.graalvm.component.installer.Version;
 import org.graalvm.component.installer.model.ComponentInfo;
 import org.graalvm.component.installer.model.ComponentRegistry;
+import org.graalvm.component.installer.model.RemoteInfoProcessor;
 import org.graalvm.component.installer.persist.AbstractCatalogStorage;
 import org.graalvm.component.installer.persist.ComponentPackageLoader;
 
 public class RemotePropertiesStorage extends AbstractCatalogStorage {
     protected static final String PROPERTY_HASH = "hash"; // NOI18N
-    private static final String FORMAT_FLAVOUR = "Component.{0}"; // NOI18N
-    private static final String FORMAT_SINGLE_VERSION = "Component.{0}_{1}."; // NOI18N
+    private static final String FORMAT_FLAVOUR = "Component\\.{0}"; // NOI18N
+    private static final String FORMAT_SINGLE_VERSION = "Component\\.{0}_{1}\\."; // NOI18N
 
     private final Properties catalogProperties;
-    private final String flavourPrefix;
-    private final String singleVersionPrefix;
+    private final String flavourRegex;
+    private final String singleRegex;
     private final Version graalVersion;
+
+    private RemoteInfoProcessor remoteProcessor = RemoteInfoProcessor.NONE;
 
     private Map<String, Properties> filteredComponents;
 
     public RemotePropertiesStorage(Feedback fb, ComponentRegistry localReg, Properties catalogProperties, String graalSelector, Version gVersion, URL baseURL) {
         super(localReg, fb, baseURL);
         this.catalogProperties = catalogProperties;
-        flavourPrefix = MessageFormat.format(FORMAT_FLAVOUR, graalSelector);
+        flavourRegex = MessageFormat.format(FORMAT_FLAVOUR, graalSelector);
         graalVersion = gVersion != null ? gVersion : localReg.getGraalVersion();
-        singleVersionPrefix = MessageFormat.format(FORMAT_SINGLE_VERSION,
+        singleRegex = MessageFormat.format(FORMAT_SINGLE_VERSION,
                         graalVersion.originalString(), graalSelector);
+    }
+
+    public RemoteInfoProcessor getRemoteProcessor() {
+        return remoteProcessor;
+    }
+
+    public void setRemoteProcessor(RemoteInfoProcessor remoteProcessor) {
+        this.remoteProcessor = remoteProcessor;
     }
 
     /**
@@ -85,6 +98,9 @@ public class RemotePropertiesStorage extends AbstractCatalogStorage {
         // already accepted prefixes
         Set<String> acceptedPrefixes = new HashSet<>();
 
+        Pattern flavourPattern = Pattern.compile("^" + flavourRegex, Pattern.CASE_INSENSITIVE);
+        Pattern singlePattern = Pattern.compile("^" + singleRegex, Pattern.CASE_INSENSITIVE);
+
         for (String s : catalogProperties.stringPropertyNames()) {
             String cid;
             String pn;
@@ -94,13 +110,18 @@ public class RemotePropertiesStorage extends AbstractCatalogStorage {
             int l;
 
             if (slashPos != -1 && secondSlashPos != -1) {
-                if (!s.startsWith(flavourPrefix)) {
+                if (!flavourPattern.matcher(s).find()) {
                     continue;
                 }
-                l = secondSlashPos + 1;
                 pn = s.substring(slashPos + 1);
 
                 String pref = s.substring(0, secondSlashPos);
+
+                int lastSlashPos = s.indexOf('/', secondSlashPos + 1);
+                if (lastSlashPos == -1) {
+                    lastSlashPos = secondSlashPos;
+                }
+                l = lastSlashPos + 1;
                 if (knownPrefixes.add(pref)) {
                     try {
                         Version vn = Version.fromString(s.substring(slashPos + 1, secondSlashPos));
@@ -117,11 +138,12 @@ public class RemotePropertiesStorage extends AbstractCatalogStorage {
                 }
 
             } else {
-                if (!s.startsWith(singleVersionPrefix)) {
+                Matcher m = singlePattern.matcher(s);
+                if (!m.find()) {
                     continue;
                 }
                 // versionless component
-                l = singleVersionPrefix.length();
+                l = m.end();
                 // normalized version
                 pn = graalVersion.toString() + "/" + s.substring(l);
             }
@@ -160,30 +182,31 @@ public class RemotePropertiesStorage extends AbstractCatalogStorage {
 
         for (String s : compProps.stringPropertyNames()) {
             int slashPos = s.indexOf('/');
+            int anotherSlashPos = s.indexOf('/', slashPos + 1);
 
             String vS = s.substring(0, slashPos);
-            if (!processedPrefixes.add(vS)) {
+            String identity = anotherSlashPos == -1 ? vS : s.substring(0, anotherSlashPos);
+            if (!processedPrefixes.add(identity)) {
                 continue;
             }
-            Version v;
             try {
-                v = Version.fromString(vS);
+                Version.fromString(vS);
             } catch (IllegalArgumentException ex) {
                 feedback.verboseOutput("REMOTE_BadComponentVersion", s);
                 continue;
             }
-            ComponentInfo ci = createVersionedComponent(compProps, id, v);
+            ComponentInfo ci = createVersionedComponent(identity + "/", compProps, id,
+                            anotherSlashPos == -1 ? "" : s.substring(slashPos + 1, anotherSlashPos));
             // just in case the catalog info is broken
             if (ci != null) {
-                infos.put(vS, ci);
+                infos.put(identity, ci);
             }
         }
 
         return new HashSet<>(infos.values());
     }
 
-    private ComponentInfo createVersionedComponent(Properties filtered, String id, Version v) throws IOException {
-        String versoPrefix = v.originalString() + "/"; // NOI18N
+    private ComponentInfo createVersionedComponent(String versoPrefix, Properties filtered, String id, String tag) throws IOException {
         URL downloadURL;
         String s = filtered.getProperty(versoPrefix + id.toLowerCase());
         if (s == null) {
@@ -192,17 +215,27 @@ public class RemotePropertiesStorage extends AbstractCatalogStorage {
         // try {
         downloadURL = new URL(baseURL, s);
         String prefix = versoPrefix + id.toLowerCase() + "-"; // NOI18N
-        String hashS = filtered.getProperty(versoPrefix + PROPERTY_HASH);
+        String hashS = filtered.getProperty(prefix + PROPERTY_HASH);
         byte[] hash = hashS == null ? null : toHashBytes(id, hashS);
 
-        ComponentPackageLoader ldr = new ComponentPackageLoader(
+        ComponentPackageLoader ldr = new ComponentPackageLoader(tag,
                         new PrefixedPropertyReader(prefix, filtered),
                         feedback);
         ComponentInfo info = ldr.createComponentInfo();
         info.setRemoteURL(downloadURL);
         info.setShaDigest(hash);
         info.setOrigin(baseURL.toString());
-        return info;
+        return configureComponentInfo(info);
+    }
+
+    /**
+     * Allows to override, or supplement component information.
+     * 
+     * @param info component info
+     * @return possibly modified or new instance.
+     */
+    protected ComponentInfo configureComponentInfo(ComponentInfo info) {
+        return remoteProcessor.decorateComponent(info);
     }
 
     static class PrefixedPropertyReader implements Function<String, String> {

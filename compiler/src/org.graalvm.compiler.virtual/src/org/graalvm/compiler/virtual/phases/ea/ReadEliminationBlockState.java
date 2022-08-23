@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,6 +31,8 @@ import org.graalvm.collections.Equivalence;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.word.LocationIdentity;
 
+import jdk.vm.ci.meta.JavaKind;
+
 /**
  * This class maintains a set of known values, identified by base object, locations and offset.
  */
@@ -51,18 +53,20 @@ public class ReadEliminationBlockState extends EffectsBlockState<ReadElimination
         public abstract CacheEntry<T> duplicateWithObject(ValueNode newObject);
 
         @Override
-        public int hashCode() {
-            int result = 31 + ((identity == null) ? 0 : identity.hashCode());
-            return 31 * result + ((object == null) ? 0 : object.hashCode());
-        }
-
-        @Override
         public boolean equals(Object obj) {
             if (!(obj instanceof CacheEntry<?>)) {
                 return false;
             }
             CacheEntry<?> other = (CacheEntry<?>) obj;
             return identity.equals(other.identity) && object == other.object;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 31 + ((identity == null) ? 0 : identity.hashCode());
+            // we need to use the identity hash code for the object since the node may not yet have
+            // a valid id and thus not have a stable hash code
+            return 31 * result + ((object == null) ? 0 : System.identityHashCode(object));
         }
 
         @Override
@@ -79,6 +83,14 @@ public class ReadEliminationBlockState extends EffectsBlockState<ReadElimination
 
         public LoadCacheEntry(ValueNode object, LocationIdentity identity) {
             super(object, identity);
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj instanceof LoadCacheEntry) {
+                return super.equals(obj);
+            }
+            return false;
         }
 
         @Override
@@ -105,16 +117,18 @@ public class ReadEliminationBlockState extends EffectsBlockState<ReadElimination
     public static final class UnsafeLoadCacheEntry extends CacheEntry<ValueNode> {
 
         private final LocationIdentity locationIdentity;
+        private final JavaKind kind;
 
-        public UnsafeLoadCacheEntry(ValueNode object, ValueNode location, LocationIdentity locationIdentity) {
+        public UnsafeLoadCacheEntry(ValueNode object, ValueNode location, LocationIdentity locationIdentity, JavaKind kind) {
             super(object, location);
             assert locationIdentity != null;
             this.locationIdentity = locationIdentity;
+            this.kind = kind;
         }
 
         @Override
         public CacheEntry<ValueNode> duplicateWithObject(ValueNode newObject) {
-            return new UnsafeLoadCacheEntry(newObject, identity, locationIdentity);
+            return new UnsafeLoadCacheEntry(newObject, identity, locationIdentity, kind);
         }
 
         @Override
@@ -124,14 +138,17 @@ public class ReadEliminationBlockState extends EffectsBlockState<ReadElimination
 
         @Override
         public int hashCode() {
-            return 31 * super.hashCode() + locationIdentity.hashCode();
+            int result = super.hashCode();
+            result = 31 * result + locationIdentity.hashCode();
+            result = 31 * result + kind.hashCode();
+            return result;
         }
 
         @Override
         public boolean equals(Object obj) {
             if (obj instanceof UnsafeLoadCacheEntry) {
                 UnsafeLoadCacheEntry other = (UnsafeLoadCacheEntry) obj;
-                return super.equals(other) && locationIdentity.equals(other.locationIdentity);
+                return super.equals(other) && locationIdentity.equals(other.locationIdentity) && kind == other.kind;
             }
             return false;
         }
@@ -143,7 +160,7 @@ public class ReadEliminationBlockState extends EffectsBlockState<ReadElimination
 
         @Override
         public String toString() {
-            return "UNSAFE:" + super.toString() + " location:" + locationIdentity;
+            return "UNSAFE:" + super.toString() + " location:" + locationIdentity + " (" + kind + ")";
         }
     }
 

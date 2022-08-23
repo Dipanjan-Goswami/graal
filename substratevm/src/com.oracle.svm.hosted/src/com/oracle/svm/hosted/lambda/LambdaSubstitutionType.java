@@ -25,10 +25,12 @@
 package com.oracle.svm.hosted.lambda;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 
 import com.oracle.graal.pointsto.infrastructure.OriginalClassProvider;
-import com.oracle.svm.core.jdk.InternalVMMethod;
-import com.oracle.svm.hosted.c.GraalAccess;
+import com.oracle.graal.pointsto.util.GraalAccess;
+import com.oracle.svm.core.jdk.LambdaFormHiddenMethod;
+import com.oracle.svm.util.AnnotationWrapper;
 
 import jdk.vm.ci.meta.Assumptions.AssumptionResult;
 import jdk.vm.ci.meta.JavaConstant;
@@ -43,7 +45,7 @@ import jdk.vm.ci.meta.UnresolvedJavaType;
 /**
  * Simply changes the name of Lambdas from a random ID into a stable name.
  */
-public class LambdaSubstitutionType implements ResolvedJavaType, OriginalClassProvider {
+public class LambdaSubstitutionType implements ResolvedJavaType, OriginalClassProvider, AnnotationWrapper {
     private final ResolvedJavaType original;
     private final String stableName;
 
@@ -59,21 +61,13 @@ public class LambdaSubstitutionType implements ResolvedJavaType, OriginalClassPr
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return InternalVMMethod.Holder.ARRAY;
-    }
-
-    @Override
-    public boolean isAnnotationPresent(Class<? extends Annotation> annotationClass) {
-        return annotationClass == InternalVMMethod.class;
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        if (annotationClass == InternalVMMethod.class) {
-            return annotationClass.cast(InternalVMMethod.Holder.INSTANCE);
-        }
+    public AnnotatedElement getAnnotationRoot() {
         return null;
+    }
+
+    @Override
+    public Annotation[] getInjectedAnnotations() {
+        return LambdaFormHiddenMethod.Holder.ARRAY;
     }
 
     @Override
@@ -127,10 +121,26 @@ public class LambdaSubstitutionType implements ResolvedJavaType, OriginalClassPr
     }
 
     @Override
+    public void link() {
+        original.link();
+    }
+
+    @Override
+    public boolean hasDefaultMethods() {
+        return original.hasDefaultMethods();
+    }
+
+    @Override
+    public boolean declaresDefaultMethods() {
+        return original.declaresDefaultMethods();
+    }
+
+    @Override
     public boolean isAssignableFrom(ResolvedJavaType other) {
         return original.isAssignableFrom(other);
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     public ResolvedJavaType getHostClass() {
         return original.getHostClass();
@@ -382,18 +392,8 @@ public class LambdaSubstitutionType implements ResolvedJavaType, OriginalClassPr
     }
 
     @Override
-    public <T extends Annotation> T getDeclaredAnnotation(Class<T> annotationClass) {
-        return original.getDeclaredAnnotation(annotationClass);
-    }
-
-    @Override
     public <T extends Annotation> T[] getDeclaredAnnotationsByType(Class<T> annotationClass) {
         return original.getDeclaredAnnotationsByType(annotationClass);
-    }
-
-    @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return original.getDeclaredAnnotations();
     }
 
     public ResolvedJavaType getOriginal() {

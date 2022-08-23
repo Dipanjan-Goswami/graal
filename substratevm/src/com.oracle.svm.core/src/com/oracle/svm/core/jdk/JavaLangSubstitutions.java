@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2007, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2020, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,63 +27,54 @@ package com.oracle.svm.core.jdk;
 
 import static com.oracle.svm.core.annotate.RecomputeFieldValue.Kind.Reset;
 import static com.oracle.svm.core.snippets.KnownIntrinsics.readHub;
-import static org.graalvm.compiler.nodes.extended.BranchProbabilityNode.FAST_PATH_PROBABILITY;
-import static org.graalvm.compiler.nodes.extended.BranchProbabilityNode.LUDICROUSLY_SLOW_PATH_PROBABILITY;
-import static org.graalvm.compiler.nodes.extended.BranchProbabilityNode.probability;
 
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Enumeration;
-import java.util.IdentityHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Predicate;
+import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
-import org.graalvm.compiler.core.common.SuppressFBWarnings;
-import org.graalvm.compiler.word.ObjectAccess;
-import org.graalvm.compiler.word.Word;
+import org.graalvm.compiler.replacements.nodes.BinaryMathIntrinsicNode;
+import org.graalvm.compiler.replacements.nodes.BinaryMathIntrinsicNode.BinaryOperation;
+import org.graalvm.compiler.replacements.nodes.UnaryMathIntrinsicNode;
+import org.graalvm.compiler.replacements.nodes.UnaryMathIntrinsicNode.UnaryOperation;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.CLibrary;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 import org.graalvm.nativeimage.impl.InternalPlatform;
-import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.WordBase;
 import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.MonitorSupport;
+import com.oracle.svm.core.Containers;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.annotate.Alias;
+import com.oracle.svm.core.annotate.AnnotateOriginal;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.KeepOriginal;
 import com.oracle.svm.core.annotate.NeverInline;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
-import com.oracle.svm.core.annotate.RecomputeFieldValue.CustomFieldValueComputer;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
-import com.oracle.svm.core.config.ConfigurationValues;
-import com.oracle.svm.core.config.ObjectLayout;
+import com.oracle.svm.core.annotate.Uninterruptible;
 import com.oracle.svm.core.hub.ClassForNameSupport;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.jdk.JavaLangSubstitutions.ClassValueSupport;
+import com.oracle.svm.core.monitor.MonitorSupport;
+import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
+import com.oracle.svm.core.thread.JavaThreads;
 import com.oracle.svm.core.util.VMError;
 
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
-
 @TargetClass(java.lang.Object.class)
+@SuppressWarnings("static-method")
 final class Target_java_lang_Object {
 
     @Substitute
@@ -100,36 +92,41 @@ final class Target_java_lang_Object {
     @Substitute
     @TargetElement(name = "hashCode")
     private int hashCodeSubst() {
-        return System.identityHashCode(this);
-    }
-
-    @Substitute
-    @TargetElement(name = "toString")
-    private String toStringSubst() {
-        return getClass().getName() + "@" + Long.toHexString(Word.objectToUntrackedPointer(this).rawValue());
+        throw VMError.shouldNotReachHere("Intrinsified in SubstrateGraphBuilderPlugins");
     }
 
     @Substitute
     @TargetElement(name = "wait")
     private void waitSubst(long timeoutMillis) throws InterruptedException {
-        ImageSingletons.lookup(MonitorSupport.class).wait(this, timeoutMillis);
+        /*
+         * JDK 19 and later: our monitor implementation does not pin virtual threads, so avoid
+         * jdk.internal.misc.Blocker which expects and asserts that a virtual thread is pinned.
+         * Also, we get interrupted on the virtual thread instead of the carrier thread, which
+         * clears the carrier thread's interrupt status too, so we don't have to intercept an
+         * InterruptedException from the carrier thread to clear the virtual thread interrupt.
+         */
+        MonitorSupport.singleton().wait(this, timeoutMillis);
     }
+
+    @Delete
+    @TargetElement(onlyWith = JDK19OrLater.class)
+    private native void wait0(long timeoutMillis);
 
     @Substitute
     @TargetElement(name = "notify")
     private void notifySubst() {
-        ImageSingletons.lookup(MonitorSupport.class).notify(this, false);
+        MonitorSupport.singleton().notify(this, false);
     }
 
     @Substitute
     @TargetElement(name = "notifyAll")
     private void notifyAllSubst() {
-        ImageSingletons.lookup(MonitorSupport.class).notify(this, true);
+        MonitorSupport.singleton().notify(this, true);
     }
 }
 
-@TargetClass(className = "java.lang.ClassLoaderHelper")
-final class Target_java_lang_ClassLoaderHelper {
+@TargetClass(classNameProvider = Package_jdk_internal_loader_helper.class, className = "ClassLoaderHelper")
+final class Target_jdk_internal_loader_ClassLoaderHelper {
     @Alias
     static native File mapAlternativeName(File lib);
 }
@@ -158,6 +155,10 @@ final class Target_java_lang_Enum {
             throw new IllegalArgumentException("No enum constant " + enumType.getName() + "." + name);
         }
     }
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native int ordinal();
 }
 
 @TargetClass(java.lang.String.class)
@@ -168,6 +169,33 @@ final class Target_java_lang_String {
         String thisStr = SubstrateUtil.cast(this, String.class);
         return ImageSingletons.lookup(StringInternSupport.class).intern(thisStr);
     }
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    native boolean isLatin1();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native boolean isEmpty();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native int length();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    native byte coder();
+
+    @Alias //
+    byte[] value;
+}
+
+@TargetClass(className = "java.lang.StringUTF16")
+final class Target_java_lang_StringUTF16 {
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    static native char getChar(byte[] val, int index);
 }
 
 @TargetClass(java.lang.Throwable.class)
@@ -182,22 +210,10 @@ final class Target_java_lang_Throwable {
 
     @Alias String detailMessage;
 
-    /*
-     * Suppressed exception handling is disabled for now.
-     */
-    @Substitute
-    private void addSuppressed(Throwable exception) {
-        /*
-         * This method is called frequently from try-with-resource blocks. The original
-         * implementation performs allocations, which are problematic when allocations are disabled.
-         * For now, we just do nothing until someone needs suppressed exception handling.
-         */
-    }
-
     @Substitute
     @NeverInline("Starting a stack walk in the caller frame")
     private Object fillInStackTrace() {
-        stackTrace = StackTraceUtils.getStackTrace(true, KnownIntrinsics.readCallerStackPointer());
+        stackTrace = JavaThreads.getStackTrace(true, Thread.currentThread());
         return this;
     }
 
@@ -209,41 +225,11 @@ final class Target_java_lang_Throwable {
             return new StackTraceElement[0];
         }
     }
-
-    @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    int getStackTraceDepth() {
-        if (stackTrace != null) {
-            return stackTrace.length;
-        }
-        return 0;
-    }
-
-    @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    StackTraceElement getStackTraceElement(int index) {
-        if (stackTrace == null) {
-            throw new IndexOutOfBoundsException();
-        }
-        return stackTrace[index];
-    }
 }
 
 @TargetClass(java.lang.Runtime.class)
 @SuppressWarnings({"static-method"})
 final class Target_java_lang_Runtime {
-
-    @Substitute
-    public void loadLibrary(String libname) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        loadLibrary0(null, libname);
-    }
-
-    @Substitute
-    public void load(String filename) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        load0(null, filename);
-    }
 
     @Substitute
     public void runFinalization() {
@@ -252,23 +238,21 @@ final class Target_java_lang_Runtime {
     @Substitute
     @Platforms(InternalPlatform.PLATFORM_JNI.class)
     private int availableProcessors() {
+        int optionValue = SubstrateOptions.ActiveProcessorCount.getValue();
+        if (optionValue > 0) {
+            return optionValue;
+        }
+
         if (SubstrateOptions.MultiThreaded.getValue()) {
-            return Jvm.JVM_ActiveProcessorCount();
+            return Containers.activeProcessorCount();
         } else {
             return 1;
         }
     }
-
-    // Checkstyle: stop
-    @Alias
-    synchronized native void loadLibrary0(Class<?> fromClass, String libname);
-
-    @Alias
-    synchronized native void load0(Class<?> fromClass, String libname);
-    // Checkstyle: resume
 }
 
 @TargetClass(java.lang.System.class)
+@SuppressWarnings("unused")
 final class Target_java_lang_System {
 
     @Alias private static PrintStream out;
@@ -292,31 +276,7 @@ final class Target_java_lang_System {
 
     @Substitute
     private static int identityHashCode(Object obj) {
-        if (obj == null) {
-            return 0;
-        }
-
-        // Try to fold the identity hashcode offset to a constant.
-        int hashCodeOffset;
-        ObjectLayout layout = ConfigurationValues.getObjectLayout();
-        if (layout.getInstanceIdentityHashCodeOffset() >= 0 && layout.getInstanceIdentityHashCodeOffset() == layout.getArrayIdentityHashcodeOffset()) {
-            hashCodeOffset = layout.getInstanceIdentityHashCodeOffset();
-        } else {
-            DynamicHub hub = KnownIntrinsics.readHub(obj);
-            hashCodeOffset = hub.getHashCodeOffset();
-        }
-
-        if (probability(LUDICROUSLY_SLOW_PATH_PROBABILITY, hashCodeOffset == 0)) {
-            throw VMError.shouldNotReachHere("identityHashCode called on illegal object");
-        }
-
-        UnsignedWord hashCodeOffsetWord = WordFactory.unsigned(hashCodeOffset);
-        int hashCode = ObjectAccess.readInt(obj, hashCodeOffsetWord, IdentityHashCodeSupport.IDENTITY_HASHCODE_LOCATION);
-        if (probability(FAST_PATH_PROBABILITY, hashCode != 0)) {
-            return hashCode;
-        }
-
-        return IdentityHashCodeSupport.generateIdentityHashCode(obj, hashCodeOffset);
+        throw VMError.shouldNotReachHere("Intrinsified in SubstrateGraphBuilderPlugins");
     }
 
     /* Ensure that we do not leak the full set of properties from the image generator. */
@@ -360,18 +320,6 @@ final class Target_java_lang_System {
     @Alias
     private static native void checkKey(String key);
 
-    @Substitute
-    public static void loadLibrary(String libname) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        Runtime.getRuntime().loadLibrary(libname);
-    }
-
-    @Substitute
-    public static void load(String filename) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        Runtime.getRuntime().load(filename);
-    }
-
     /*
      * Note that there is no substitution for getSecurityManager, but instead getSecurityManager it
      * is intrinsified in SubstrateGraphBuilderPlugins to always return null. This allows better
@@ -391,91 +339,220 @@ final class Target_java_lang_System {
 
 }
 
+final class NotAArch64 implements BooleanSupplier {
+    @Override
+    public boolean getAsBoolean() {
+        return !Platform.includedIn(Platform.AARCH64.class);
+    }
+}
+
+/**
+ * When the intrinsics below are used outside of {@link java.lang.Math}, they are lowered to a
+ * foreign call. This foreign call must be uninterruptible as it results from lowering a floating
+ * node. Otherwise, we would introduce a safepoint in places where no safepoint is allowed.
+ */
+@TargetClass(value = java.lang.Math.class, onlyWith = NotAArch64.class)
+final class Target_java_lang_Math {
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double sin(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.SIN);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double cos(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.COS);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double tan(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.TAN);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double log(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.LOG);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double log10(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.LOG10);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double exp(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.EXP);
+    }
+
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double pow(double a, double b) {
+        return BinaryMathIntrinsicNode.compute(a, b, BinaryOperation.POW);
+    }
+}
+
 @TargetClass(java.lang.StrictMath.class)
-@CLibrary(value = "strictmath", requireStatic = true)
 final class Target_java_lang_StrictMath {
+
+    @Substitute
+    private static double sin(double a) {
+        return StrictMathInvoker.sin(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double cos(double a) {
+        return StrictMathInvoker.cos(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double tan(double a) {
+        return StrictMathInvoker.tan(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double asin(double a) {
+        return StrictMathInvoker.asin(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double acos(double a) {
+        return StrictMathInvoker.acos(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double atan(double a) {
+        return StrictMathInvoker.atan(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double log(double a) {
+        return StrictMathInvoker.log(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double log10(double a) {
+        return StrictMathInvoker.log10(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
+    @Substitute
+    private static double sqrt(double a) {
+        return StrictMathInvoker.sqrt(WordFactory.nullPointer(), WordFactory.nullPointer(), a);
+    }
+
     // Checkstyle: stop
-
     @Substitute
-    @CFunction(value = "StrictMath_sin", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sin(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_cos", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cos(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_tan", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double tan(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_asin", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double asin(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_acos", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double acos(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_atan", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double atan(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_exp", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double exp(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log10", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log10(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_sqrt", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sqrt(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_cbrt", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cbrt(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_IEEEremainder", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double IEEEremainder(double f1, double f2);
-
-    @Substitute
-    @CFunction(value = "StrictMath_atan2", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double atan2(double y, double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_pow", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double pow(double a, double b);
-
-    @Substitute
-    @CFunction(value = "StrictMath_sinh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sinh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_cosh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cosh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_tanh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double tanh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_hypot", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double hypot(double x, double y);
-
-    @Substitute
-    @CFunction(value = "StrictMath_expm1", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double expm1(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log1p", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log1p(double x);
+    private static double IEEEremainder(double f1, double f2) {
+        return StrictMathInvoker.IEEEremainder(WordFactory.nullPointer(), WordFactory.nullPointer(), f1, f2);
+    }
     // Checkstyle: resume
+
+    @Substitute
+    private static double atan2(double y, double x) {
+        return StrictMathInvoker.atan2(WordFactory.nullPointer(), WordFactory.nullPointer(), y, x);
+    }
+
+    @Substitute
+    private static double sinh(double x) {
+        return StrictMathInvoker.sinh(WordFactory.nullPointer(), WordFactory.nullPointer(), x);
+    }
+
+    @Substitute
+    private static double cosh(double x) {
+        return StrictMathInvoker.cosh(WordFactory.nullPointer(), WordFactory.nullPointer(), x);
+    }
+
+    @Substitute
+    private static double tanh(double x) {
+        return StrictMathInvoker.tanh(WordFactory.nullPointer(), WordFactory.nullPointer(), x);
+    }
+
+    @Substitute
+    private static double expm1(double x) {
+        return StrictMathInvoker.expm1(WordFactory.nullPointer(), WordFactory.nullPointer(), x);
+    }
+
+    @Substitute
+    private static double log1p(double x) {
+        return StrictMathInvoker.log1p(WordFactory.nullPointer(), WordFactory.nullPointer(), x);
+    }
+}
+
+@CLibrary(value = "java", requireStatic = true, dependsOn = "fdlibm")
+final class StrictMathInvoker {
+
+    @CFunction(value = "Java_java_lang_StrictMath_sin", transition = CFunction.Transition.NO_TRANSITION)
+    static native double sin(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_cos", transition = CFunction.Transition.NO_TRANSITION)
+    static native double cos(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_tan", transition = CFunction.Transition.NO_TRANSITION)
+    static native double tan(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_asin", transition = CFunction.Transition.NO_TRANSITION)
+    static native double asin(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_acos", transition = CFunction.Transition.NO_TRANSITION)
+    static native double acos(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_atan", transition = CFunction.Transition.NO_TRANSITION)
+    static native double atan(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_exp", transition = CFunction.Transition.NO_TRANSITION)
+    static native double exp(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_log", transition = CFunction.Transition.NO_TRANSITION)
+    static native double log(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_log10", transition = CFunction.Transition.NO_TRANSITION)
+    static native double log10(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_sqrt", transition = CFunction.Transition.NO_TRANSITION)
+    static native double sqrt(WordBase jnienv, WordBase clazz, double a);
+
+    @CFunction(value = "Java_java_lang_StrictMath_cbrt", transition = CFunction.Transition.NO_TRANSITION)
+    static native double cbrt(WordBase jnienv, WordBase clazz, double a);
+
+    // Checkstyle: stop
+    @CFunction(value = "Java_java_lang_StrictMath_IEEEremainder", transition = CFunction.Transition.NO_TRANSITION)
+    static native double IEEEremainder(WordBase jnienv, WordBase clazz, double f1, double f2);
+    // Checkstyle: resume
+
+    @CFunction(value = "Java_java_lang_StrictMath_atan2", transition = CFunction.Transition.NO_TRANSITION)
+    static native double atan2(WordBase jnienv, WordBase clazz, double y, double x);
+
+    @CFunction(value = "Java_java_lang_StrictMath_pow", transition = CFunction.Transition.NO_TRANSITION)
+    static native double pow(WordBase jnienv, WordBase clazz, double a, double b);
+
+    @CFunction(value = "Java_java_lang_StrictMath_sinh", transition = CFunction.Transition.NO_TRANSITION)
+    static native double sinh(WordBase jnienv, WordBase clazz, double x);
+
+    @CFunction(value = "Java_java_lang_StrictMath_cosh", transition = CFunction.Transition.NO_TRANSITION)
+    static native double cosh(WordBase jnienv, WordBase clazz, double x);
+
+    @CFunction(value = "Java_java_lang_StrictMath_tanh", transition = CFunction.Transition.NO_TRANSITION)
+    static native double tanh(WordBase jnienv, WordBase clazz, double x);
+
+    @CFunction(value = "Java_java_lang_StrictMath_hypot", transition = CFunction.Transition.NO_TRANSITION)
+    static native double hypot(WordBase jnienv, WordBase clazz, double x, double y);
+
+    @CFunction(value = "Java_java_lang_StrictMath_expm1", transition = CFunction.Transition.NO_TRANSITION)
+    static native double expm1(WordBase jnienv, WordBase clazz, double x);
+
+    @CFunction(value = "Java_java_lang_StrictMath_log1p", transition = CFunction.Transition.NO_TRANSITION)
+    static native double log1p(WordBase jnienv, WordBase clazz, double x);
 }
 
 /**
@@ -511,8 +588,16 @@ final class Target_java_lang_ClassValue {
         Object result = values.get(type);
         if (result == null) {
             Object newValue = computeValue(type);
+            if (newValue == null) {
+                /* values can't store null, replace with NULL_MARKER */
+                newValue = ClassValueSupport.NULL_MARKER;
+            }
             Object oldValue = values.putIfAbsent(type, newValue);
             result = oldValue != null ? oldValue : newValue;
+        }
+        if (result == ClassValueSupport.NULL_MARKER) {
+            /* replace NULL_MARKER back to real null */
+            result = null;
         }
         return result;
     }
@@ -552,192 +637,27 @@ final class Target_java_lang_Compiler {
     }
 }
 
-final class IsSingleThreaded implements Predicate<Class<?>> {
-    @Override
-    public boolean test(Class<?> t) {
-        return !SubstrateOptions.MultiThreaded.getValue();
-    }
-}
-
-final class IsMultiThreaded implements Predicate<Class<?>> {
-    @Override
-    public boolean test(Class<?> t) {
-        return SubstrateOptions.MultiThreaded.getValue();
-    }
-}
-
-@TargetClass(className = "java.lang.ApplicationShutdownHooks")
-final class Target_java_lang_ApplicationShutdownHooks {
-
-    /**
-     * Re-initialize the map of registered hooks, because any hooks registered during native image
-     * construction can not survive into the running image. But `hooks` must be initialized to an
-     * IdentityHashMap, because 'null' means I am in the middle of shutting down.
-     */
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClass = IdentityHashMap.class)//
-    private static IdentityHashMap<Thread, Thread> hooks;
-
-    /**
-     * Instead of starting all the threads in {@link #hooks}, just run the {@link Runnable}s one
-     * after another.
-     *
-     * We need this substitution in single-threaded mode, where we cannot start new threads but
-     * still want to support shutdown hooks. In multi-threaded mode, this substitution is not
-     * present, i.e., the original JDK code runs the shutdown hooks in separate threads.
-     */
-    @Substitute
-    @TargetElement(name = "runHooks", onlyWith = IsSingleThreaded.class)
-    static void runHooksSingleThreaded() {
-        /* Claim all the hooks. */
-        final Collection<Thread> threads;
-        /* Checkstyle: allow synchronization. */
-        synchronized (Target_java_lang_ApplicationShutdownHooks.class) {
-            threads = hooks.keySet();
-            hooks = null;
-        }
-        /* Checkstyle: disallow synchronization. */
-
-        /* Run all the hooks, catching anything that is thrown. */
-        final List<Throwable> hookExceptions = new ArrayList<>();
-        for (Thread hook : threads) {
-            try {
-                Util_java_lang_ApplicationShutdownHooks.callRunnableOfThread(hook);
-            } catch (Throwable ex) {
-                hookExceptions.add(ex);
-            }
-        }
-        /* Report any hook exceptions, but do not re-throw them. */
-        if (hookExceptions.size() > 0) {
-            for (Throwable ex : hookExceptions) {
-                ex.printStackTrace(Log.logStream());
-            }
-        }
-    }
-
-    @Alias
-    @TargetElement(name = "runHooks", onlyWith = IsMultiThreaded.class)
-    static native void runHooksMultiThreaded();
-
-    /**
-     * Interpose so that the first time someone adds an ApplicationShutdownHook, I set up a shutdown
-     * hook to run all the ApplicationShutdownHooks. Then the rest of this method is copied from
-     * {@code ApplicationShutdownHook.add(Thread)}.
-     */
-    @Substitute
-    /* Checkstyle: allow synchronization */
-    static synchronized void add(Thread hook) {
-        Util_java_lang_ApplicationShutdownHooks.initializeOnce();
-        if (hooks == null) {
-            throw new IllegalStateException("Shutdown in progress");
-        }
-        if (hook.isAlive()) {
-            throw new IllegalArgumentException("Hook already running");
-        }
-        if (hooks.containsKey(hook)) {
-            throw new IllegalArgumentException("Hook previously registered");
-        }
-        hooks.put(hook, hook);
-    }
-    /* Checkstyle: disallow synchronization */
-}
-
-class Util_java_lang_ApplicationShutdownHooks {
-
-    /** An initialization flag. */
-    private static volatile boolean initialized = false;
-
-    /** A lock to protect the initialization flag. */
-    private static ReentrantLock lock = new ReentrantLock();
-
-    public static void initializeOnce() {
-        if (!initialized) {
-            lock.lock();
-            try {
-                if (!initialized) {
-                    try {
-                        /*
-                         * Register a shutdown hook.
-                         *
-                         * Compare this code to the static initializations done in {@link
-                         * ApplicationShutdownHooks}.
-                         */
-                        Target_java_lang_Shutdown.add(1 /* shutdown hook invocation order */,
-                                        false /* not registered if shutdown in progress */,
-                                        new Runnable() {
-                                            @Override
-                                            public void run() {
-                                                if (SubstrateOptions.MultiThreaded.getValue()) {
-                                                    Target_java_lang_ApplicationShutdownHooks.runHooksMultiThreaded();
-                                                } else {
-                                                    Target_java_lang_ApplicationShutdownHooks.runHooksSingleThreaded();
-                                                }
-                                            }
-                                        });
-                    } catch (InternalError ie) {
-                        /* Someone else has registered the shutdown hook at slot 2. */
-                    } catch (IllegalStateException ise) {
-                        /* Too late to register this shutdown hook. */
-                    }
-                    /* Announce that initialization is complete. */
-                    initialized = true;
-                }
-            } finally {
-                lock.unlock();
-            }
-        }
-    }
-
-    @SuppressFBWarnings(value = {"RU_INVOKE_RUN"}, justification = "Do not start a new thread, just call the run method.")
-    static void callRunnableOfThread(Thread thread) {
-        thread.run();
-    }
-}
-
-@TargetClass(java.lang.Package.class)
-final class Target_java_lang_Package {
-
-    @Alias
-    @SuppressWarnings({"unused"})
-    Target_java_lang_Package(String name,
-                    String spectitle, String specversion, String specvendor,
-                    String impltitle, String implversion, String implvendor,
-                    URL sealbase, ClassLoader loader) {
-    }
-
-    @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    static Package getPackage(Class<?> c) {
-        if (c.isPrimitive() || c.isArray()) {
-            /* Arrays and primitives don't have a package. */
-            return null;
-        }
-
-        /* Logic copied from java.lang.Package.getPackage(java.lang.Class). */
-        String name = c.getName();
-        int i = name.lastIndexOf('.');
-        if (i != -1) {
-            name = name.substring(0, i);
-            Target_java_lang_Package pkg = new Target_java_lang_Package(name, null, null, null,
-                            null, null, null, null, null);
-            return SubstrateUtil.cast(pkg, Package.class);
-        } else {
-            return null;
-        }
-    }
-}
-
 @TargetClass(java.lang.NullPointerException.class)
 final class Target_java_lang_NullPointerException {
 
     @Substitute
-    @TargetElement(onlyWith = JDK14OrLater.class)
+    @TargetElement(onlyWith = JDK17OrLater.class)
     @SuppressWarnings("static-method")
     private String getExtendedNPEMessage() {
         return null;
     }
 }
 
-@TargetClass(className = "jdk.internal.loader.BootLoader", onlyWith = JDK11OrLater.class)
+@TargetClass(value = jdk.internal.loader.ClassLoaders.class)
+final class Target_jdk_internal_loader_ClassLoaders {
+    @Alias
+    static native Target_jdk_internal_loader_BuiltinClassLoader bootLoader();
+
+    @Alias
+    public static native ClassLoader platformClassLoader();
+}
+
+@TargetClass(value = jdk.internal.loader.BootLoader.class)
 final class Target_jdk_internal_loader_BootLoader {
 
     @Substitute
@@ -752,14 +672,25 @@ final class Target_jdk_internal_loader_BootLoader {
     }
 
     @Substitute
+    public static Stream<Package> packages() {
+        Target_jdk_internal_loader_BuiltinClassLoader bootClassLoader = Target_jdk_internal_loader_ClassLoaders.bootLoader();
+        Target_java_lang_ClassLoader systemClassLoader = SubstrateUtil.cast(bootClassLoader, Target_java_lang_ClassLoader.class);
+        return systemClassLoader.packages();
+    }
+
+    @Delete("only used by #packages()")
+    private static native String[] getSystemPackageNames();
+
+    @Substitute
     private static Class<?> loadClassOrNull(String name) {
-        return ClassForNameSupport.forNameOrNull(name, false);
+        return ClassForNameSupport.forNameOrNull(name, null);
     }
 
     @SuppressWarnings("unused")
     @Substitute
-    private static Class<?> loadClass(Target_java_lang_Module module, String name) {
-        return ClassForNameSupport.forNameOrNull(name, false);
+    private static Class<?> loadClass(Module module, String name) {
+        /* The module system is not supported for now, therefore the module parameter is ignored. */
+        return ClassForNameSupport.forNameOrNull(name, null);
     }
 
     @Substitute
@@ -767,34 +698,48 @@ final class Target_jdk_internal_loader_BootLoader {
         return true;
     }
 
-    @SuppressWarnings("unused")
-    @Substitute
-    private static URL findResource(String mn, String name) {
-        return ClassLoader.getSystemClassLoader().getResource(name);
-    }
-
-    @SuppressWarnings("unused")
-    @Substitute
-    private static InputStream findResourceAsStream(String mn, String name) {
-        return ClassLoader.getSystemClassLoader().getResourceAsStream(name);
-    }
-
-    @Substitute
-    private static URL findResource(String name) {
-        return ClassLoader.getSystemClassLoader().getResource(name);
-    }
-
-    @Substitute
-    private static Enumeration<URL> findResources(String name) throws IOException {
-        return ClassLoader.getSystemClassLoader().getResources(name);
-    }
+    /**
+     * All ClassLoaderValue are reset at run time for now. See also
+     * {@link Target_java_lang_ClassLoader#classLoaderValueMap} for resetting of individual class
+     * loaders.
+     */
+    // Checkstyle: stop
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClass = ConcurrentHashMap.class)//
+    static ConcurrentHashMap<?, ?> CLASS_LOADER_VALUE_MAP;
+    // Checkstyle: resume
 }
 
 /** Dummy class to have a class with the file's name. */
 public final class JavaLangSubstitutions {
 
-    @Platforms(Platform.HOSTED_ONLY.class)//
+    public static final class StringUtil {
+        /**
+         * Returns a character from a string at {@code index} position based on the encoding format.
+         */
+        @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+        public static char charAt(String string, int index) {
+            Target_java_lang_String str = SubstrateUtil.cast(string, Target_java_lang_String.class);
+            byte[] value = str.value;
+            if (str.isLatin1()) {
+                return (char) (value[index] & 0xFF);
+            } else {
+                return Target_java_lang_StringUTF16.getChar(value, index);
+            }
+        }
+
+        public static byte coder(String string) {
+            return SubstrateUtil.cast(string, Target_java_lang_String.class).coder();
+        }
+    }
+
     public static final class ClassValueSupport {
+
+        /**
+         * Marker value that replaces null values in the
+         * {@link java.util.concurrent.ConcurrentHashMap}.
+         */
+        public static final Object NULL_MARKER = new Object();
+
         final Map<ClassValue<?>, Map<Class<?>, Object>> values;
 
         public ClassValueSupport(Map<ClassValue<?>, Map<Class<?>, Object>> map) {
@@ -802,9 +747,9 @@ public final class JavaLangSubstitutions {
         }
     }
 
-    static class ClassValueInitializer implements CustomFieldValueComputer {
+    static class ClassValueInitializer implements FieldValueTransformer {
         @Override
-        public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
+        public Object transform(Object receiver, Object originalValue) {
             ClassValueSupport support = ImageSingletons.lookup(ClassValueSupport.class);
             ClassValue<?> v = (ClassValue<?>) receiver;
             Map<Class<?>, Object> map = support.values.get(v);

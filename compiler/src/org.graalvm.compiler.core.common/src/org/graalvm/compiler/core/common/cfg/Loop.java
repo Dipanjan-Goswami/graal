@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -92,6 +92,31 @@ public abstract class Loop<T extends AbstractBlockBase<T>> {
 
     public List<T> getBlocks() {
         return blocks;
+    }
+
+    private boolean inverted = false;
+
+    public boolean isInverted() {
+        return inverted;
+    }
+
+    public void setInverted(boolean inverted) {
+        this.inverted = inverted;
+    }
+
+    /**
+     * Determine if {@code potentialAncestor} equals {@code this} or an ancestor along the
+     * {@link #getParent()} link.
+     */
+    public boolean isAncestorOrSelf(Loop<?> potentialAncestor) {
+        Loop<?> p = this;
+        while (p != null) {
+            if (p == potentialAncestor) {
+                return true;
+            }
+            p = p.getParent();
+        }
+        return false;
     }
 
     /**

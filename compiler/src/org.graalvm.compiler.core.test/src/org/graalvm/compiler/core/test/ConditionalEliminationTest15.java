@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,11 +30,10 @@ import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.StructuredGraph.AllowAssumptions;
 import org.graalvm.compiler.nodes.calc.IntegerLessThanNode;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
+import org.graalvm.compiler.phases.common.HighTierLoweringPhase;
 import org.graalvm.compiler.phases.common.IterativeConditionalEliminationPhase;
-import org.graalvm.compiler.phases.common.LoweringPhase;
-import org.graalvm.compiler.virtual.phases.ea.EarlyReadEliminationPhase;
+import org.graalvm.compiler.virtual.phases.ea.ReadEliminationPhase;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -50,11 +49,11 @@ public class ConditionalEliminationTest15 extends ConditionalEliminationTestBase
         CanonicalizerPhase canonicalizer = this.createCanonicalizerPhase();
         CoreProviders context = getProviders();
 
-        new LoweringPhase(this.createCanonicalizerPhase(), LoweringTool.StandardLoweringStage.HIGH_TIER).apply(graph, context);
+        new HighTierLoweringPhase(this.createCanonicalizerPhase()).apply(graph, context);
         canonicalizer.apply(graph, context);
 
         // Merge arr.length reads.
-        new EarlyReadEliminationPhase(canonicalizer).apply(graph, context);
+        new ReadEliminationPhase(canonicalizer).apply(graph, context);
         new IterativeConditionalEliminationPhase(canonicalizer, true).apply(graph, context);
 
         getDebugContext().dump(DebugContext.BASIC_LEVEL, graph, "After ConditionalEliminationPhase");

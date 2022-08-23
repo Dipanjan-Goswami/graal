@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,8 +28,9 @@ import static jdk.vm.ci.code.ValueUtil.asRegister;
 import static jdk.vm.ci.code.ValueUtil.isLegal;
 import static jdk.vm.ci.code.ValueUtil.isRegister;
 import static org.graalvm.compiler.core.common.GraalOptions.MatchExpressions;
-import static org.graalvm.compiler.core.common.SpeculativeExecutionAttacksMitigations.AllTargets;
-import static org.graalvm.compiler.core.common.SpeculativeExecutionAttacksMitigations.Options.MitigateSpeculativeExecutionAttacks;
+import static org.graalvm.compiler.core.common.SpectrePHTMitigations.AllTargets;
+import static org.graalvm.compiler.core.common.SpectrePHTMitigations.Options.SpectrePHTBarriers;
+import static org.graalvm.compiler.core.match.ComplexMatchValue.INTERIOR_MATCH;
 import static org.graalvm.compiler.debug.DebugOptions.LogVerbose;
 import static org.graalvm.compiler.lir.LIR.verifyBlock;
 
@@ -43,6 +44,7 @@ import org.graalvm.compiler.core.common.LIRKind;
 import org.graalvm.compiler.core.common.calc.Condition;
 import org.graalvm.compiler.core.common.cfg.AbstractBlockBase;
 import org.graalvm.compiler.core.common.cfg.BlockMap;
+import org.graalvm.compiler.core.common.spi.ForeignCallLinkage;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.core.match.ComplexMatchValue;
 import org.graalvm.compiler.core.match.MatchPattern;
@@ -80,6 +82,7 @@ import org.graalvm.compiler.nodes.FixedNode;
 import org.graalvm.compiler.nodes.FrameState;
 import org.graalvm.compiler.nodes.FullInfopointNode;
 import org.graalvm.compiler.nodes.IfNode;
+import org.graalvm.compiler.nodes.ImplicitNullCheckNode;
 import org.graalvm.compiler.nodes.IndirectCallTargetNode;
 import org.graalvm.compiler.nodes.Invoke;
 import org.graalvm.compiler.nodes.InvokeWithExceptionNode;
@@ -93,12 +96,15 @@ import org.graalvm.compiler.nodes.PhiNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.ValuePhiNode;
+import org.graalvm.compiler.nodes.WithExceptionNode;
 import org.graalvm.compiler.nodes.calc.CompareNode;
 import org.graalvm.compiler.nodes.calc.ConditionalNode;
+import org.graalvm.compiler.nodes.calc.IntegerDivRemNode;
 import org.graalvm.compiler.nodes.calc.IntegerTestNode;
 import org.graalvm.compiler.nodes.calc.IsNullNode;
 import org.graalvm.compiler.nodes.cfg.Block;
 import org.graalvm.compiler.nodes.cfg.ControlFlowGraph;
+import org.graalvm.compiler.nodes.extended.ForeignCall;
 import org.graalvm.compiler.nodes.extended.IntegerSwitchNode;
 import org.graalvm.compiler.nodes.extended.SwitchNode;
 import org.graalvm.compiler.nodes.spi.LIRLowerable;
@@ -107,15 +113,18 @@ import org.graalvm.compiler.nodes.spi.NodeValueMap;
 import org.graalvm.compiler.nodes.spi.NodeWithState;
 import org.graalvm.compiler.nodes.virtual.VirtualObjectNode;
 import org.graalvm.compiler.options.OptionValues;
+import org.graalvm.compiler.serviceprovider.GraalServices;
 
 import jdk.vm.ci.code.CallingConvention;
 import jdk.vm.ci.code.StackSlot;
 import jdk.vm.ci.code.ValueUtil;
 import jdk.vm.ci.meta.AllocatableValue;
 import jdk.vm.ci.meta.Constant;
+import jdk.vm.ci.meta.DeoptimizationReason;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.PlatformKind;
+import jdk.vm.ci.meta.SpeculationLog;
 import jdk.vm.ci.meta.Value;
 
 /**
@@ -134,6 +143,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
 
     private final NodeMatchRules nodeMatchRules;
     private EconomicMap<Class<? extends Node>, List<MatchStatement>> matchRules;
+    private EconomicMap<Node, Integer> sharedMatchCounts;
 
     public NodeLIRBuilder(StructuredGraph graph, LIRGeneratorTool gen, NodeMatchRules nodeMatchRules) {
         this.gen = (LIRGenerator) gen;
@@ -143,6 +153,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         OptionValues options = graph.getOptions();
         if (MatchExpressions.getValue(options)) {
             matchRules = MatchRuleRegistry.lookup(nodeMatchRules.getClass(), options, graph.getDebug());
+            sharedMatchCounts = EconomicMap.create();
         }
         traceLIRGeneratorLevel = TTY.isSuppressed() ? 0 : Options.TraceLIRGeneratorLevel.getValue(options);
 
@@ -155,7 +166,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
     }
 
     protected DebugInfoBuilder createDebugInfoBuilder(StructuredGraph graph, NodeValueMap nodeValueMap) {
-        return new DebugInfoBuilder(nodeValueMap, graph.getDebug());
+        return new DebugInfoBuilder(nodeValueMap, gen.getProviders().getMetaAccessExtensionProvider(), graph.getDebug());
     }
 
     /**
@@ -216,11 +227,28 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
      * ValueNodes.
      */
     public void setMatchResult(Node x, Value operand) {
-        assert operand.equals(ComplexMatchValue.INTERIOR_MATCH) || operand instanceof ComplexMatchValue;
+        assert operand.equals(INTERIOR_MATCH) || operand instanceof ComplexMatchValue;
         assert operand instanceof ComplexMatchValue || MatchPattern.isSingleValueUser(x) : "interior matches must be single user";
         assert nodeOperands != null && nodeOperands.get(x) == null : "operand cannot be set twice";
         assert !(x instanceof VirtualObjectNode);
         nodeOperands.set(x, operand);
+    }
+
+    /**
+     * Track how many users have consumed a sharedable match and disable emission of the value if
+     * all users have consumed it.
+     */
+    public void incrementSharedMatchCount(Node node) {
+        assert nodeOperands != null && nodeOperands.get(node) == null : "operand cannot be set twice";
+        Integer matchValue = sharedMatchCounts.get(node);
+        if (matchValue == null) {
+            matchValue = 0;
+        }
+        matchValue = matchValue + 1;
+        sharedMatchCounts.put(node, matchValue);
+        if (node.getUsageCount() == matchValue) {
+            nodeOperands.set(node, INTERIOR_MATCH);
+        }
     }
 
     public LabelRef getLIRBlock(FixedNode b) {
@@ -316,7 +344,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
 
     public void doBlockPrologue(@SuppressWarnings("unused") Block block, @SuppressWarnings("unused") OptionValues options) {
 
-        if (MitigateSpeculativeExecutionAttacks.getValue(options) == AllTargets) {
+        if (SpectrePHTBarriers.getValue(options) == AllTargets) {
             boolean hasControlSplitPredecessor = false;
             for (Block b : block.getPredecessors()) {
                 if (b.getSuccessorCount() > 1) {
@@ -381,7 +409,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
                                 throw new GraalGraphError(e).addContext(valueNode);
                             }
                         }
-                    } else if (ComplexMatchValue.INTERIOR_MATCH.equals(operand)) {
+                    } else if (INTERIOR_MATCH.equals(operand)) {
                         // Doesn't need to be evaluated
                         debug.log("interior match for %s", valueNode);
                     } else if (operand instanceof ComplexMatchValue) {
@@ -417,9 +445,8 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         }
     }
 
-    @Override
     @SuppressWarnings("try")
-    public void matchBlock(Block block, StructuredGraph graph, StructuredGraph.ScheduleResult schedule) {
+    public void matchBlock(Block block, StructuredGraph.ScheduleResult schedule) {
         try (DebugCloseable matchScope = gen.getMatchScope(block)) {
             // Allow NodeLIRBuilder subclass to specialize code generation of any interesting groups
             // of instructions
@@ -490,7 +517,15 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         CallingConvention incomingArguments = gen.getResult().getCallingConvention();
 
         Value[] params = new Value[incomingArguments.getArgumentCount()];
-        for (int i = 0; i < params.length; i++) {
+        prologAssignParams(incomingArguments, params);
+
+        gen.emitIncomingValues(params);
+
+        prologSetParameterNodes(graph, params);
+    }
+
+    protected final void prologAssignParams(CallingConvention incomingArguments, Value[] params) {
+        for (int i = 0; i < incomingArguments.getArgumentCount(); i++) {
             params[i] = incomingArguments.getArgument(i);
             if (ValueUtil.isStackSlot(params[i])) {
                 StackSlot slot = ValueUtil.asStackSlot(params[i]);
@@ -499,9 +534,9 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
                 }
             }
         }
+    }
 
-        gen.emitIncomingValues(params);
-
+    protected void prologSetParameterNodes(StructuredGraph graph, Value[] params) {
         for (ParameterNode param : graph.getNodes(ParameterNode.TYPE)) {
             Value paramValue = params[param.index()];
             assert paramValue.getValueKind().equals(getLIRGeneratorTool().getLIRKind(param.stamp(NodeView.DEFAULT))) : paramValue + " " +
@@ -604,13 +639,7 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         LIRFrameState callState = stateWithExceptionEdge(x, exceptionEdge);
 
         Value result = invokeCc.getReturn();
-        if (callTarget instanceof DirectCallTargetNode) {
-            emitDirectCall((DirectCallTargetNode) callTarget, result, parameters, AllocatableValue.NONE, callState);
-        } else if (callTarget instanceof IndirectCallTargetNode) {
-            emitIndirectCall((IndirectCallTargetNode) callTarget, result, parameters, AllocatableValue.NONE, callState);
-        } else {
-            throw GraalError.shouldNotReachHere();
-        }
+        emitInvoke(callTarget, parameters, callState, result);
 
         if (isLegal(result)) {
             setResult(x.asNode(), gen.emitMove(result));
@@ -621,11 +650,42 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         }
     }
 
+    protected void emitInvoke(LoweredCallTargetNode callTarget, Value[] parameters, LIRFrameState callState, Value result) {
+        if (callTarget instanceof DirectCallTargetNode) {
+            emitDirectCall((DirectCallTargetNode) callTarget, result, parameters, AllocatableValue.NONE, callState);
+        } else if (callTarget instanceof IndirectCallTargetNode) {
+            emitIndirectCall((IndirectCallTargetNode) callTarget, result, parameters, AllocatableValue.NONE, callState);
+        } else {
+            throw GraalError.shouldNotReachHere();
+        }
+    }
+
+    @Override
+    public void emitForeignCall(ForeignCall x) {
+        ForeignCallLinkage linkage = gen.getForeignCalls().lookupForeignCall(x.getDescriptor());
+
+        LabelRef exceptionEdge = null;
+        if (x instanceof WithExceptionNode) {
+            exceptionEdge = getLIRBlock(((WithExceptionNode) x).exceptionEdge());
+        }
+        LIRFrameState callState = stateWithExceptionEdge(x, exceptionEdge);
+
+        Value[] args = x.operands(this);
+
+        Value result = gen.emitForeignCall(linkage, callState, args);
+        if (result != null) {
+            setResult(x.asNode(), result);
+        }
+
+        if (x instanceof WithExceptionNode) {
+            gen.emitJump(getLIRBlock(((WithExceptionNode) x).next()));
+        }
+    }
+
     protected abstract void emitDirectCall(DirectCallTargetNode callTarget, Value result, Value[] parameters, Value[] temps, LIRFrameState callState);
 
     protected abstract void emitIndirectCall(IndirectCallTargetNode callTarget, Value result, Value[] parameters, Value[] temps, LIRFrameState callState);
 
-    @Override
     public Value[] visitInvokeArguments(CallingConvention invokeCc, Collection<ValueNode> arguments) {
         // for each argument, load it into the correct location
         Value[] result = new Value[arguments.size()];
@@ -659,13 +719,13 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         if (keyCount == 0) {
             gen.emitJump(defaultTarget);
         } else {
-            Variable value = gen.load(operand(x.value()));
+            AllocatableValue value = gen.asAllocatable(operand(x.value()));
             if (keyCount == 1) {
                 assert defaultTarget != null;
                 double probability = x.probability(x.keySuccessor(0));
                 LIRKind kind = gen.getLIRKind(x.value().stamp(NodeView.DEFAULT));
                 Value key = gen.emitConstant(kind, x.keyAt(0));
-                gen.emitCompareBranch(kind.getPlatformKind(), gen.load(operand(x.value())), key, Condition.EQ, false, getLIRBlock(x.keySuccessor(0)), defaultTarget, probability);
+                gen.emitCompareBranch(kind.getPlatformKind(), value, key, Condition.EQ, false, getLIRBlock(x.keySuccessor(0)), defaultTarget, probability);
             } else if (x instanceof IntegerSwitchNode && x.isSorted()) {
                 IntegerSwitchNode intSwitch = (IntegerSwitchNode) x;
                 LabelRef[] keyTargets = new LabelRef[keyCount];
@@ -737,8 +797,37 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         if (gen.needOnlyOopMaps()) {
             return new LIRFrameState(null, null, null);
         }
-        assert state != null : deopt;
-        return getDebugInfoBuilder().build(deopt, state, exceptionEdge);
+        JavaConstant deoptReasonAndAction = null;
+        JavaConstant deoptSpeculation = null;
+        assert state != null : "Deopt node=" + deopt + " needs a state ";
+        if (deopt instanceof ImplicitNullCheckNode) {
+            ImplicitNullCheckNode implicitNullCheck = (ImplicitNullCheckNode) deopt;
+            deoptReasonAndAction = implicitNullCheck.getDeoptReasonAndAction();
+            deoptSpeculation = implicitNullCheck.getDeoptSpeculation();
+
+        } else if (deopt instanceof IntegerDivRemNode) {
+            IntegerDivRemNode idiv = (IntegerDivRemNode) deopt;
+            deoptReasonAndAction = idiv.getDeoptReasonAndAction();
+            deoptSpeculation = idiv.getDeoptSpeculation();
+        }
+        if (deoptSpeculation != null) {
+            assert deoptReasonAndAction != null;
+            assert isValidImplicitLIRFrameState(deoptReasonAndAction, deoptSpeculation, deopt.asNode().graph().getSpeculationLog()) : "Unsupported implicit exception";
+            return getDebugInfoBuilder().build(deopt, state, exceptionEdge, deoptReasonAndAction, deoptSpeculation);
+        }
+
+        return getDebugInfoBuilder().build(deopt, state, exceptionEdge, null, null);
+    }
+
+    private boolean isValidImplicitLIRFrameState(JavaConstant reasonAndAction, JavaConstant deoptSpeculation, SpeculationLog speculationLog) {
+        if (GraalServices.supportsArbitraryImplicitException()) {
+            return true;
+        }
+        DeoptimizationReason deoptimizationReason = getLIRGeneratorTool().getMetaAccess().decodeDeoptReason(reasonAndAction);
+        SpeculationLog.Speculation speculation = getLIRGeneratorTool().getMetaAccess().decodeSpeculation(deoptSpeculation, speculationLog);
+        return (deoptimizationReason == DeoptimizationReason.NullCheckException || deoptimizationReason == DeoptimizationReason.UnreachedCode ||
+                        deoptimizationReason == DeoptimizationReason.TypeCheckedInliningViolated || deoptimizationReason == DeoptimizationReason.ArithmeticException) &&
+                        speculation == SpeculationLog.NO_SPECULATION;
     }
 
     @Override
@@ -752,19 +841,18 @@ public abstract class NodeLIRBuilder implements NodeLIRBuilderTool, LIRGeneratio
         append(new FullInfopointOp(stateFor(i, i.getState()), i.getReason()));
     }
 
-    @Override
-    public void setSourcePosition(NodeSourcePosition position) {
+    private void setSourcePosition(NodeSourcePosition position) {
         gen.setSourcePosition(position);
     }
 
     @Override
-    public LIRGeneratorTool getLIRGeneratorTool() {
+    public LIRGenerator getLIRGeneratorTool() {
         return gen;
     }
 
     @Override
     public void emitReadExceptionObject(ValueNode node) {
-        LIRGeneratorTool lirGenTool = getLIRGeneratorTool();
+        LIRGenerator lirGenTool = getLIRGeneratorTool();
         Value returnRegister = lirGenTool.getRegisterConfig().getReturnRegister(node.getStackKind()).asValue(
                         LIRKind.fromJavaKind(lirGenTool.target().arch, node.getStackKind()));
         lirGenTool.emitIncomingValues(new Value[]{returnRegister});

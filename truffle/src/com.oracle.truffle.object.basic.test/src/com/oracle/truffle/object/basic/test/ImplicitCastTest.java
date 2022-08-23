@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,144 +40,158 @@
  */
 package com.oracle.truffle.object.basic.test;
 
-import java.util.Arrays;
+import static com.oracle.truffle.object.basic.test.DOTestAsserts.getLocationType;
+
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
 
 import com.oracle.truffle.api.object.DynamicObject;
-import com.oracle.truffle.api.object.Layout;
-import com.oracle.truffle.api.object.Layout.ImplicitCast;
+import com.oracle.truffle.api.object.DynamicObjectLibrary;
 import com.oracle.truffle.api.object.Location;
-import com.oracle.truffle.api.object.ObjectType;
 import com.oracle.truffle.api.object.Shape;
-import com.oracle.truffle.object.basic.DefaultLayoutFactory;
+import com.oracle.truffle.api.test.AbstractParametrizedLibraryTest;
 
+@SuppressWarnings("deprecation")
 @RunWith(Parameterized.class)
-public class ImplicitCastTest {
-
-    static final Layout longLayout = new DefaultLayoutFactory().createLayout(Layout.newLayout().addAllowedImplicitCast(ImplicitCast.IntToLong));
-    static final Layout doubleLayout = new DefaultLayoutFactory().createLayout(Layout.newLayout().addAllowedImplicitCast(ImplicitCast.IntToDouble));
+public class ImplicitCastTest extends AbstractParametrizedLibraryTest {
 
     @Parameters
     public static Collection<Object[]> data() {
-        return Arrays.asList(new Object[][]{
-                        {longLayout, 1, 1L << 42, long.class},
-                        {doubleLayout, 1, 3.14, double.class}
-        });
+        List<Object[]> params = new ArrayList<>();
+
+        for (TestRun run : TestRun.values()) {
+            params.add(new Object[]{run, 1, 1L << 42, long.class});
+            params.add(new Object[]{run, 1, 3.14, double.class});
+        }
+
+        return Collections.unmodifiableList(params);
     }
 
-    final Layout layout;
-    final int intVal;
-    final Object otherVal;
-    final Class<?> otherPrimClass;
+    @Parameter(1) public int intVal;
+    @Parameter(2) public Object otherVal;
+    @Parameter(3) public Class<?> otherPrimClass;
 
-    public ImplicitCastTest(Layout layout, int intVal, Object otherVal, Class<?> otherPrimClass) {
-        this.layout = layout;
-        this.intVal = intVal;
-        this.otherVal = otherVal;
-        this.otherPrimClass = otherPrimClass;
+    private DynamicObject newInstanceWithImplicitCast() {
+        Shape.Builder b = Shape.newBuilder();
+        b.allowImplicitCastIntToLong(otherPrimClass == long.class);
+        b.allowImplicitCastIntToDouble(otherPrimClass == double.class);
+        Shape rootShape = b.build();
+        return new TestDynamicObjectDefault(rootShape);
     }
 
-    @SuppressWarnings("deprecation")
-    private static Class<?> getLocationType(Location location) {
-        return ((com.oracle.truffle.api.object.TypedLocation) location).getType();
+    private static DynamicObject newInstance() {
+        Shape rootShape = Shape.newBuilder().build();
+        return new TestDynamicObjectDefault(rootShape);
     }
 
     @Test
     public void testIntOther() {
-        Shape rootShape = layout.createShape(new ObjectType());
-        DynamicObject object = rootShape.newInstance();
-        object.define("a", intVal);
+        DynamicObject object = newInstanceWithImplicitCast();
+
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object);
+
+        library.put(object, "a", intVal);
         Location location1 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(int.class, getLocationType(location1));
 
-        object.define("a", otherVal);
+        library.put(object, "a", otherVal);
         Location location2 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(otherPrimClass, getLocationType(location2));
-        Assert.assertEquals(otherVal.getClass(), object.get("a").getClass());
+        Assert.assertEquals(otherVal.getClass(), library.getOrDefault(object, "a", null).getClass());
         DOTestAsserts.assertSameLocation(location1, location2);
     }
 
     @Test
     public void testOtherInt() {
-        Shape rootShape = layout.createShape(new ObjectType());
-        DynamicObject object = rootShape.newInstance();
-        object.define("a", otherVal);
+        DynamicObject object = newInstanceWithImplicitCast();
+
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object);
+
+        library.put(object, "a", otherVal);
         Location location1 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(otherPrimClass, getLocationType(location1));
 
-        object.define("a", intVal);
+        library.put(object, "a", intVal);
         Location location2 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(otherPrimClass, getLocationType(location2));
-        Assert.assertEquals(otherVal.getClass(), object.get("a").getClass());
+        Assert.assertEquals(otherVal.getClass(), library.getOrDefault(object, "a", null).getClass());
         DOTestAsserts.assertSameLocation(location1, location2);
     }
 
     @Test
     public void testIntOtherDoesNotGoBack() {
-        Shape rootShape = layout.createShape(new ObjectType());
-        DynamicObject object = rootShape.newInstance();
-        object.define("a", intVal);
+        DynamicObject object = newInstanceWithImplicitCast();
+
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object);
+
+        library.put(object, "a", intVal);
         Location location1 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(int.class, getLocationType(location1));
 
-        object.define("a", otherVal);
+        library.put(object, "a", otherVal);
         Location location2 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(otherPrimClass, getLocationType(location2));
-        Assert.assertEquals(otherVal.getClass(), object.get("a").getClass());
+        Assert.assertEquals(otherVal.getClass(), library.getOrDefault(object, "a", null).getClass());
         DOTestAsserts.assertSameLocation(location1, location2);
 
-        object.define("a", intVal);
+        library.put(object, "a", intVal);
         Location location3 = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(otherPrimClass, getLocationType(location3));
-        Assert.assertEquals(otherVal.getClass(), object.get("a").getClass());
+        Assert.assertEquals(otherVal.getClass(), library.getOrDefault(object, "a", null).getClass());
         DOTestAsserts.assertSameLocation(location2, location3);
     }
 
     @Test
     public void testIntObject() {
-        Shape rootShape = layout.createShape(new ObjectType());
-        DynamicObject object = rootShape.newInstance();
-        object.define("a", intVal);
-        object.define("a", "");
+        DynamicObject object = newInstanceWithImplicitCast();
+
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object);
+
+        library.put(object, "a", intVal);
+        library.put(object, "a", "");
         Location location = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(Object.class, getLocationType(location));
-        Assert.assertEquals(String.class, object.get("a").getClass());
+        Assert.assertEquals(String.class, library.getOrDefault(object, "a", null).getClass());
     }
 
     @Test
     public void testIntOtherObject() {
-        Shape rootShape = layout.createShape(new ObjectType());
-        DynamicObject object = rootShape.newInstance();
-        object.define("a", intVal);
-        object.define("a", otherVal);
-        object.define("a", "");
+        DynamicObject object = newInstanceWithImplicitCast();
+
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object);
+
+        library.put(object, "a", intVal);
+        library.put(object, "a", otherVal);
+        library.put(object, "a", "");
         Location location = object.getShape().getProperty("a").getLocation();
         Assert.assertEquals(Object.class, getLocationType(location));
-        Assert.assertEquals(String.class, object.get("a").getClass());
+        Assert.assertEquals(String.class, library.getOrDefault(object, "a", null).getClass());
     }
 
     @Test
     public void testLocationDecoratorEquals() {
-        Layout defaultLayout = new DefaultLayoutFactory().createLayout(Layout.newLayout());
-        Shape defaultRootShape = defaultLayout.createShape(new ObjectType());
-        Shape implicitCastRootShape = layout.createShape(new ObjectType());
+        DynamicObject object1 = newInstanceWithImplicitCast();
 
-        DynamicObject object1 = implicitCastRootShape.newInstance();
-        object1.define("a", otherVal);
+        DynamicObjectLibrary library = createLibrary(DynamicObjectLibrary.class, object1);
+
+        library.put(object1, "a", otherVal);
         Location location1 = object1.getShape().getProperty("a").getLocation();
 
         // Location of "a" should not change if an Integer is set
-        object1.set("a", intVal);
+        library.putIfPresent(object1, "a", intVal);
         Assert.assertEquals(location1, object1.getShape().getProperty("a").getLocation());
 
-        DynamicObject object2 = defaultRootShape.newInstance();
-        object2.define("a", otherVal);
+        DynamicObject object2 = newInstance();
+        library.put(object2, "a", otherVal);
         Location location2 = object2.getShape().getProperty("a").getLocation();
 
         // This test relies on the assumption that both locations are of the same class

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,12 @@
  */
 package org.graalvm.compiler.test;
 
-import static org.graalvm.compiler.debug.DebugContext.DEFAULT_LOG_STREAM;
 import static org.graalvm.compiler.debug.DebugContext.NO_DESCRIPTION;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -46,6 +46,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import org.graalvm.compiler.debug.DebugContext;
+import org.graalvm.compiler.debug.DebugContext.Builder;
 import org.graalvm.compiler.debug.DebugDumpHandler;
 import org.graalvm.compiler.debug.DebugHandlersFactory;
 import org.graalvm.compiler.debug.GlobalMetrics;
@@ -68,6 +69,21 @@ import sun.misc.Unsafe;
  * Base class that contains common utility methods and classes useful in unit tests.
  */
 public class GraalTest {
+
+    @SuppressWarnings("deprecation" /* JDK-8277863 */)
+    public static long getObjectFieldOffset(Field field) {
+        return UNSAFE.objectFieldOffset(field);
+    }
+
+    @SuppressWarnings("deprecation" /* JDK-8277863 */)
+    public static Object getStaticFieldBase(Field field) {
+        return UNSAFE.staticFieldBase(field);
+    }
+
+    @SuppressWarnings("deprecation" /* JDK-8277863 */)
+    public static long getStaticFieldOffset(Field field) {
+        return UNSAFE.staticFieldOffset(field);
+    }
 
     public static final Unsafe UNSAFE = GraalUnsafeAccess.getUnsafe();
 
@@ -100,10 +116,50 @@ public class GraalTest {
     }
 
     protected Method getMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
-        try {
-            return clazz.getMethod(methodName, parameterTypes);
-        } catch (NoSuchMethodException | SecurityException e) {
-            throw new RuntimeException("method not found: " + methodName + "" + Arrays.toString(parameterTypes));
+        Method found = null;
+        for (Method m : clazz.getMethods()) {
+            if (m.getName().equals(methodName) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
+                Assert.assertNull(found);
+                found = m;
+            }
+        }
+        if (found == null) {
+            /* Now look for non-public methods (but this does not look in superclasses). */
+            for (Method m : clazz.getDeclaredMethods()) {
+                if (m.getName().equals(methodName) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
+                    Assert.assertNull(found);
+                    found = m;
+                }
+            }
+        }
+        if (found != null) {
+            return found;
+        } else {
+            throw new RuntimeException("method not found: " + methodName + " " + Arrays.toString(parameterTypes));
+        }
+    }
+
+    protected Method getMethod(Class<?> clazz, Class<?> returnType, String methodName, Class<?>... parameterTypes) {
+        Method found = null;
+        for (Method m : clazz.getMethods()) {
+            if (m.getName().equals(methodName) && m.getReturnType().equals(returnType) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
+                Assert.assertNull(found);
+                found = m;
+            }
+        }
+        if (found == null) {
+            /* Now look for non-public methods (but this does not look in superclasses). */
+            for (Method m : clazz.getDeclaredMethods()) {
+                if (m.getName().equals(methodName) && m.getReturnType().equals(returnType) && Arrays.equals(m.getParameterTypes(), parameterTypes)) {
+                    Assert.assertNull(found);
+                    found = m;
+                }
+            }
+        }
+        if (found != null) {
+            return found;
+        } else {
+            throw new RuntimeException("method not found: " + methodName + " returning " + returnType + " " + Arrays.toString(parameterTypes));
         }
     }
 
@@ -440,7 +496,7 @@ public class GraalTest {
         } else {
             descr = new DebugContext.Description(method, id == null ? method.getName() : id);
         }
-        DebugContext debug = DebugContext.create(options, descr, globalMetrics, DEFAULT_LOG_STREAM, getDebugHandlersFactories());
+        DebugContext debug = new Builder(options, getDebugHandlersFactories()).globalMetrics(globalMetrics).description(descr).build();
         cached.add(debug);
         return debug;
     }
@@ -451,7 +507,15 @@ public class GraalTest {
         Runtime.getRuntime().addShutdownHook(new Thread("GlobalMetricsPrinter") {
             @Override
             public void run() {
-                // globalMetrics.print(new OptionValues(OptionValues.newOptionMap()));
+                try {
+                    Path path = globalMetrics.print(new OptionValues(OptionValues.newOptionMap()), GraalTest.class.getSimpleName() + "Metrics.log");
+                    if (path != null) {
+                        System.out.println("Printed global metrics to " + path.toAbsolutePath());
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error printing global metrics:");
+                    e.printStackTrace(System.err);
+                }
             }
         });
     }

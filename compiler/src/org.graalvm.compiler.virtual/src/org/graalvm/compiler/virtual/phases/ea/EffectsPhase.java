@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,11 +26,14 @@ package org.graalvm.compiler.virtual.phases.ea;
 
 import static org.graalvm.compiler.phases.common.DeadCodeEliminationPhase.Optionality.Required;
 
+import java.util.Optional;
+
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.compiler.core.common.util.CompilationAlarm;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.graph.Graph.NodeEventScope;
 import org.graalvm.compiler.graph.Node;
+import org.graalvm.compiler.nodes.GraphState;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.StructuredGraph.ScheduleResult;
 import org.graalvm.compiler.nodes.cfg.ControlFlowGraph;
@@ -39,8 +42,10 @@ import org.graalvm.compiler.phases.BasePhase;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
 import org.graalvm.compiler.phases.common.DeadCodeEliminationPhase;
 import org.graalvm.compiler.phases.common.util.EconomicSetNodeEventListener;
+import org.graalvm.compiler.phases.common.util.LoopUtility;
 import org.graalvm.compiler.phases.graph.ReentrantBlockIterator;
 import org.graalvm.compiler.phases.schedule.SchedulePhase;
+import org.graalvm.compiler.phases.schedule.SchedulePhase.SchedulingStrategy;
 
 public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends BasePhase<CoreProvidersT> {
 
@@ -56,15 +61,26 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
     private final int maxIterations;
     protected final CanonicalizerPhase canonicalizer;
     private final boolean unscheduled;
+    private final SchedulePhase.SchedulingStrategy strategy;
 
     protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer) {
-        this(maxIterations, canonicalizer, false);
+        this(maxIterations, canonicalizer, false, SchedulingStrategy.EARLIEST);
     }
 
-    protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer, boolean unscheduled) {
+    protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer, boolean unscheduled, SchedulingStrategy strategy) {
+        this.strategy = strategy;
         this.maxIterations = maxIterations;
         this.canonicalizer = canonicalizer;
         this.unscheduled = unscheduled;
+    }
+
+    protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer, boolean unscheduled) {
+        this(maxIterations, canonicalizer, unscheduled, unscheduled ? null : SchedulingStrategy.EARLIEST);
+    }
+
+    @Override
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return this.canonicalizer.canApply(graphState);
     }
 
     @Override
@@ -74,6 +90,8 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
 
     @SuppressWarnings("try")
     public boolean runAnalysis(StructuredGraph graph, CoreProvidersT context) {
+        LoopUtility.removeObsoleteProxies(graph, context, canonicalizer);
+        assert unscheduled || strategy != null;
         boolean changed = false;
         CompilationAlarm compilationAlarm = CompilationAlarm.current();
         DebugContext debug = graph.getDebug();
@@ -85,7 +103,7 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
                     schedule = null;
                     cfg = ControlFlowGraph.compute(graph, true, true, false, false);
                 } else {
-                    new SchedulePhase(SchedulePhase.SchedulingStrategy.EARLIEST).apply(graph, false);
+                    new SchedulePhase(strategy).apply(graph, context, false);
                     schedule = graph.getLastSchedule();
                     cfg = schedule.getCFG();
                 }
@@ -105,7 +123,7 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
 
                             new DeadCodeEliminationPhase(Required).apply(graph);
                         }
-
+                        LoopUtility.removeObsoleteProxies(graph, context, canonicalizer);
                         postIteration(graph, context, listener.getNodes());
                     }
 

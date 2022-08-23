@@ -28,54 +28,73 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-import java.util.BitSet;
 
-import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.HubType;
+import com.oracle.svm.core.hub.LayoutEncoding;
 
 /**
- * Defines that the annotated class should have an Hybrid layout. The contents of a specified member
- * array an (optional) member {@link BitSet} are directly placed within the class layout. This saves
- * one indirection when accessing the array or bit-set.
- * <p>
- * The array length is located directly after the HUB pointer, like in regular array. Then (if
- * present) the bits are located. Then the instance fields are placed, and at the end of the layout
- * the array elements are located.
+ * Defines that the annotated class should have a Hybrid layout. Hybrid layouts are hybrids between
+ * instance layouts and array layouts. The contents of a specified member array and (optional)
+ * member type id slots are directly placed within the class layout. This saves one indirection when
+ * accessing the array or type id slots.
  * 
  * <pre>
- *    +--------------------------------+
- *    | pointer to DynamicHub          |
- *    +--------------------------------+
- *    | Array length                   |
- *    +--------------------------------+
- *    | bits (optional)                |
- *    |     ...                        |
- *    +--------------------------------+
- *    | instance fields                |
- *    |     ...                        |
- *    +--------------------------------+
- *    | array elements                 |
- *    :     ...                        :
+ *    +--------------------------------------------------+
+ *    | pointer to DynamicHub                            |
+ *    +--------------------------------------------------+
+ *    | identity hashcode                                |
+ *    +--------------------------------------------------+
+ *    | array length                                     |
+ *    +--------------------------------------------------+
+ *    | type id slots (i.e., optional primitive data)    |
+ *    |     ...                                          |
+ *    +--------------------------------------------------+
+ *    | instance fields (i.e., primitive or object data) |
+ *    |     ...                                          |
+ *    +--------------------------------------------------+
+ *    | array elements (i.e., primitive data)            |
+ *    |     ...                                          |
+ *    +--------------------------------------------------+
  * </pre>
- * 
- * Currently only the {@link DynamicHub} class has a hybrid layout.
+ *
+ * <p>
+ * Hybrid objects have {@link HubType#Instance} but a {@link LayoutEncoding} like an array. This is
+ * important to keep in mind because methods such as {@link Class#isInstance} will return
+ * {@code true} and {@link Class#isArray()} will return {@code false}, while
+ * {@link LayoutEncoding#isPureInstance} will return {@code false} and
+ * {@link LayoutEncoding#isArrayLike} will return {@code true} for hybrid objects.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
 public @interface Hybrid {
 
     /**
-     * Specifies a single member array as the hybrid array.
+     * The component type of the array part of the hybrid class. Must be specified if no field
+     * annotated with @{@link Hybrid.Array} is declared, otherwise that field's type determines the
+     * type of the array part.
      */
-    @Retention(RetentionPolicy.RUNTIME)
-    @Target(ElementType.FIELD)
-    public @interface Array {
-    }
+    Class<?> componentType() default void.class;
 
     /**
-     * Specifies a single member {@link BitSet} as the hybrid bit-set.
+     * If {@code true}, allow the data in the hybrid fields to be duplicated between the hybrid
+     * object and a separate object for the array. For image heap objects, a duplication can occur
+     * if inlining and constant folding result in the internal reference to a hybrid field being
+     * folded to a constant value, which must be written into the image heap separately from the
+     * hybrid object.
+     *
+     * If {@code false}, a duplication of the hybrid fields must never happen.
      */
+    boolean canHybridFieldsBeDuplicated() default false;
+
+    /** Designates at most one field that refers to the array part of the hybrid object. */
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.FIELD)
-    public @interface Bitset {
+    @interface Array {
+    }
+
+    /** Designates at most one field that refers to the type ID slots of the hybrid object. */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
+    @interface TypeIDSlots {
     }
 }

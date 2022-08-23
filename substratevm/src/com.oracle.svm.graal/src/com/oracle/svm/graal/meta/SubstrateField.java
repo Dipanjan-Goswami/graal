@@ -37,19 +37,14 @@ import com.oracle.svm.core.hub.AnnotationsEncoding;
 import com.oracle.svm.core.meta.DirectSubstrateObjectConstant;
 import com.oracle.svm.core.meta.SharedField;
 import com.oracle.svm.core.util.HostedStringDeduplication;
-import com.oracle.svm.core.util.Replaced;
-import com.oracle.truffle.api.nodes.Node.Child;
-import com.oracle.truffle.api.nodes.Node.Children;
-import com.oracle.truffle.api.nodes.NodeCloneable;
+import com.oracle.svm.core.util.VMError;
 
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.PrimitiveConstant;
 import jdk.vm.ci.meta.ResolvedJavaField;
-import jdk.vm.ci.meta.ResolvedJavaType;
 
-public class SubstrateField implements SharedField, Replaced {
+public class SubstrateField implements SharedField {
 
     protected static final SubstrateField[] EMPTY_ARRAY = new SubstrateField[0];
 
@@ -66,19 +61,12 @@ public class SubstrateField implements SharedField, Replaced {
     @UnknownObjectField(types = {DirectSubstrateObjectConstant.class, PrimitiveConstant.class}, fullyQualifiedTypes = "jdk.vm.ci.meta.NullConstant")//
     JavaConstant constantValue;
 
-    /* Truffle access this information frequently, so it is worth caching it in a field. */
-    final boolean truffleChildField;
-    final boolean truffleChildrenField;
-    final boolean truffleCloneableField;
+    public SubstrateField(ResolvedJavaField original, int modifiers, HostedStringDeduplication stringTable) {
+        VMError.guarantee(!original.isInternal(), "Internal fields are not supported for JIT compilation");
 
-    public SubstrateField(MetaAccessProvider originalMetaAccess, ResolvedJavaField original, int modifiers, HostedStringDeduplication stringTable) {
         this.modifiers = modifiers;
         this.name = stringTable.deduplicate(original.getName(), true);
         this.hashCode = original.hashCode();
-
-        truffleChildField = original.getAnnotation(Child.class) != null;
-        truffleChildrenField = original.getAnnotation(Children.class) != null;
-        truffleCloneableField = originalMetaAccess.lookupJavaType(NodeCloneable.class).isAssignableFrom((ResolvedJavaType) original.getType());
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
@@ -116,6 +104,11 @@ public class SubstrateField implements SharedField, Replaced {
     }
 
     @Override
+    public boolean isReachable() {
+        return isAccessed || isWritten;
+    }
+
+    @Override
     public boolean isWritten() {
         return isWritten;
     }
@@ -147,12 +140,12 @@ public class SubstrateField implements SharedField, Replaced {
 
     @Override
     public int getOffset() {
-        throw unimplemented();
+        return getLocation();
     }
 
     @Override
     public boolean isInternal() {
-        throw unimplemented();
+        return false;
     }
 
     @Override
@@ -162,7 +155,7 @@ public class SubstrateField implements SharedField, Replaced {
 
     @Override
     public Annotation[] getAnnotations() {
-        return AnnotationsEncoding.decodeAnnotations(annotationsEncoding);
+        return AnnotationsEncoding.decodeAnnotations(annotationsEncoding).getAnnotations();
     }
 
     @Override
@@ -172,7 +165,7 @@ public class SubstrateField implements SharedField, Replaced {
 
     @Override
     public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        return AnnotationsEncoding.decodeAnnotation(annotationsEncoding, annotationClass);
+        return AnnotationsEncoding.decodeAnnotations(annotationsEncoding).getAnnotation(annotationClass);
     }
 
     @Override

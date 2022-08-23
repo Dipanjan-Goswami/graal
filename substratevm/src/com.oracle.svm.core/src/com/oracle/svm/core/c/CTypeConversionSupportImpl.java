@@ -26,13 +26,15 @@ package com.oracle.svm.core.c;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
-import org.graalvm.nativeimage.hosted.Feature;
+import com.oracle.svm.core.jdk.Target_java_nio_DirectByteBuffer;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.PinnedObject;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
+import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.impl.CTypeConversionSupport;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
@@ -40,9 +42,7 @@ import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordFactory;
 
 import com.oracle.svm.core.SubstrateUtil;
-import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.config.ConfigurationValues;
 
 class CTypeConversionSupportImpl implements CTypeConversionSupport {
@@ -83,6 +83,16 @@ class CTypeConversionSupportImpl implements CTypeConversionSupport {
             return null;
         } else {
             return toJavaStringWithCharset(cString, length, charset);
+        }
+    }
+
+    @Override
+    public String utf8ToJavaString(CCharPointer utf8String) {
+        if (utf8String.isNull()) {
+            return null;
+        } else {
+            // UTF-8 does not break zero-terminated strings.
+            return toJavaStringWithCharset(utf8String, SubstrateUtil.strlen(utf8String), StandardCharsets.UTF_8);
         }
     }
 
@@ -136,12 +146,12 @@ class CTypeConversionSupportImpl implements CTypeConversionSupport {
         return new CCharPointerHolderImpl(javaString);
     }
 
-    @TargetClass(className = "java.nio.DirectByteBuffer")
-    @SuppressWarnings("unused")
-    static final class Target_java_nio_DirectByteBuffer {
-        @Alias
-        Target_java_nio_DirectByteBuffer(long addr, int cap) {
+    @Override
+    public CCharPointerHolder toCBytes(byte[] bytes) {
+        if (bytes == null) {
+            return NULL_HOLDER;
         }
+        return new CCharPointerHolderImpl(bytes);
     }
 
     @Override
@@ -159,6 +169,10 @@ final class CCharPointerHolderImpl implements CCharPointerHolder {
         byte[] bytes = javaString.toString().getBytes();
         /* Append the terminating 0. */
         bytes = Arrays.copyOf(bytes, bytes.length + 1);
+        cstring = PinnedObject.create(bytes);
+    }
+
+    CCharPointerHolderImpl(byte[] bytes) {
         cstring = PinnedObject.create(bytes);
     }
 

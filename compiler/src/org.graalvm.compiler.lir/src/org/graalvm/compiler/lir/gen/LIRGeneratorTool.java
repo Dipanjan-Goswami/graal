@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,26 +24,29 @@
  */
 package org.graalvm.compiler.lir.gen;
 
+import java.util.EnumSet;
+
+import org.graalvm.compiler.asm.VectorSize;
 import org.graalvm.compiler.core.common.CompressEncoding;
 import org.graalvm.compiler.core.common.LIRKind;
+import org.graalvm.compiler.core.common.Stride;
 import org.graalvm.compiler.core.common.calc.Condition;
 import org.graalvm.compiler.core.common.cfg.AbstractBlockBase;
+import org.graalvm.compiler.core.common.memory.MemoryOrderMode;
 import org.graalvm.compiler.core.common.spi.CodeGenProviders;
 import org.graalvm.compiler.core.common.spi.ForeignCallLinkage;
 import org.graalvm.compiler.core.common.spi.ForeignCallsProvider;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.debug.GraalError;
-import org.graalvm.compiler.graph.NodeSourcePosition;
 import org.graalvm.compiler.lir.LIRFrameState;
 import org.graalvm.compiler.lir.LIRInstruction;
+import org.graalvm.compiler.lir.LIRValueUtil;
 import org.graalvm.compiler.lir.LabelRef;
-import org.graalvm.compiler.lir.SwitchStrategy;
 import org.graalvm.compiler.lir.Variable;
 import org.graalvm.compiler.lir.VirtualStackSlot;
 
 import jdk.vm.ci.code.CodeCacheProvider;
 import jdk.vm.ci.code.Register;
-import jdk.vm.ci.code.RegisterAttributes;
 import jdk.vm.ci.code.RegisterConfig;
 import jdk.vm.ci.code.StackSlot;
 import jdk.vm.ci.code.TargetDescription;
@@ -58,44 +61,6 @@ import jdk.vm.ci.meta.Value;
 import jdk.vm.ci.meta.ValueKind;
 
 public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindFactory<LIRKind> {
-
-    /**
-     * Factory for creating moves.
-     */
-    interface MoveFactory {
-
-        /**
-         * Checks whether the loading of the supplied constant can be deferred until usage.
-         */
-        @SuppressWarnings("unused")
-        default boolean mayEmbedConstantLoad(Constant constant) {
-            return false;
-        }
-
-        /**
-         * Checks whether the supplied constant can be used without loading it into a register for
-         * most operations, i.e., for commonly used arithmetic, logical, and comparison operations.
-         *
-         * @param constant The constant to check.
-         * @return True if the constant can be used directly, false if the constant needs to be in a
-         *         register.
-         */
-        boolean canInlineConstant(Constant constant);
-
-        /**
-         * @param constant The constant that might be moved to a stack slot.
-         * @return {@code true} if constant to stack moves are supported for this constant.
-         */
-        boolean allowConstantToStackMove(Constant constant);
-
-        LIRInstruction createMove(AllocatableValue result, Value input);
-
-        LIRInstruction createStackMove(AllocatableValue result, AllocatableValue input);
-
-        LIRInstruction createLoad(AllocatableValue result, Constant input);
-
-        LIRInstruction createStackLoad(AllocatableValue result, Constant input);
-    }
 
     abstract class BlockScope implements AutoCloseable {
 
@@ -124,8 +89,6 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
 
     RegisterConfig getRegisterConfig();
 
-    boolean hasBlockEnd(AbstractBlockBase<?> block);
-
     MoveFactory getMoveFactory();
 
     /**
@@ -135,8 +98,6 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
      * values that require interaction with register allocation are strictly forbidden.
      */
     MoveFactory getSpillMoveFactory();
-
-    BlockScope getBlockScope(AbstractBlockBase<?> block);
 
     boolean canInlineConstant(Constant constant);
 
@@ -158,9 +119,9 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
 
     void emitNullCheck(Value address, LIRFrameState state);
 
-    Variable emitLogicCompareAndSwap(LIRKind accessKind, Value address, Value expectedValue, Value newValue, Value trueValue, Value falseValue);
+    Variable emitLogicCompareAndSwap(LIRKind accessKind, Value address, Value expectedValue, Value newValue, Value trueValue, Value falseValue, MemoryOrderMode memoryOrder);
 
-    Value emitValueCompareAndSwap(LIRKind accessKind, Value address, Value expectedValue, Value newValue);
+    Value emitValueCompareAndSwap(LIRKind accessKind, Value address, Value expectedValue, Value newValue, MemoryOrderMode memoryOrder);
 
     /**
      * Emit an atomic read-and-add instruction.
@@ -187,8 +148,6 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
     void emitDeoptimize(Value actionAndReason, Value failedSpeculation, LIRFrameState state);
 
     Variable emitForeignCall(ForeignCallLinkage linkage, LIRFrameState state, Value... args);
-
-    RegisterAttributes attributes(Register register);
 
     /**
      * Create a new {@link Variable}.
@@ -217,80 +176,108 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
     void emitUnwind(Value operand);
 
     /**
-     * Called just before register allocation is performed on the LIR owned by this generator.
-     * Overriding implementations of this method must call the overridden method.
-     */
-    void beforeRegisterAllocation();
-
-    void emitIncomingValues(Value[] params);
-
-    /**
      * Emits a return instruction. Implementations need to insert a move if the input is not in the
      * correct location.
      */
     void emitReturn(JavaKind javaKind, Value input);
 
+    /**
+     * Returns an {@link AllocatableValue} holding the {@code value} by moving it if necessary. If
+     * {@code value} is already an {@link AllocatableValue}, returns it unchanged.
+     */
     AllocatableValue asAllocatable(Value value);
 
-    Variable load(Value value);
-
-    Value loadNonConst(Value value);
-
     /**
-     * Determines if only oop maps are required for the code generated from the LIR.
+     * Returns an {@link AllocatableValue} of the address {@code value} with an integer
+     * representation.
      */
-    boolean needOnlyOopMaps();
-
-    /**
-     * Gets the ABI specific operand used to return a value of a given kind from a method.
-     *
-     * @param javaKind the {@link JavaKind} of value being returned
-     * @param valueKind the backend type of the value being returned
-     * @return the operand representing the ABI defined location used return a value of kind
-     *         {@code kind}
-     */
-    AllocatableValue resultOperandFor(JavaKind javaKind, ValueKind<?> valueKind);
+    default AllocatableValue addressAsAllocatableInteger(Value value) {
+        return asAllocatable(value);
+    }
 
     <I extends LIRInstruction> I append(I op);
 
-    void setSourcePosition(NodeSourcePosition position);
-
     void emitJump(LabelRef label);
-
-    void emitCompareBranch(PlatformKind cmpKind, Value left, Value right, Condition cond, boolean unorderedIsTrue, LabelRef trueDestination, LabelRef falseDestination,
-                    double trueDestinationProbability);
-
-    void emitOverflowCheckBranch(LabelRef overflow, LabelRef noOverflow, LIRKind cmpKind, double overflowProbability);
-
-    void emitIntegerTestBranch(Value left, Value right, LabelRef trueDestination, LabelRef falseDestination, double trueSuccessorProbability);
 
     Variable emitConditionalMove(PlatformKind cmpKind, Value leftVal, Value right, Condition cond, boolean unorderedIsTrue, Value trueValue, Value falseValue);
 
     Variable emitIntegerTestMove(Value leftVal, Value right, Value trueValue, Value falseValue);
 
-    void emitStrategySwitch(JavaConstant[] keyConstants, double[] keyProbabilities, LabelRef[] keyTargets, LabelRef defaultTarget, Variable value);
-
-    void emitStrategySwitch(SwitchStrategy strategy, Variable key, LabelRef[] keyTargets, LabelRef defaultTarget);
-
     Variable emitByteSwap(Value operand);
 
     @SuppressWarnings("unused")
-    default Variable emitArrayCompareTo(JavaKind kind1, JavaKind kind2, Value array1, Value array2, Value length1, Value length2) {
+    default Variable emitArrayCompareTo(Stride strideA, Stride strideB, EnumSet<?> runtimeCheckedCPUFeatures, Value arrayA, Value lengthA, Value arrayB, Value lengthB) {
         throw GraalError.unimplemented("String.compareTo substitution is not implemented on this architecture");
     }
 
     @SuppressWarnings("unused")
-    default Variable emitArrayEquals(JavaKind kind, Value array1, Value array2, Value length, boolean directPointers) {
+    default Variable emitArrayRegionCompareTo(EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length, Value dynamicStrides) {
+        throw GraalError.unimplemented("String.compareTo substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitArrayRegionCompareTo(Stride strideA, Stride strideB, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length) {
+        throw GraalError.unimplemented("String.compareTo substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitVectorizedMismatch(EnumSet<?> runtimeCheckedCPUFeatures, Value arrayA, Value arrayB, Value length, Value stride) {
+        throw GraalError.unimplemented("vectorizedMismatch substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitArrayEquals(JavaKind commonElementKind, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length) {
         throw GraalError.unimplemented("Array.equals substitution is not implemented on this architecture");
     }
 
     @SuppressWarnings("unused")
-    default Variable emitArrayEquals(JavaKind kind1, JavaKind kind2, Value array1, Value array2, Value length, boolean directPointers) {
-        throw GraalError.unimplemented("Array.equals with different types substitution is not implemented on this architecture");
+    default Variable emitArrayEquals(Stride strideA, Stride strideB, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length) {
+        throw GraalError.unimplemented("Array.equals with different types with offset substitution is not implemented on this architecture");
     }
 
     @SuppressWarnings("unused")
-    default Variable emitArrayIndexOf(JavaKind arrayKind, JavaKind valueKind, boolean findTwoConsecutive, Value sourcePointer, Value sourceCount, Value fromIndex, Value... searchValues) {
+    default Variable emitArrayEqualsDynamicStrides(EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length, Value dynamicStrides) {
+        throw GraalError.unimplemented("Array.equals with different types with offset substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitArrayEqualsWithMask(Stride strideA, Stride strideB, Stride strideMask, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value mask, Value length) {
+        throw GraalError.unimplemented("Array.equals with different types with offset substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitArrayEqualsWithMaskDynamicStrides(EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value mask, Value length, Value dynamicStrides) {
+        throw GraalError.unimplemented("Array.equals with different types with offset substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default void emitArrayCopyWithConversion(Stride strideSrc, Stride strideDst, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arraySrc, Value offsetSrc, Value arrayDst, Value offsetDst, Value length) {
+        throw GraalError.unimplemented("Array.copy with variable stride substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default void emitArrayCopyWithConversion(EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value arraySrc, Value offsetSrc, Value arrayDst, Value offsetDst, Value length, Value dynamicStrides) {
+        throw GraalError.unimplemented("Array.copy with variable stride substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitCalcStringAttributes(Object op, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value array, Value offset, Value length, boolean isValid) {
+        throw GraalError.unimplemented("CalcStringAttributes substitution is not implemented on this architecture");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitArrayIndexOf(Stride stride, boolean findTwoConsecutive, boolean withMask, EnumSet<?> runtimeCheckedCPUFeatures,
+                    Value array, Value offset, Value length, Value fromIndex, Value... searchValues) {
         throw GraalError.unimplemented("String.indexOf substitution is not implemented on this architecture");
     }
 
@@ -314,6 +301,31 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
         throw GraalError.unimplemented("StringUTF16.compress substitution is not implemented on this architecture");
     }
 
+    enum CharsetName {
+        ASCII,
+        ISO_8859_1
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitEncodeArray(Value src, Value dst, Value length, CharsetName charset) {
+        throw GraalError.unimplemented("No specialized implementation available");
+    }
+
+    @SuppressWarnings("unused")
+    default Variable emitHasNegatives(Value array, Value length) {
+        throw GraalError.unimplemented("No specialized implementation available");
+    }
+
+    @SuppressWarnings("unused")
+    default void emitAESEncrypt(Value from, Value to, Value key) {
+        throw GraalError.unimplemented("No specialized implementation available");
+    }
+
+    @SuppressWarnings("unused")
+    default void emitAESDecrypt(Value from, Value to, Value key) {
+        throw GraalError.unimplemented("No specialized implementation available");
+    }
+
     void emitBlackhole(Value operand);
 
     LIRKind getLIRKind(Stamp stamp);
@@ -327,6 +339,18 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
     Value emitUncompress(Value pointer, CompressEncoding encoding, boolean nonNull);
 
     default void emitConvertNullToZero(AllocatableValue result, Value input) {
+        if (LIRValueUtil.isJavaConstant(input)) {
+            if (LIRValueUtil.asJavaConstant(input).isNull()) {
+                emitMoveConstant(result, JavaConstant.forPrimitiveInt(input.getPlatformKind().getSizeInBytes() * Byte.SIZE, 0L));
+            } else {
+                emitMove(result, input);
+            }
+        } else {
+            emitConvertNullToZero(result, (AllocatableValue) input);
+        }
+    }
+
+    default void emitConvertNullToZero(AllocatableValue result, AllocatableValue input) {
         emitMove(result, input);
     }
 
@@ -340,8 +364,12 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
      */
     void emitSpeculationFence();
 
-    default VirtualStackSlot allocateStackSlots(int slots) {
-        return getResult().getFrameMapBuilder().allocateStackSlots(slots);
+    default VirtualStackSlot allocateStackMemory(int sizeInBytes, int alignmentInBytes) {
+        return getResult().getFrameMapBuilder().allocateStackMemory(sizeInBytes, alignmentInBytes);
+    }
+
+    default Value emitTimeStampWithProcid() {
+        throw new GraalError("Emitting code to return the current value of the timestamp counter with procid is not currently supported on %s", target().arch);
     }
 
     default Value emitReadCallerStackPointer(Stamp wordStamp) {
@@ -360,5 +388,24 @@ public interface LIRGeneratorTool extends DiagnosticLIRGeneratorTool, ValueKindF
     @SuppressWarnings("unused")
     default void emitZeroMemory(Value address, Value length, boolean isAligned) {
         throw GraalError.unimplemented("Bulk zeroing is not implemented on this architecture");
+    }
+
+    /**
+     * Emits instruction(s) to flush an individual cache line that starts at {@code address}.
+     */
+    void emitCacheWriteback(Value address);
+
+    /**
+     * Emits instruction(s) to serialize cache writeback operations relative to preceding (if
+     * {@code isPreSync == true}) or following (if {@code isPreSync == false}) memory writes.
+     */
+    void emitCacheWritebackSync(boolean isPreSync);
+
+    /**
+     * Returns the maximum size of vector registers.
+     */
+    @SuppressWarnings("unused")
+    default VectorSize getMaxVectorSize(EnumSet<?> runtimeCheckedCPUFeatures) {
+        throw GraalError.unimplemented("Max vector size is not specified on this architecture");
     }
 }

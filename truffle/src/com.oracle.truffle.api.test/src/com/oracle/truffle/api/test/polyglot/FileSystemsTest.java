@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 package com.oracle.truffle.api.test.polyglot;
 
+import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.Closeable;
@@ -58,12 +60,14 @@ import java.nio.file.AccessMode;
 import java.nio.file.CopyOption;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileSystemException;
 import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.NotLinkException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -72,47 +76,47 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.GroupPrincipal;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.UserPrincipal;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.io.FileSystem;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.Env;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.impl.Accessor;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.test.OSUtils;
-import java.nio.file.FileSystemException;
-import java.nio.file.attribute.PosixFilePermission;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.function.BiFunction;
-import org.graalvm.polyglot.PolyglotException;
-import org.junit.Assume;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 @RunWith(Parameterized.class)
 public class FileSystemsTest {
@@ -139,40 +143,85 @@ public class FileSystemsTest {
     private static final String FOLDER_NEW_COPY = "folder_copy";
     private static final String FILE_CHANGE_ATTRS = "existing_attrs.txt";
     private static final String FILE_TMP_DIR = "tmpfolder";
+    private static final String FULL_IO = "Full IO";
+    private static final String NO_IO = "No IO";
+    private static final String NO_IO_UNDER_LANGUAGE_HOME_PUBLIC_FILE = "No IO under language home - public file";
+    private static final String NO_IO_UNDER_LANGUAGE_HOME_INTERNAL_FILE = "No IO under language home - internal file";
+    private static final String READ_ONLY = "Read Only";
+    private static final String CONDITIONAL_IO_READ_WRITE_PART = "Conditional IO - read/write part";
+    private static final String CONDITIONAL_IO_READ_ONLY_PART = "Conditional IO - read only part";
+    private static final String CONDITIONAL_IO_PRIVATE_PART = "Conditional IO - private part";
+    private static final String MEMORY_FILE_SYSTEM = "Memory FileSystem";
+    private static final String MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES = "Memory FileSystem With Language Homes";
+    private static final String MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES_INTERNAL_FILE = "Memory FileSystem With Language Homes - internal file";
+    private static final String CONTEXT_PRE_INITIALIZATION_FILESYSTEM_BUILD_TIME = "Context pre-initialization filesystem build time";
+    private static final String CONTEXT_PRE_INITIALIZATION_FILESYSTEM_EXECUTION_TIME = "Context pre-initialization filesystem execution time";
 
-    private static Collection<Configuration> cfgs;
+    private static final Map<String, Configuration> cfgs = new HashMap<>();
     private static Consumer<Env> languageAction;
 
     private final Configuration cfg;
 
     @Parameterized.Parameters(name = "{0}")
-    public static Collection<Configuration> createParameters() throws IOException, ReflectiveOperationException {
-        assert cfgs == null;
-        final List<Configuration> result = new ArrayList<>();
-        final FileSystem fullIO = FileSystemProviderTest.newFullIOFileSystem();
+    public static Collection<String> createParameters() {
+        if (TruffleTestAssumptions.isStrongEncapsulation()) {
+            return Collections.emptyList();
+        }
+        return Arrays.asList(
+                        FULL_IO,
+                        NO_IO,
+                        NO_IO_UNDER_LANGUAGE_HOME_PUBLIC_FILE,
+                        NO_IO_UNDER_LANGUAGE_HOME_INTERNAL_FILE,
+                        READ_ONLY,
+                        CONDITIONAL_IO_READ_WRITE_PART,
+                        CONDITIONAL_IO_READ_ONLY_PART,
+                        CONDITIONAL_IO_PRIVATE_PART,
+                        MEMORY_FILE_SYSTEM,
+                        MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES,
+                        MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES_INTERNAL_FILE,
+                        CONTEXT_PRE_INITIALIZATION_FILESYSTEM_BUILD_TIME,
+                        CONTEXT_PRE_INITIALIZATION_FILESYSTEM_EXECUTION_TIME);
+    }
+
+    @BeforeClass
+    public static void createConfigurations() throws IOException, ReflectiveOperationException {
+        assert cfgs.isEmpty();
+        if (TruffleTestAssumptions.isStrongEncapsulation()) {
+            return;
+        }
+        final FileSystem fullIO = FileSystem.newDefaultFileSystem();
         // Full IO
         Path accessibleDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
                         fullIO);
         Context ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).build();
         setCwd(ctx, accessibleDir, null);
-        result.add(new Configuration("Full IO", ctx, accessibleDir, fullIO, true, true, true, true));
+        cfgs.put(FULL_IO, new Configuration(FULL_IO, ctx, accessibleDir, fullIO, true, true, true, true));
         // No IO
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(false).build();
         Path privateDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
                         fullIO);
-        result.add(new Configuration("No IO", ctx, privateDir, Paths.get("").toAbsolutePath(), fullIO, true, false, false, false));
+        cfgs.put(NO_IO, new Configuration(NO_IO, ctx, privateDir, Paths.get("").toAbsolutePath(), fullIO, true, false, false, false));
         // No IO under language home - public file
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(false).build();
         privateDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
                         fullIO);
         setCwd(ctx, privateDir, privateDir);
-        result.add(new Configuration("No IO under language home - public file", ctx, privateDir, fullIO, true, false, false, false));
+        cfgs.put(NO_IO_UNDER_LANGUAGE_HOME_PUBLIC_FILE, new Configuration(NO_IO_UNDER_LANGUAGE_HOME_PUBLIC_FILE, ctx, privateDir, fullIO, true, false, false, false));
         // No IO under language home - internal file
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(false).build();
         privateDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
                         fullIO);
         setCwd(ctx, privateDir, privateDir);
-        result.add(new Configuration("No IO under language home - internal file", ctx, privateDir, privateDir, fullIO, true, true, false, false, true, (env, p) -> env.getInternalTruffleFile(p)));
+        cfgs.put(NO_IO_UNDER_LANGUAGE_HOME_INTERNAL_FILE,
+                        new Configuration(NO_IO_UNDER_LANGUAGE_HOME_INTERNAL_FILE, ctx, privateDir, privateDir, fullIO, true, true, false, false, true, (env, p) -> env.getInternalTruffleFile(p)));
+
+        // Read Only
+        accessibleDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
+                        fullIO);
+        ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(FileSystem.newReadOnlyFileSystem(fullIO)).build();
+        setCwd(ctx, accessibleDir, null);
+        cfgs.put(READ_ONLY, new Configuration(READ_ONLY, ctx, accessibleDir, fullIO, true, true, false, true));
+
         // Checked IO
         accessibleDir = createContent(Files.createTempDirectory(FileSystemsTest.class.getSimpleName()),
                         fullIO);
@@ -186,7 +235,7 @@ public class FileSystemsTest {
         read.setFileSystem(fileSystem);
         write.setFileSystem(fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Conditional IO - read/write part", ctx, accessibleDir, fullIO, false, true, true, true));
+        cfgs.put(CONDITIONAL_IO_READ_WRITE_PART, new Configuration(CONDITIONAL_IO_READ_WRITE_PART, ctx, accessibleDir, fullIO, false, true, true, true));
         read = new AccessPredicate(Arrays.asList(accessibleDir, readOnlyDir));
         write = new AccessPredicate(Collections.singleton(accessibleDir));
         fileSystem = new RestrictedFileSystem(
@@ -194,14 +243,14 @@ public class FileSystemsTest {
         read.setFileSystem(fileSystem);
         write.setFileSystem(fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Conditional IO - read only part", ctx, readOnlyDir, fullIO, false, true, false, true));
+        cfgs.put(CONDITIONAL_IO_READ_ONLY_PART, new Configuration(CONDITIONAL_IO_READ_ONLY_PART, ctx, readOnlyDir, fullIO, false, true, false, true));
         read = new AccessPredicate(Arrays.asList(accessibleDir, readOnlyDir));
         write = new AccessPredicate(Collections.singleton(accessibleDir));
         fileSystem = new RestrictedFileSystem(FileSystemProviderTest.newFullIOFileSystem(privateDir), read, write);
         read.setFileSystem(fileSystem);
         write.setFileSystem(fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Conditional IO - private part", ctx, privateDir, fullIO, false, false, false, true));
+        cfgs.put(CONDITIONAL_IO_PRIVATE_PART, new Configuration(CONDITIONAL_IO_PRIVATE_PART, ctx, privateDir, fullIO, false, false, false, true));
 
         // Memory
         fileSystem = new MemoryFileSystem();
@@ -209,7 +258,25 @@ public class FileSystemsTest {
         ((MemoryFileSystem) fileSystem).setCurrentWorkingDirectory(memDir);
         createContent(memDir, fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Memory FileSystem", ctx, memDir, fileSystem, false, true, true, true));
+        cfgs.put(MEMORY_FILE_SYSTEM, new Configuration(MEMORY_FILE_SYSTEM, ctx, memDir, fileSystem, false, true, true, true));
+
+        // Memory with language home
+        fileSystem = FileSystem.allowLanguageHomeAccess(new MemoryFileSystem());
+        memDir = mkdirs(fileSystem.toAbsolutePath(fileSystem.parsePath("work")), fileSystem);
+        fileSystem.setCurrentWorkingDirectory(memDir);
+        createContent(memDir, fileSystem);
+        ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
+        cfgs.put(MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES, new Configuration(MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES, ctx, memDir, fileSystem, false, true, true, true));
+
+        // Memory with language home - in language home
+        fileSystem = FileSystem.allowLanguageHomeAccess(new MemoryFileSystem());
+        memDir = mkdirs(fileSystem.toAbsolutePath(fileSystem.parsePath("work")), fileSystem);
+        fileSystem.setCurrentWorkingDirectory(memDir);
+        privateDir = createContent(memDir, fileSystem);
+        ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
+        setCwd(ctx, privateDir, privateDir);
+        cfgs.put(MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES_INTERNAL_FILE,
+                        new Configuration(MEMORY_FILE_SYSTEM_WITH_LANGUAGE_HOMES_INTERNAL_FILE, ctx, privateDir, privateDir, fileSystem, false, true, true, true));
 
         // PreInitializeContextFileSystem in image build time
         fileSystem = createPreInitializeContextFileSystem();
@@ -217,7 +284,7 @@ public class FileSystemsTest {
         fileSystem.setCurrentWorkingDirectory(workDir);
         createContent(workDir, fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Context pre-initialization filesystem build time", ctx, workDir, fileSystem, true, true, true, true));
+        cfgs.put(CONTEXT_PRE_INITIALIZATION_FILESYSTEM_BUILD_TIME, new Configuration(CONTEXT_PRE_INITIALIZATION_FILESYSTEM_BUILD_TIME, ctx, workDir, fileSystem, true, true, true, true));
 
         // PreInitializeContextFileSystem in image execution time
         fileSystem = createPreInitializeContextFileSystem();
@@ -226,24 +293,20 @@ public class FileSystemsTest {
         switchToImageExecutionTime(fileSystem, workDir);
         createContent(workDir, fileSystem);
         ctx = Context.newBuilder(LANGUAGE_ID).allowIO(true).fileSystem(fileSystem).build();
-        result.add(new Configuration("Context pre-initialization filesystem execution time", ctx, workDir, fileSystem, true, true, true, true));
-
-        cfgs = result;
-        return result;
+        cfgs.put(CONTEXT_PRE_INITIALIZATION_FILESYSTEM_EXECUTION_TIME, new Configuration(CONTEXT_PRE_INITIALIZATION_FILESYSTEM_EXECUTION_TIME, ctx, workDir, fileSystem, true, true, true, true));
     }
 
     @AfterClass
     public static void tearDownClass() throws IOException {
-        if (cfgs != null) {
-            for (Configuration cfg : cfgs) {
-                cfg.close();
-            }
-            cfgs = null;
+        for (Map.Entry<String, Configuration> cfgEntry : cfgs.entrySet()) {
+            cfgEntry.getValue().close();
         }
+        cfgs.clear();
     }
 
-    public FileSystemsTest(final Configuration cfg) {
-        this.cfg = cfg;
+    public FileSystemsTest(final String cfgName) {
+        assert cfgs.containsKey(cfgName);
+        this.cfg = cfgs.get(cfgName);
     }
 
     @Before
@@ -263,7 +326,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
             final Path folderExisting = path.resolve(FOLDER_EXISTING);
-            final TruffleFile file = cfg.resolve(env, folderExisting.toString());
+            final TruffleFile file = cfg.resolve(env, folderExisting);
             try {
                 final String expected = path.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING).toString();
                 final Collection<? extends TruffleFile> children = file.list();
@@ -286,7 +349,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
             final Path folderExisting = path.resolve(FOLDER_EXISTING);
-            TruffleFile file = cfg.resolve(env, folderExisting.toString());
+            TruffleFile file = cfg.resolve(env, folderExisting);
             file = file.resolve("lib/../.");
             try {
                 final String expected = path.resolve(FOLDER_EXISTING).resolve("lib/../.").resolve(FILE_EXISTING).toString();
@@ -309,7 +372,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final String content = new String(file.readAllBytes(), StandardCharsets.UTF_8);
@@ -330,7 +393,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final StringBuilder content = new StringBuilder();
@@ -363,7 +426,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final String expectedContent = "0123456789";
                 final TruffleFile file = root.resolve(FILE_NEW_WRITE_CHANNEL);
@@ -391,7 +454,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final String expectedContent = "0123456789";
                 final TruffleFile file = root.resolve(FILE_NEW_WRITE_STREAM);
@@ -418,7 +481,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile toCreate = root.resolve(FILE_NEW_CREATE_DIR);
                 toCreate.createDirectories();
@@ -442,7 +505,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile toCreate = root.resolve(FILE_NEW_CREATE_FILE);
                 toCreate.createFile();
@@ -465,7 +528,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile toCreate = root.resolve(FILE_EXISTING_DELETE);
                 toCreate.delete();
@@ -485,7 +548,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile toCreate = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean exists = toCreate.exists();
@@ -521,7 +584,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile canonical = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING).getCanonicalFile();
                 Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canRead);
@@ -541,7 +604,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final FileTime lastModifiedTime = file.getLastModifiedTime();
@@ -562,7 +625,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean isDir = file.isDirectory();
@@ -581,7 +644,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean isFile = file.isRegularFile();
@@ -600,7 +663,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean readable = file.isReadable();
@@ -620,7 +683,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean writable = file.isWritable();
@@ -639,7 +702,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final boolean executable = file.isExecutable();
@@ -661,7 +724,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(SYMLINK_EXISTING);
                 Assume.assumeTrue("File System does not support optional symbolic links", file.exists(LinkOption.NOFOLLOW_LINKS));
@@ -688,7 +751,7 @@ public class FileSystemsTest {
         final boolean canRead = cfg.canRead();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FILE_EXISTING_RENAME);
                 final TruffleFile target = root.resolve(FILE_NEW_RENAME);
@@ -716,7 +779,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 final long size = file.size();
@@ -764,7 +827,7 @@ public class FileSystemsTest {
             Assert.assertFalse(uri.isAbsolute());
             URI expectedUri = userDir.toUri().relativize(userDir.resolve(FILE_EXISTING).toUri());
             Assert.assertEquals(cfg.formatErrorMessage("Relative URI"), expectedUri, uri);
-            final TruffleFile absoluteFile = cfg.resolve(env, rootDirectories.get(0).toString()).resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
+            final TruffleFile absoluteFile = cfg.resolve(env, rootDirectories.get(0)).resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
             uri = absoluteFile.toUri();
             Assert.assertTrue(uri.isAbsolute());
             Assert.assertEquals(cfg.formatErrorMessage("Absolute URI"), Paths.get("/").resolve(FOLDER_EXISTING).resolve(FILE_EXISTING).toUri(), uri);
@@ -970,7 +1033,7 @@ public class FileSystemsTest {
         boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
             Path folderExisting = path.resolve(FOLDER_EXISTING);
-            TruffleFile file = cfg.resolve(env, folderExisting.toString());
+            TruffleFile file = cfg.resolve(env, folderExisting);
             Set<String> expected = new HashSet<>();
             Collections.addAll(expected, FILE_EXISTING, FOLDER_EXISTING_INNER1, FOLDER_EXISTING_INNER2);
             try (DirectoryStream<TruffleFile> stream = file.newDirectoryStream()) {
@@ -995,7 +1058,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             TruffleFile existingFolder = root.resolve(FOLDER_EXISTING);
             try {
                 // @formatter:off
@@ -1066,7 +1129,7 @@ public class FileSystemsTest {
                 visitor.assertConsumed();
                 // TestVisitor cannot be used for SKIP_SIBLINGS due to random order of files on file
                 // system
-                FileVisitor<TruffleFile> fileVisitor = new FileVisitor<TruffleFile>() {
+                FileVisitor<TruffleFile> fileVisitor = new FileVisitor<>() {
 
                     private boolean skipReturned;
                     private Set<TruffleFile> importantFiles;
@@ -1126,7 +1189,7 @@ public class FileSystemsTest {
         Path path = cfg.getPath();
         boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile target = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 TruffleFile link = root.resolve(FILE_NEW_LINK);
@@ -1150,14 +1213,26 @@ public class FileSystemsTest {
         Path path = cfg.getPath();
         boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             try {
-                TruffleFile target = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 TruffleFile link = root.resolve(FILE_NEW_SYMLINK);
+                TruffleFile target = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
+                Assert.assertTrue(target.isAbsolute());
                 link.createSymbolicLink(target);
                 Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canWrite);
                 Assert.assertTrue(link.isSymbolicLink());
                 Assert.assertEquals(target.getCanonicalFile(), link.getCanonicalFile());
+                Assert.assertTrue(link.readSymbolicLink().isAbsolute());
+                Assert.assertEquals(target, link.readSymbolicLink());
+                link.delete();
+                target = cfg.resolve(env, FOLDER_EXISTING).resolve(FILE_EXISTING);
+                Assert.assertFalse(target.isAbsolute());
+                link.createSymbolicLink(target);
+                Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canWrite);
+                Assert.assertTrue(link.isSymbolicLink());
+                Assert.assertEquals(target.getCanonicalFile(), link.getCanonicalFile());
+                Assert.assertFalse(link.readSymbolicLink().isAbsolute());
+                Assert.assertEquals(target, link.readSymbolicLink());
             } catch (SecurityException se) {
                 Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canWrite);
             } catch (IOException ioe) {
@@ -1170,12 +1245,45 @@ public class FileSystemsTest {
     }
 
     @Test
+    public void testReadSymbolicLink() throws Throwable {
+        Assume.assumeFalse("Link creation requires a special privilege on Windows", OSUtils.isWindows());
+        Context ctx = cfg.getContext();
+        Path path = cfg.getPath();
+        boolean canRead = cfg.canRead();
+        languageAction = (Env env) -> {
+            TruffleFile root = cfg.resolve(env, path);
+            try {
+                TruffleFile link = root.resolve(SYMLINK_EXISTING);
+                Assume.assumeTrue("File System does not support optional symbolic links", link.exists(LinkOption.NOFOLLOW_LINKS));
+                link.readSymbolicLink();
+                Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canRead);
+                AbstractPolyglotTest.assertFails(() -> {
+                    return root.resolve(FILE_EXISTING).readSymbolicLink();
+                }, NotLinkException.class);
+            } catch (SecurityException se) {
+                Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canRead);
+            } catch (IOException ioe) {
+                throw new AssertionError(cfg.formatErrorMessage(ioe.getMessage()), ioe);
+            } catch (UnsupportedOperationException uoe) {
+                // Symbolik links may not be supported on file system
+            }
+        };
+        try {
+            ctx.eval(LANGUAGE_ID, "");
+        } catch (PolyglotException pe) {
+            if (pe.isHostException()) {
+                throw pe.asHostException();
+            }
+        }
+    }
+
+    @Test
     public void testGetOwner() {
         Context ctx = cfg.getContext();
         Path path = cfg.getPath();
         boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile file = root.resolve(FOLDER_EXISTING);
                 UserPrincipal owner = file.getOwner();
@@ -1198,7 +1306,7 @@ public class FileSystemsTest {
         Path path = cfg.getPath();
         boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile file = root.resolve(FOLDER_EXISTING);
                 GroupPrincipal group = file.getGroup();
@@ -1222,7 +1330,7 @@ public class FileSystemsTest {
         boolean canRead = cfg.canRead();
         boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 TruffleFile target = root.resolve(FILE_NEW_COPY);
@@ -1271,8 +1379,8 @@ public class FileSystemsTest {
                 if (cfg.isInternal()) {
                     Assert.assertTrue(e instanceof NullPointerException);
                 } else {
-                    Assert.assertTrue(TestAPIAccessor.engineAccess().isHostException(e));
-                    Assert.assertTrue(TestAPIAccessor.engineAccess().asHostException(e) instanceof NullPointerException);
+                    Assert.assertTrue(env.isHostException(e));
+                    Assert.assertTrue(env.asHostException(e) instanceof NullPointerException);
                 }
             }
         };
@@ -1301,7 +1409,7 @@ public class FileSystemsTest {
                 } catch (SecurityException se) {
                     Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canRead);
                 }
-                TruffleFile newCwd = cfg.resolve(env, path.toString()).resolve(FOLDER_EXISTING).getAbsoluteFile();
+                TruffleFile newCwd = cfg.resolve(env, path).resolve(FOLDER_EXISTING).getAbsoluteFile();
                 try {
                     env.setCurrentWorkingDirectory(newCwd);
                     try {
@@ -1351,7 +1459,7 @@ public class FileSystemsTest {
         Path path = cfg.getPath();
         boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
                 Assert.assertEquals(file.getLastModifiedTime(), file.getAttribute(TruffleFile.LAST_MODIFIED_TIME));
@@ -1396,7 +1504,7 @@ public class FileSystemsTest {
         boolean canRead = cfg.canRead();
         boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             try {
                 TruffleFile file = root.resolve(FILE_CHANGE_ATTRS);
                 FileTime time = FileTime.from(Instant.now().minusSeconds(1_000).truncatedTo(ChronoUnit.MINUTES));
@@ -1439,7 +1547,7 @@ public class FileSystemsTest {
         Path path = cfg.getPath();
         boolean canRead = cfg.canRead();
         languageAction = (Env env) -> {
-            TruffleFile root = cfg.resolve(env, path.toString());
+            TruffleFile root = cfg.resolve(env, path);
             TruffleFile file = root.resolve(FOLDER_EXISTING).resolve(FILE_EXISTING);
             try {
                 TruffleFile.Attributes attrs = file.getAttributes(Arrays.asList(
@@ -1645,7 +1753,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile tmpDir = root.resolve(FILE_TMP_DIR);
                 TruffleFile tmpf1 = env.createTempFile(tmpDir, "prefix", ".ext");
@@ -1706,7 +1814,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         final boolean canWrite = cfg.canWrite();
         languageAction = (Env env) -> {
-            final TruffleFile root = cfg.resolve(env, path.toString());
+            final TruffleFile root = cfg.resolve(env, path);
             try {
                 final TruffleFile tmpDir = root.resolve(FILE_TMP_DIR);
                 TruffleFile tmpf1 = env.createTempDirectory(tmpDir, "prefix");
@@ -1735,7 +1843,7 @@ public class FileSystemsTest {
         final Path path = cfg.getPath();
         Assume.assumeTrue(cfg.canRead() && cfg.allowsUserDir());
         languageAction = (Env env) -> {
-            final TruffleFile folder = cfg.resolve(env, path.resolve(FOLDER_EXISTING).toString());
+            final TruffleFile folder = cfg.resolve(env, path.resolve(FOLDER_EXISTING));
             TruffleFile cwd = env.getCurrentWorkingDirectory();
             try {
                 env.setCurrentWorkingDirectory(folder);
@@ -1808,6 +1916,71 @@ public class FileSystemsTest {
             }
         };
         ctx.eval(LANGUAGE_ID, "");
+    }
+
+    @Test
+    public void testIsSameFile() throws Throwable {
+        Context ctx = cfg.getContext();
+        Path path = cfg.getPath();
+        boolean canResolveAbsolutePath = cfg.allowsAbsolutePath();
+        languageAction = (Env env) -> {
+            TruffleFile root = cfg.resolve(env, path);
+            TruffleFile wd = root.resolve(FOLDER_EXISTING).resolve(FOLDER_EXISTING_INNER1);
+            TruffleFile file1 = wd.resolve(FILE_EXISTING);
+            TruffleFile file2 = wd.resolve(FILE_EXISTING2);
+            try {
+                Assert.assertTrue(file1.isSameFile(file1));
+                Assert.assertTrue(file1.isSameFile(file1, LinkOption.NOFOLLOW_LINKS));
+                Assert.assertFalse(file1.isSameFile(file2));
+                Assert.assertFalse(file1.isSameFile(file2, LinkOption.NOFOLLOW_LINKS));
+                Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canResolveAbsolutePath);
+            } catch (SecurityException se) {
+                Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canResolveAbsolutePath);
+            } catch (IOException ioe) {
+                throw new AssertionError(cfg.formatErrorMessage(ioe.getMessage()), ioe);
+            }
+        };
+        ctx.eval(LANGUAGE_ID, "");
+        languageAction = (Env env) -> {
+            TruffleFile root = cfg.resolve(env, path);
+            TruffleFile wd = root.resolve(FOLDER_EXISTING).resolve(FOLDER_EXISTING_INNER1);
+            TruffleFile file1 = wd.resolve(FILE_EXISTING);
+            TruffleFile file1Relative = cfg.resolve(env, cfg.getUserDir()).relativize(file1);
+            try {
+                Assert.assertTrue(file1.isSameFile(file1Relative));
+                Assert.assertTrue(file1.isSameFile(file1Relative, LinkOption.NOFOLLOW_LINKS));
+                Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canResolveAbsolutePath);
+            } catch (SecurityException se) {
+                Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canResolveAbsolutePath);
+            } catch (IOException ioe) {
+                throw new AssertionError(cfg.formatErrorMessage(ioe.getMessage()), ioe);
+            }
+        };
+        ctx.eval(LANGUAGE_ID, "");
+        languageAction = (Env env) -> {
+            TruffleFile root = cfg.resolve(env, path);
+            TruffleFile link = root.resolve(SYMLINK_EXISTING);
+            Assume.assumeTrue("File System does not support optional symbolic links", link.exists(LinkOption.NOFOLLOW_LINKS));
+            TruffleFile target = root.resolve(FOLDER_EXISTING);
+            try {
+                Assert.assertTrue(link.isSameFile(link));
+                Assert.assertTrue(link.isSameFile(link, LinkOption.NOFOLLOW_LINKS));
+                Assert.assertTrue(link.isSameFile(target));
+                Assert.assertFalse(link.isSameFile(target, LinkOption.NOFOLLOW_LINKS));
+                Assert.assertTrue(cfg.formatErrorMessage("Expected SecurityException"), canResolveAbsolutePath);
+            } catch (SecurityException se) {
+                Assert.assertFalse(cfg.formatErrorMessage("Unexpected SecurityException"), canResolveAbsolutePath);
+            } catch (IOException ioe) {
+                throw new AssertionError(cfg.formatErrorMessage(ioe.getMessage()), ioe);
+            }
+        };
+        try {
+            ctx.eval(LANGUAGE_ID, "");
+        } catch (PolyglotException pe) {
+            if (pe.isHostException()) {
+                throw pe.asHostException();
+            }
+        }
     }
 
     static boolean verifyPermissions(Set<PosixFilePermission> permissions, int mode) {
@@ -2001,6 +2174,10 @@ public class FileSystemsTest {
                             path);
         }
 
+        TruffleFile resolve(Env env, Path pathToResolve) {
+            return fileFactory.apply(env, pathToResolve.toString());
+        }
+
         TruffleFile resolve(Env env, String filePath) {
             return fileFactory.apply(env, filePath);
         }
@@ -2020,37 +2197,32 @@ public class FileSystemsTest {
         }
     }
 
-    private static final class LanguageContext {
-        private final Env env;
-
-        LanguageContext(final Env env) {
-            this.env = env;
-        }
-
-        Env env() {
-            return env;
-        }
-    }
-
     @TruffleLanguage.Registration(id = LANGUAGE_ID, name = LANGUAGE_ID, version = "1.0")
-    public static class VirtualizedFileSystemTestLanguage extends TruffleLanguage<LanguageContext> {
+    public static class VirtualizedFileSystemTestLanguage extends TruffleLanguage<Env> {
 
         @Override
-        protected LanguageContext createContext(Env env) {
-            return new LanguageContext(env);
+        protected Env createContext(Env env) {
+            return env;
         }
 
         @Override
         protected CallTarget parse(ParsingRequest request) throws Exception {
             final CharSequence result = request.getSource().getCharacters();
-            return Truffle.getRuntime().createCallTarget(new RootNode(this) {
+            return new RootNode(this) {
                 @Override
                 public Object execute(VirtualFrame frame) {
-                    languageAction.accept(lookupContextReference(VirtualizedFileSystemTestLanguage.class).get().env());
+                    doLanguageAction(CONTEXT_REF.get(this));
                     return result;
                 }
-            });
+
+                @TruffleBoundary
+                private void doLanguageAction(Env env) {
+                    languageAction.accept(env);
+                }
+            }.getCallTarget();
         }
+
+        private static final ContextReference<Env> CONTEXT_REF = ContextReference.create(VirtualizedFileSystemTestLanguage.class);
     }
 
     private static Path createContent(
@@ -2307,6 +2479,11 @@ public class FileSystemsTest {
         @Override
         public Path getTempDirectory() {
             return delegate.getTempDirectory();
+        }
+
+        @Override
+        public boolean isSameFile(Path path1, Path path2, LinkOption... options) throws IOException {
+            return delegate.isSameFile(path1, path2, options);
         }
     }
 
@@ -2625,14 +2802,6 @@ public class FileSystemsTest {
             public String toString() {
                 return file.toString();
             }
-        }
-    }
-
-    private static final TestAPIAccessor API = new TestAPIAccessor();
-
-    private static final class TestAPIAccessor extends Accessor {
-        static EngineSupport engineAccess() {
-            return API.engineSupport();
         }
     }
 }

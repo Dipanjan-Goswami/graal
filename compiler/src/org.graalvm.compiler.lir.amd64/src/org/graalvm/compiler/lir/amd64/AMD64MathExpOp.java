@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2016, Intel Corporation. All rights reserved.
  * Intel Math Library (LIBM) Source Code
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -46,7 +46,9 @@ import org.graalvm.compiler.asm.Label;
 import org.graalvm.compiler.asm.amd64.AMD64Address;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.ConditionFlag;
 import org.graalvm.compiler.asm.amd64.AMD64MacroAssembler;
+import org.graalvm.compiler.core.common.Stride;
 import org.graalvm.compiler.lir.LIRInstructionClass;
+import org.graalvm.compiler.lir.StubPort;
 import org.graalvm.compiler.lir.asm.ArrayDataPointerConstant;
 import org.graalvm.compiler.lir.asm.CompilationResultBuilder;
 
@@ -84,6 +86,13 @@ import org.graalvm.compiler.lir.asm.CompilationResultBuilder;
  *    if x < -745.133219101941108420 then exp(x) underflow
  * </pre>
  */
+// @formatter:off
+@StubPort(path      = "src/hotspot/cpu/x86/macroAssembler_x86_exp.cpp",
+          lineStart = 0,
+          lineEnd   = 406,
+          commit    = "e58c12e61828485bfffbc9d1b865302b93a94158",
+          sha1      = "e8777563cb0f0f275a490992a36bbdf06bb4c4af")
+// @formatter:on
 public final class AMD64MathExpOp extends AMD64MathIntrinsicUnaryOp {
 
     public static final LIRInstructionClass<AMD64MathExpOp> TYPE = LIRInstructionClass.create(AMD64MathExpOp.class);
@@ -298,7 +307,7 @@ public final class AMD64MathExpOp extends AMD64MathIntrinsicUnaryOp {
         masm.psllq(xmm7, 46);
         masm.subpd(xmm0, xmm3);
         masm.leaq(r11, recordExternalAddress(crb, tblAddr));
-        masm.movdqu(xmm2, new AMD64Address(rcx, r11, AMD64Address.Scale.Times1));
+        masm.movdqu(xmm2, new AMD64Address(rcx, r11, Stride.S1));
         masm.mulpd(xmm4, xmm0);
         masm.movapd(xmm6, xmm0);
         masm.movapd(xmm1, xmm0);

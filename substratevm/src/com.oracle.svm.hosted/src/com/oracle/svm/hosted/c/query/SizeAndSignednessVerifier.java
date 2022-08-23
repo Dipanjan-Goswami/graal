@@ -48,9 +48,10 @@ import com.oracle.svm.hosted.c.info.EnumInfo;
 import com.oracle.svm.hosted.c.info.EnumValueInfo;
 import com.oracle.svm.hosted.c.info.NativeCodeInfo;
 import com.oracle.svm.hosted.c.info.SizableInfo;
+import com.oracle.svm.hosted.c.info.SizableInfo.ElementKind;
 import com.oracle.svm.hosted.c.info.StructBitfieldInfo;
 import com.oracle.svm.hosted.c.info.StructFieldInfo;
-import com.oracle.svm.hosted.c.info.SizableInfo.ElementKind;
+import com.oracle.svm.util.ClassUtil;
 
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
@@ -79,7 +80,7 @@ public final class SizeAndSignednessVerifier extends NativeInfoTreeVisitor {
     @Override
     protected void visitStructFieldInfo(StructFieldInfo structFieldInfo) {
         checkAccessorLocationIdentity(structFieldInfo.getChildren());
-        if (structFieldInfo.getAccessorInfo().hasUniqueLocationIdentity()) {
+        if (structFieldInfo.getAnyAccessorInfo().hasUniqueLocationIdentity()) {
             structFieldInfo.setLocationIdentity(new CInterfaceLocationIdentity(structFieldInfo.getParent().getName() + "." + structFieldInfo.getName()));
         }
         super.visitStructFieldInfo(structFieldInfo);
@@ -96,13 +97,15 @@ public final class SizeAndSignednessVerifier extends NativeInfoTreeVisitor {
         for (ElementInfo child : children) {
             if (child instanceof AccessorInfo) {
                 AccessorInfo accessorInfo = (AccessorInfo) child;
-                if (firstAccessorInfo == null) {
-                    firstAccessorInfo = accessorInfo;
-                } else {
-                    if (accessorInfo.hasLocationIdentityParameter() != firstAccessorInfo.hasLocationIdentityParameter()) {
-                        addError("All accessors for a field must agree on LocationIdentity parameter", firstAccessorInfo, accessorInfo);
-                    } else if (accessorInfo.hasUniqueLocationIdentity() != firstAccessorInfo.hasUniqueLocationIdentity()) {
-                        addError("All accessors for a field must agree on @" + UniqueLocationIdentity.class.getSimpleName() + " annotation", firstAccessorInfo, accessorInfo);
+                if (accessorInfo.getAccessorKind() != AccessorInfo.AccessorKind.OFFSET) {
+                    if (firstAccessorInfo == null) {
+                        firstAccessorInfo = accessorInfo;
+                    } else {
+                        if (accessorInfo.hasLocationIdentityParameter() != firstAccessorInfo.hasLocationIdentityParameter()) {
+                            addError("All accessors for a field must agree on LocationIdentity parameter", firstAccessorInfo, accessorInfo);
+                        } else if (accessorInfo.hasUniqueLocationIdentity() != firstAccessorInfo.hasUniqueLocationIdentity()) {
+                            addError("All accessors for a field must agree on @" + UniqueLocationIdentity.class.getSimpleName() + " annotation", firstAccessorInfo, accessorInfo);
+                        }
                     }
                 }
             }
@@ -241,7 +244,7 @@ public final class SizeAndSignednessVerifier extends NativeInfoTreeVisitor {
             Class<? extends Annotation> supressionAnnotation = (declaredSize > actualSize) ^ isReturn ? AllowNarrowingCast.class : AllowWideningCast.class;
             if (method.getAnnotation(supressionAnnotation) == null) {
                 addError("Type " + type.toJavaName(false) + " has a size of " + declaredSize + " bytes, but accessed C value has a size of " + actualSize +
-                                " bytes; to suppress this error, use the annotation @" + supressionAnnotation.getSimpleName(), method);
+                                " bytes; to suppress this error, use the annotation @" + ClassUtil.getUnqualifiedName(supressionAnnotation), method);
             }
         }
 

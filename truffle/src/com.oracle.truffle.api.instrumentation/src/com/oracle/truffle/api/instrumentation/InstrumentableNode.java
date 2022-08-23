@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,7 +45,6 @@ import java.util.Set;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.TruffleRuntime;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.InstrumentableNode.WrapperNode;
 import com.oracle.truffle.api.nodes.Node;
@@ -109,8 +108,8 @@ public interface InstrumentableNode extends NodeInterface {
      * <p>
      * The implementation of this method must ensure that its result is stable after the parent
      * {@link RootNode root node} was wrapped in a {@link CallTarget} using
-     * {@link TruffleRuntime#createCallTarget(RootNode)}. The result is stable if the result of
-     * calling this method remains always the same.
+     * {@link RootNode#getCallTarget()}. The result is stable if the result of calling this method
+     * remains always the same.
      * <p>
      * This method might be called in parallel from multiple threads even if the language is single
      * threaded. The method may be invoked without a language context currently being active.
@@ -183,8 +182,8 @@ public interface InstrumentableNode extends NodeInterface {
      * <p>
      * The implementation of hasTag method must ensure that its result is stable after the parent
      * {@link RootNode root node} was wrapped in a {@link CallTarget} using
-     * {@link TruffleRuntime#createCallTarget(RootNode)}. The result is stable if the result of
-     * calling this method for a particular tag remains always the same.
+     * {@link RootNode#getCallTarget()}. The result is stable if the result of calling this method
+     * for a particular tag remains always the same.
      * <p>
      * This method might be called in parallel from multiple threads even if the language is single
      * threaded. The method may be invoked without a language context currently being active.
@@ -252,6 +251,17 @@ public interface InstrumentableNode extends NodeInterface {
      * with the same tags. Materialized nodes should not be re-materialized again. Instrumentation
      * relies on the stability of materialized nodes. Use {@link Node#notifyInserted(Node)} when you
      * need to change the structure of instrumentable nodes.
+     * <p>
+     * Node must return itself from this method when it has already seen all the materializedTags
+     * specified as an argument, i.e., not only if the set of tags is exactly the same as before,
+     * but also if the current set of tags is completely contained in the union of all the sets of
+     * tags specified in all the calls of this method that led to creation of this materialized
+     * node.
+     * <p>
+     * If the node returns a new node from this method, the subtree rooted at the new node must be
+     * completely unadopted, i.e., all nodes it contains must not have existed in the original AST.
+     * Also, the new subtree must be completely materialized, so that no new materializations occur
+     * when the instrumentation framework instruments the new subtree during the current traversal.
      * <p>
      * The AST lock is acquired while this method is invoked. Therefore it is not allowed to run
      * guest language code while this method is invoked. This method might be called in parallel
@@ -349,6 +359,26 @@ public interface InstrumentableNode extends NodeInterface {
      */
     default Node findNearestNodeAt(int sourceCharIndex, Set<Class<? extends Tag>> tags) {
         return DefaultNearestNodeSearch.findNearestNodeAt(sourceCharIndex, (Node) this, tags);
+    }
+
+    /**
+     * Find the first {@link #isInstrumentable() instrumentable} node on it's parent chain. If the
+     * provided node is instrumentable itself, it is returned. If not, the first parent node that is
+     * instrumentable is returned, if any.
+     *
+     * @param node a Node
+     * @return the first instrumentable node, or <code>null</code> when no instrumentable parent
+     *         exists.
+     * @since 20.3
+     */
+    static Node findInstrumentableParent(Node node) {
+        Node inode = node;
+        while (inode != null && (inode instanceof WrapperNode || !(inode instanceof InstrumentableNode && ((InstrumentableNode) inode).isInstrumentable()))) {
+            inode = inode.getParent();
+        }
+        assert inode == null || inode instanceof InstrumentableNode && ((InstrumentableNode) inode).isInstrumentable() : inode;
+        assert !(inode instanceof WrapperNode) : inode;
+        return inode;
     }
 
     /**
@@ -527,6 +557,20 @@ class InstrumentableNodeSnippets {
     }
 
     @SuppressWarnings("unused")
+    static class HaltNodeWrapper implements WrapperNode {
+        HaltNodeWrapper(Node node, ProbeNode probe) {
+        }
+
+        public Node getDelegateNode() {
+            return null;
+        }
+
+        public ProbeNode getProbeNode() {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unused")
     // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode
     @GenerateWrapper
     static class HaltNode extends Node implements InstrumentableNode {
@@ -557,7 +601,21 @@ class InstrumentableNodeSnippets {
         }
 
     }
+
     // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode
+    @SuppressWarnings("unused")
+    static class ExpressionNodeWrapper implements WrapperNode {
+        ExpressionNodeWrapper(Node node, ProbeNode probe) {
+        }
+
+        public Node getDelegateNode() {
+            return null;
+        }
+
+        public ProbeNode getProbeNode() {
+            return null;
+        }
+    }
 
     // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode
     @GenerateWrapper

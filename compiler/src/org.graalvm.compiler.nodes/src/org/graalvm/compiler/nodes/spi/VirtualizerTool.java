@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,15 +29,14 @@ import java.util.List;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Node;
+import org.graalvm.compiler.graph.NodeSourcePosition;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.WithExceptionNode;
 import org.graalvm.compiler.nodes.java.MonitorIdNode;
 import org.graalvm.compiler.nodes.virtual.VirtualObjectNode;
 import org.graalvm.compiler.options.OptionValues;
 
-import jdk.vm.ci.meta.ConstantReflectionProvider;
-import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.MetaAccessProvider;
 
 /**
  * This tool can be used to query the current state (normal/virtualized/re-materialized) of values
@@ -45,18 +44,7 @@ import jdk.vm.ci.meta.MetaAccessProvider;
  *
  * See also {@link Virtualizable}.
  */
-public interface VirtualizerTool {
-
-    /**
-     * @return the {@link MetaAccessProvider} associated with the current compilation.
-     */
-    MetaAccessProvider getMetaAccess();
-
-    /**
-     * @return the {@link ConstantReflectionProvider} associated with the current compilation, which
-     *         can be used to access {@link JavaConstant}s.
-     */
-    ConstantReflectionProvider getConstantReflection();
+public interface VirtualizerTool extends CoreProviders {
 
     /**
      * This method should be used to query the maximum size of virtualized objects before attempting
@@ -74,9 +62,10 @@ public interface VirtualizerTool {
      * @param virtualObject the new virtual object.
      * @param entryState the initial state of the virtual object's fields.
      * @param locks the initial locking depths.
+     * @param sourcePosition a source position for the new node or null if none is available
      * @param ensureVirtualized true if this object needs to stay virtual
      */
-    void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks, boolean ensureVirtualized);
+    void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks, NodeSourcePosition sourcePosition, boolean ensureVirtualized);
 
     /**
      * Returns a VirtualObjectNode if the given value is aliased with a virtual object that is still
@@ -95,7 +84,7 @@ public interface VirtualizerTool {
      * @param index the index to be set.
      * @param value the new value for the given index.
      * @param accessKind the kind of the store which might be different than
-     *            {@link VirtualObjectNode#entryKind(int)}.
+     *            {@link VirtualObjectNode#entryKind}.
      * @return true if the operation was permitted
      */
     boolean setVirtualEntry(VirtualObjectNode virtualObject, int index, ValueNode value, JavaKind accessKind, long offset);
@@ -119,7 +108,8 @@ public interface VirtualizerTool {
     // operations on the current node
 
     /**
-     * Deletes the current node and replaces it with the given virtualized object.
+     * Deletes the current node and replaces it with the given virtualized object. If the current
+     * node is a {@link WithExceptionNode}, kills the exception edge.
      *
      * @param virtualObject the virtualized object that should replace the current node.
      */
@@ -133,7 +123,8 @@ public interface VirtualizerTool {
     void replaceWithValue(ValueNode replacement);
 
     /**
-     * Deletes the current node.
+     * Deletes the current node. If the current node is a {@link WithExceptionNode}, kills the
+     * exception edge.
      */
     void delete();
 
@@ -146,12 +137,23 @@ public interface VirtualizerTool {
     void replaceFirstInput(Node oldInput, Node replacement);
 
     /**
-     * Adds the given node to the graph.This action will only be performed when, and if, the changes
-     * are committed.
+     * Adds the given node to the graph. This action will only be performed when, and if, the
+     * changes are committed. This should be used for nodes which have been explicitly created by
+     * the caller. If it's unclear who might have created a node, use
+     * {@link #ensureAdded(ValueNode)}.
      *
      * @param node the node to add.
      */
     void addNode(ValueNode node);
+
+    /**
+     * Adds the given node to the graph. This action will only be performed when, and if, the
+     * changes are committed. This will only add the node if it hasn't already been added when the
+     * changed are committed.
+     *
+     * @param node the node to add.
+     */
+    void ensureAdded(ValueNode node);
 
     /**
      * This method performs either {@link #replaceWithValue(ValueNode)} or
@@ -181,4 +183,12 @@ public interface VirtualizerTool {
     OptionValues getOptions();
 
     DebugContext getDebug();
+
+    /**
+     *
+     * Creates a deep-copy of the VirtualizerTool, snapshotting the current virtual ObjectStates.
+     *
+     * @return new VirtualizerTool, deep-copied from this.
+     */
+    VirtualizerTool createSnapshot();
 }

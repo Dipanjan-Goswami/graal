@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,8 +33,8 @@ import org.graalvm.nativeimage.ImageSingletons;
 
 import com.oracle.svm.core.annotate.AlwaysInline;
 import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.heap.ReferenceMapIndex;
 import com.oracle.svm.core.option.HostedOptionKey;
-import com.oracle.svm.core.util.ByteArrayReader;
 import com.oracle.svm.core.util.Counter;
 import com.oracle.svm.core.util.NonmovableByteArrayReader;
 
@@ -109,10 +109,11 @@ public final class CodeInfoDecoder {
 
         codeInfoQueryResult.encodedFrameSize = sizeEncoding;
         codeInfoQueryResult.exceptionOffset = CodeInfoQueryResult.NO_EXCEPTION_OFFSET;
-        codeInfoQueryResult.referenceMapIndex = CodeInfoQueryResult.NO_REFERENCE_MAP;
+        codeInfoQueryResult.referenceMapIndex = ReferenceMapIndex.NO_REFERENCE_MAP;
         codeInfoQueryResult.frameInfo = CodeInfoQueryResult.NO_FRAME_INFO;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static void lookupCodeInfo(CodeInfo info, long ip, SimpleCodeInfoQueryResult codeInfoQueryResult) {
         long sizeEncoding = initialSizeEncoding();
         long entryIP = lookupEntryIP(ip);
@@ -133,7 +134,7 @@ public final class CodeInfoDecoder {
 
         codeInfoQueryResult.setEncodedFrameSize(sizeEncoding);
         codeInfoQueryResult.setExceptionOffset(CodeInfoQueryResult.NO_EXCEPTION_OFFSET);
-        codeInfoQueryResult.setReferenceMapIndex(CodeInfoQueryResult.NO_REFERENCE_MAP);
+        codeInfoQueryResult.setReferenceMapIndex(ReferenceMapIndex.NO_REFERENCE_MAP);
     }
 
     static long lookupDeoptimizationEntrypoint(CodeInfo info, long method, long encodedBci, CodeInfoQueryResult codeInfo) {
@@ -183,7 +184,7 @@ public final class CodeInfoDecoder {
         return -1;
     }
 
-    static long lookupReferenceMapIndex(CodeInfo info, long ip) {
+    static long lookupStackReferenceMapIndex(CodeInfo info, long ip) {
         long entryIP = lookupEntryIP(ip);
         long entryOffset = loadEntryOffset(info, ip);
         do {
@@ -196,17 +197,20 @@ public final class CodeInfoDecoder {
             entryOffset = advanceOffset(entryOffset, entryFlags);
         } while (entryIP <= ip);
 
-        return CodeInfoQueryResult.NO_REFERENCE_MAP;
+        return ReferenceMapIndex.NO_REFERENCE_MAP;
     }
 
+    @Fold
     static long indexGranularity() {
         return Options.CodeInfoIndexGranularity.getValue();
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static long lookupEntryIP(long ip) {
         return Long.divideUnsigned(ip, indexGranularity()) * indexGranularity();
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long loadEntryOffset(CodeInfo info, long ip) {
         counters().lookupEntryOffsetCount.inc();
         long index = Long.divideUnsigned(ip, indexGranularity());
@@ -214,6 +218,7 @@ public final class CodeInfoDecoder {
     }
 
     @AlwaysInline("Make IP-lookup loop call free")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static int loadEntryFlags(CodeInfo info, long curOffset) {
         counters().loadEntryFlagsCount.inc();
         return NonmovableByteArrayReader.getU1(CodeInfoAccess.getCodeInfoEncodings(info), curOffset);
@@ -221,11 +226,13 @@ public final class CodeInfoDecoder {
 
     private static final int INVALID_SIZE_ENCODING = 0;
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static int initialSizeEncoding() {
         return INVALID_SIZE_ENCODING;
     }
 
     @AlwaysInline("Make IP-lookup loop call free")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long updateSizeEncoding(CodeInfo info, long entryOffset, int entryFlags, long sizeEncoding) {
         switch (extractFS(entryFlags)) {
             case FS_NO_CHANGE:
@@ -241,6 +248,7 @@ public final class CodeInfoDecoder {
         }
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long loadExceptionOffset(CodeInfo info, long entryOffset, int entryFlags) {
         switch (extractEX(entryFlags)) {
             case EX_NO_HANDLER:
@@ -256,12 +264,13 @@ public final class CodeInfoDecoder {
         }
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long loadReferenceMapIndex(CodeInfo info, long entryOffset, int entryFlags) {
         switch (extractRM(entryFlags)) {
             case RM_NO_MAP:
-                return CodeInfoQueryResult.NO_REFERENCE_MAP;
+                return ReferenceMapIndex.NO_REFERENCE_MAP;
             case RM_EMPTY_MAP:
-                return CodeInfoQueryResult.EMPTY_REFERENCE_MAP;
+                return ReferenceMapIndex.EMPTY_REFERENCE_MAP;
             case RM_INDEX_U2:
                 return NonmovableByteArrayReader.getU2(CodeInfoAccess.getCodeInfoEncodings(info), offsetRM(entryOffset, entryFlags));
             case RM_INDEX_U4:
@@ -354,10 +363,11 @@ public final class CodeInfoDecoder {
         }
         int frameInfoIndex = NonmovableByteArrayReader.getS4(CodeInfoAccess.getCodeInfoEncodings(info), offsetFI(entryOffset, entryFlags));
         return FrameInfoDecoder.decodeFrameInfo(isDeoptEntry, new ReusableTypeReader(CodeInfoAccess.getFrameInfoEncodings(info), frameInfoIndex), info,
-                        FrameInfoDecoder.HeapBasedFrameInfoQueryResultAllocator, FrameInfoDecoder.HeapBasedValueInfoAllocator, true);
+                        FrameInfoDecoder.HeapBasedFrameInfoQueryResultAllocator, FrameInfoDecoder.HeapBasedValueInfoAllocator);
     }
 
     @AlwaysInline("Make IP-lookup loop call free")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long advanceIP(CodeInfo info, long entryOffset, long entryIP) {
         int deltaIP = NonmovableByteArrayReader.getU1(CodeInfoAccess.getCodeInfoEncodings(info), offsetIP(entryOffset));
         if (deltaIP == DELTA_END_OF_TABLE) {
@@ -440,14 +450,17 @@ public final class CodeInfoDecoder {
         }
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static int extractFS(int entryFlags) {
         return (entryFlags & FS_MASK_IN_PLACE) >> FS_SHIFT;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static int extractEX(int entryFlags) {
         return (entryFlags & EX_MASK_IN_PLACE) >> EX_SHIFT;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static int extractRM(int entryFlags) {
         return (entryFlags & RM_MASK_IN_PLACE) >> RM_SHIFT;
     }
@@ -456,34 +469,44 @@ public final class CodeInfoDecoder {
         return (entryFlags & FI_MASK_IN_PLACE) >> FI_SHIFT;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long offsetIP(long entryOffset) {
         return entryOffset + IP_OFFSET;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long offsetFS(long entryOffset, int entryFlags) {
         assert extractFS(entryFlags) != FS_NO_CHANGE;
         return entryOffset + FS_OFFSET;
     }
 
-    private static long offsetEX(long entryOffset, int entryFlags) {
-        assert extractEX(entryFlags) != EX_NO_HANDLER;
-        return entryOffset + ByteArrayReader.getU1(EX_OFFSET, entryFlags);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static long getU1(byte[] data, long byteIndex) {
+        return data[(int) byteIndex] & 0xFF;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static long offsetEX(long entryOffset, int entryFlags) {
+        assert extractEX(entryFlags) != EX_NO_HANDLER;
+        return entryOffset + getU1(EX_OFFSET, entryFlags);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long offsetRM(long entryOffset, int entryFlags) {
         assert extractRM(entryFlags) != RM_NO_MAP && extractRM(entryFlags) != RM_EMPTY_MAP;
-        return entryOffset + ByteArrayReader.getU1(RM_OFFSET, entryFlags);
+        return entryOffset + getU1(RM_OFFSET, entryFlags);
     }
 
     private static long offsetFI(long entryOffset, int entryFlags) {
         assert extractFI(entryFlags) != FI_NO_DEOPT;
-        return entryOffset + ByteArrayReader.getU1(FI_OFFSET, entryFlags);
+        return entryOffset + getU1(FI_OFFSET, entryFlags);
     }
 
     @AlwaysInline("Make IP-lookup loop call free")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long advanceOffset(long entryOffset, int entryFlags) {
         counters().advanceOffset.inc();
-        return entryOffset + ByteArrayReader.getU1(MEM_SIZE, entryFlags);
+        return entryOffset + getU1(MEM_SIZE, entryFlags);
     }
 
     @Fold

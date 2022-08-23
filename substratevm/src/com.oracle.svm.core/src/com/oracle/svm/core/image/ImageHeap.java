@@ -26,16 +26,12 @@ package com.oracle.svm.core.image;
 
 import java.util.Collection;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-
-@Platforms(value = Platform.HOSTED_ONLY.class)
 public interface ImageHeap {
     Collection<? extends ImageHeapObject> getObjects();
 
     ImageHeapObject addLateToImageHeap(Object object, String reason);
 
-    ImageHeapObject addFillerObject(int remainingSpace);
+    ImageHeapObject addFillerObject(int size);
 
-    int getMinHeapObjectSize();
+    int countDynamicHubs();
 }

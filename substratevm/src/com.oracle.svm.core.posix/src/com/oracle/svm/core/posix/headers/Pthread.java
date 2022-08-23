@@ -31,6 +31,7 @@ import org.graalvm.nativeimage.c.function.CFunction.Transition;
 import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.struct.CPointerTo;
 import org.graalvm.nativeimage.c.struct.CStruct;
+import org.graalvm.nativeimage.c.type.VoidPointer;
 import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
@@ -77,6 +78,17 @@ public class Pthread {
     public interface pthread_condattr_t extends PointerBase {
     }
 
+    public interface pthread_key_t extends UnsignedWord {
+    }
+
+    @CPointerTo(nameOfCType = "size_t")
+    public interface pthread_key_tPointer extends PointerBase {
+        pthread_key_t read();
+    }
+
+    @CConstant
+    public static native int PTHREAD_KEYS_MAX();
+
     @CConstant
     public static native int PTHREAD_CREATE_JOINABLE();
 
@@ -85,6 +97,9 @@ public class Pthread {
 
     @CFunction
     public static native int pthread_create(pthread_tPointer newthread, pthread_attr_t attr, WordBase start_routine, WordBase arg);
+
+    @CFunction(value = "pthread_create", transition = Transition.NO_TRANSITION)
+    public static native int pthread_create_no_transition(pthread_tPointer newthread, pthread_attr_t attr, WordBase start_routine, WordBase arg);
 
     @CFunction
     public static native int pthread_join(pthread_t th, WordPointer thread_return);
@@ -158,4 +173,16 @@ public class Pthread {
 
     @CFunction
     public static native int pthread_kill(pthread_t thread, Signal.SignalEnum sig);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native int pthread_key_create(pthread_key_tPointer key, PointerBase keyDestructor);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native int pthread_key_delete(pthread_key_t key);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native int pthread_setspecific(pthread_key_t key, VoidPointer value);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native VoidPointer pthread_getspecific(pthread_key_t key);
 }

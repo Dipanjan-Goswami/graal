@@ -35,9 +35,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -45,15 +47,16 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
-import com.oracle.svm.hosted.code.CEntryPointData;
 import org.graalvm.collections.Pair;
 import org.graalvm.compiler.debug.DebugContext;
+import org.graalvm.compiler.phases.util.Providers;
 import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.hosted.Feature.DuringAnalysisAccess;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 import org.graalvm.nativeimage.hosted.RuntimeReflection;
 
 import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.api.UnsafePartitionKind;
+import com.oracle.graal.pointsto.api.DefaultUnsafePartition;
 import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
@@ -61,24 +64,33 @@ import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.core.LinkerInvocation;
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.meta.SharedField;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.core.meta.SubstrateObjectConstant;
+import com.oracle.svm.core.option.SubstrateOptionsParser;
+import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.analysis.Inflation;
 import com.oracle.svm.hosted.c.NativeLibraries;
-import com.oracle.svm.hosted.code.CompilationInfoSupport;
+import com.oracle.svm.hosted.code.CEntryPointData;
+import com.oracle.svm.hosted.code.CompileQueue.CompileTask;
 import com.oracle.svm.hosted.code.SharedRuntimeConfigurationBuilder;
-import com.oracle.svm.hosted.image.AbstractBootImage;
-import com.oracle.svm.hosted.image.AbstractBootImage.NativeImageKind;
+import com.oracle.svm.hosted.image.AbstractImage;
+import com.oracle.svm.hosted.image.AbstractImage.NativeImageKind;
 import com.oracle.svm.hosted.image.NativeImageHeap;
 import com.oracle.svm.hosted.meta.HostedField;
 import com.oracle.svm.hosted.meta.HostedMetaAccess;
+import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.meta.HostedType;
 import com.oracle.svm.hosted.meta.HostedUniverse;
 import com.oracle.svm.hosted.option.HostedOptionProvider;
+import com.oracle.svm.util.GuardedAnnotationAccess;
+import com.oracle.svm.util.ReflectionUtil;
+import com.oracle.svm.util.UnsafePartitionKind;
 
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
@@ -105,7 +117,7 @@ public class FeatureImpl {
 
         @Override
         public Class<?> findClassByName(String className) {
-            return imageClassLoader.findClassByName(className, false);
+            return imageClassLoader.findClass(className).get();
         }
 
         public <T> List<Class<? extends T>> findSubclasses(Class<T> baseClass) {
@@ -131,6 +143,21 @@ public class FeatureImpl {
         public DebugContext getDebugContext() {
             return debugContext;
         }
+
+        @Override
+        public List<Path> getApplicationClassPath() {
+            return imageClassLoader.applicationClassPath();
+        }
+
+        @Override
+        public List<Path> getApplicationModulePath() {
+            return imageClassLoader.applicationModulePath();
+        }
+
+        @Override
+        public ClassLoader getApplicationClassLoader() {
+            return imageClassLoader.getClassLoader();
+        }
     }
 
     public static class IsInConfigurationAccessImpl extends FeatureAccessImpl implements Feature.IsInConfigurationAccess {
@@ -143,7 +170,7 @@ public class FeatureImpl {
         private final MetaAccessProvider metaAccess;
         private Pair<Method, CEntryPointData> mainEntryPoint;
 
-        AfterRegistrationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, Pair<Method, CEntryPointData> mainEntryPoint,
+        public AfterRegistrationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, Pair<Method, CEntryPointData> mainEntryPoint,
                         DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.metaAccess = metaAccess;
@@ -189,7 +216,7 @@ public class FeatureImpl {
         }
 
         public boolean isReachable(AnalysisType type) {
-            return type.isInTypeCheck() || type.isInstantiated();
+            return type.isReachable();
         }
 
         public boolean isReachable(Field field) {
@@ -205,18 +232,16 @@ public class FeatureImpl {
         }
 
         public boolean isReachable(AnalysisMethod method) {
-            return method.isImplementationInvoked();
+            return method.isReachable();
         }
 
         public Set<Class<?>> reachableSubtypes(Class<?> baseClass) {
             return reachableSubtypes(getMetaAccess().lookupJavaType(baseClass)).stream()
-                            .map(AnalysisType::getJavaClass).collect(Collectors.toCollection(LinkedHashSet::new));
+                            .map(AnalysisType::getJavaClass).collect(Collectors.toCollection(HashSet::new));
         }
 
         Set<AnalysisType> reachableSubtypes(AnalysisType baseType) {
-            Set<AnalysisType> result = getUniverse().getSubtypes(baseType);
-            result.removeIf(t -> !isReachable(t));
-            return result;
+            return AnalysisUniverse.reachableSubtypes(baseType);
         }
 
         public Set<Executable> reachableMethodOverrides(Executable baseMethod) {
@@ -225,13 +250,41 @@ public class FeatureImpl {
         }
 
         Set<AnalysisMethod> reachableMethodOverrides(AnalysisMethod baseMethod) {
-            return getUniverse().getMethodImplementations(getBigBang(), baseMethod);
+            return AnalysisUniverse.reachableMethodOverrides(baseMethod);
+        }
+
+        public void rescanObject(Object obj) {
+            getUniverse().getHeapScanner().rescanObject(obj);
+        }
+
+        public void rescanField(Object receiver, Field field) {
+            getUniverse().getHeapScanner().rescanField(receiver, field);
+        }
+
+        public void rescanRoot(Field field) {
+            getUniverse().getHeapScanner().rescanRoot(field);
+        }
+
+        public Field findField(String declaringClassName, String fieldName) {
+            return findField(imageClassLoader.findClassOrFail(declaringClassName), fieldName);
+        }
+
+        public Field findField(Class<?> declaringClass, String fieldName) {
+            return ReflectionUtil.lookupField(declaringClass, fieldName);
+        }
+
+        public void ensureInitialized(String className) {
+            try {
+                imageClassLoader.forName(className, true);
+            } catch (ClassNotFoundException e) {
+                throw VMError.shouldNotReachHere(e);
+            }
         }
     }
 
     public static class DuringSetupAccessImpl extends AnalysisAccessBase implements Feature.DuringSetupAccess {
 
-        DuringSetupAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
+        public DuringSetupAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, bb, debugContext);
         }
 
@@ -273,10 +326,14 @@ public class FeatureImpl {
     public static class BeforeAnalysisAccessImpl extends AnalysisAccessBase implements Feature.BeforeAnalysisAccess {
 
         private final NativeLibraries nativeLibraries;
+        private final boolean concurrentReachabilityHandlers;
+        private final ReachabilityHandler reachabilityHandler;
 
-        BeforeAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, NativeLibraries nativeLibraries, DebugContext debugContext) {
+        public BeforeAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, NativeLibraries nativeLibraries, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, bb, debugContext);
             this.nativeLibraries = nativeLibraries;
+            this.concurrentReachabilityHandlers = SubstrateOptions.RunReachabilityHandlersConcurrently.getValue(bb.getOptions());
+            this.reachabilityHandler = concurrentReachabilityHandlers ? ConcurrentReachabilityHandler.singleton() : ReachabilityHandlerFeature.singleton();
         }
 
         public NativeLibraries getNativeLibraries() {
@@ -289,7 +346,7 @@ public class FeatureImpl {
         }
 
         public void registerAsUsed(AnalysisType aType) {
-            aType.registerAsInTypeCheck();
+            bb.markTypeReachable(aType);
         }
 
         @Override
@@ -298,77 +355,63 @@ public class FeatureImpl {
         }
 
         public void registerAsInHeap(AnalysisType aType) {
-            aType.registerAsInHeap();
+            bb.markTypeInHeap(aType);
         }
 
         @Override
         public void registerAsAccessed(Field field) {
+            registerAsUsed(getMetaAccess().lookupJavaType(field.getDeclaringClass()));
             registerAsAccessed(getMetaAccess().lookupJavaField(field));
         }
 
         public void registerAsAccessed(AnalysisField aField) {
-            aField.registerAsAccessed();
+            bb.markFieldAccessed(aField);
+        }
+
+        public void registerAsRead(Field field) {
+            getMetaAccess().lookupJavaType(field.getDeclaringClass()).registerAsReachable();
+            registerAsRead(getMetaAccess().lookupJavaField(field));
         }
 
         public void registerAsRead(AnalysisField aField) {
-            aField.registerAsRead(null);
+            bb.markFieldRead(aField);
         }
 
         @Override
         public void registerAsUnsafeAccessed(Field field) {
+            registerAsUsed(getMetaAccess().lookupJavaType(field.getDeclaringClass()));
             registerAsUnsafeAccessed(getMetaAccess().lookupJavaField(field));
         }
 
         public boolean registerAsUnsafeAccessed(AnalysisField aField) {
-            if (!aField.isUnsafeAccessed()) {
-                /* Register the field as unsafe accessed. */
-                aField.registerAsAccessed();
-                aField.registerAsUnsafeAccessed();
-                /* Force the update of registered unsafe loads and stores. */
-                bb.forceUnsafeUpdate(aField);
-                return true;
-            }
-            return false;
-        }
-
-        public void registerAsFrozenUnsafeAccessed(Field field) {
-            registerAsFrozenUnsafeAccessed(getMetaAccess().lookupJavaField(field));
-        }
-
-        public void registerAsFrozenUnsafeAccessed(AnalysisField aField) {
-            aField.setUnsafeFrozenTypeState(true);
-            registerAsUnsafeAccessed(aField);
+            return registerAsUnsafeAccessed(aField, DefaultUnsafePartition.get());
         }
 
         public void registerAsUnsafeAccessed(Field field, UnsafePartitionKind partitionKind) {
             registerAsUnsafeAccessed(getMetaAccess().lookupJavaField(field), partitionKind);
         }
 
-        public void registerAsUnsafeAccessed(AnalysisField aField, UnsafePartitionKind partitionKind) {
-            if (!aField.isUnsafeAccessed()) {
-                /* Register the field as unsafe accessed. */
-                aField.registerAsAccessed();
-                aField.registerAsUnsafeAccessed(partitionKind);
-                /* Force the update of registered unsafe loads and stores. */
-                bb.forceUnsafeUpdate(aField);
-            }
+        public boolean registerAsUnsafeAccessed(AnalysisField aField, UnsafePartitionKind partitionKind) {
+            assert !GuardedAnnotationAccess.isAnnotationPresent(aField, Delete.class);
+            return bb.registerAsUnsafeAccessed(aField, partitionKind);
         }
 
-        public void registerAsInvoked(Executable method) {
-            registerAsInvoked(getMetaAccess().lookupJavaMethod(method));
+        public void registerAsFrozenUnsafeAccessed(Field field) {
+            registerAsUsed(getMetaAccess().lookupJavaType(field.getDeclaringClass()));
+            registerAsFrozenUnsafeAccessed(getMetaAccess().lookupJavaField(field));
         }
 
-        public void registerAsInvoked(AnalysisMethod aMethod) {
-            bb.addRootMethod(aMethod).registerAsImplementationInvoked(null);
+        public void registerAsFrozenUnsafeAccessed(AnalysisField aField) {
+            bb.registerAsFrozenUnsafeAccessed(aField);
+            registerAsUnsafeAccessed(aField);
         }
 
-        public void registerAsCompiled(Executable method) {
-            registerAsCompiled(getMetaAccess().lookupJavaMethod(method));
+        public void registerAsRoot(Executable method, boolean invokeSpecial) {
+            bb.addRootMethod(method, invokeSpecial);
         }
 
-        public void registerAsCompiled(AnalysisMethod aMethod) {
-            registerAsInvoked(aMethod);
-            CompilationInfoSupport.singleton().registerForcedCompilation(aMethod);
+        public void registerAsRoot(AnalysisMethod aMethod, boolean invokeSpecial) {
+            bb.addRootMethod(aMethod, invokeSpecial);
         }
 
         public void registerUnsafeFieldsRecomputed(Class<?> clazz) {
@@ -385,17 +428,31 @@ public class FeatureImpl {
 
         @Override
         public void registerReachabilityHandler(Consumer<DuringAnalysisAccess> callback, Object... elements) {
-            ReachabilityHandlerFeature.singleton().registerReachabilityHandler(this, callback, elements);
+            reachabilityHandler.registerReachabilityHandler(this, callback, elements);
         }
 
         @Override
         public void registerMethodOverrideReachabilityHandler(BiConsumer<DuringAnalysisAccess, Executable> callback, Executable baseMethod) {
-            ReachabilityHandlerFeature.singleton().registerMethodOverrideReachabilityHandler(this, callback, baseMethod);
+            reachabilityHandler.registerMethodOverrideReachabilityHandler(this, callback, baseMethod);
         }
 
         @Override
         public void registerSubtypeReachabilityHandler(BiConsumer<DuringAnalysisAccess, Class<?>> callback, Class<?> baseClass) {
-            ReachabilityHandlerFeature.singleton().registerSubtypeReachabilityHandler(this, callback, baseClass);
+            reachabilityHandler.registerSubtypeReachabilityHandler(this, callback, baseClass);
+        }
+
+        @Override
+        public void registerClassInitializerReachabilityHandler(Consumer<DuringAnalysisAccess> callback, Class<?> clazz) {
+            reachabilityHandler.registerClassInitializerReachabilityHandler(this, callback, clazz);
+        }
+
+        public boolean concurrentReachabilityHandlers() {
+            return concurrentReachabilityHandlers;
+        }
+
+        @Override
+        public void registerFieldValueTransformer(Field field, FieldValueTransformer transformer) {
+            bb.getAnnotationSubstitutionProcessor().registerFieldValueTransformer(field, transformer);
         }
     }
 
@@ -403,7 +460,7 @@ public class FeatureImpl {
 
         private boolean requireAnalysisIteration;
 
-        DuringAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, NativeLibraries nativeLibraries, DebugContext debugContext) {
+        public DuringAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, NativeLibraries nativeLibraries, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, bb, nativeLibraries, debugContext);
         }
 
@@ -417,17 +474,52 @@ public class FeatureImpl {
             requireAnalysisIteration = false;
             return result;
         }
+
+    }
+
+    public static class ConcurrentAnalysisAccessImpl extends DuringAnalysisAccessImpl {
+
+        private static final String concurrentReachabilityOption = SubstrateOptionsParser.commandArgument(SubstrateOptions.RunReachabilityHandlersConcurrently, "-");
+
+        public ConcurrentAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, NativeLibraries nativeLibraries, DebugContext debugContext) {
+            super(featureHandler, imageClassLoader, bb, nativeLibraries, debugContext);
+        }
+
+        @Override
+        public void requireAnalysisIteration() {
+            if (bb.executorIsStarted()) {
+                String msg = "Calling DuringAnalysisAccessImpl.requireAnalysisIteration() is not necessary when running the reachability handlers concurrently during analysis. " +
+                                "To fallback to running the reachability handlers sequentially, i.e., from Feature.duringAnalysis(), you can add the " + concurrentReachabilityOption +
+                                " option to the native-image command. Note that the fallback option is deprecated and it will be removed in a future release.";
+                throw VMError.shouldNotReachHere(msg);
+            }
+            super.requireAnalysisIteration();
+        }
+
     }
 
     public static class AfterAnalysisAccessImpl extends AnalysisAccessBase implements Feature.AfterAnalysisAccess {
-        AfterAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
+        public AfterAnalysisAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, bb, debugContext);
         }
     }
 
     public static class OnAnalysisExitAccessImpl extends AnalysisAccessBase implements Feature.OnAnalysisExitAccess {
-        OnAnalysisExitAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
+        public OnAnalysisExitAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, Inflation bb, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, bb, debugContext);
+        }
+    }
+
+    public static class BeforeUniverseBuildingAccessImpl extends FeatureAccessImpl implements Feature.BeforeUniverseBuildingAccess {
+        protected final HostedMetaAccess hMetaAccess;
+
+        BeforeUniverseBuildingAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, DebugContext debugContext, HostedMetaAccess hMetaAccess) {
+            super(featureHandler, imageClassLoader, debugContext);
+            this.hMetaAccess = hMetaAccess;
+        }
+
+        public HostedMetaAccess getMetaAccess() {
+            return hMetaAccess;
         }
     }
 
@@ -435,16 +527,20 @@ public class FeatureImpl {
 
         protected final AnalysisUniverse aUniverse;
         protected final HostedUniverse hUniverse;
-        protected final HostedMetaAccess hMetaAccess;
         protected final NativeImageHeap heap;
+        protected final SharedRuntimeConfigurationBuilder runtimeBuilder;
 
-        CompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse, HostedMetaAccess hMetaAccess,
-                        NativeImageHeap heap, DebugContext debugContext) {
+        CompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse, NativeImageHeap heap, DebugContext debugContext,
+                        SharedRuntimeConfigurationBuilder runtimeBuilder) {
             super(featureHandler, imageClassLoader, debugContext);
             this.aUniverse = aUniverse;
             this.hUniverse = hUniverse;
-            this.hMetaAccess = hMetaAccess;
+            this.runtimeBuilder = runtimeBuilder;
             this.heap = heap;
+        }
+
+        public NativeLibraries getNativeLibraries() {
+            return runtimeBuilder.getNativeLibraries();
         }
 
         @Override
@@ -509,7 +605,11 @@ public class FeatureImpl {
         }
 
         public HostedMetaAccess getMetaAccess() {
-            return hMetaAccess;
+            return (HostedMetaAccess) getProviders().getMetaAccess();
+        }
+
+        public Providers getProviders() {
+            return runtimeBuilder.getRuntimeConfig().getProviders();
         }
 
         public HostedUniverse getUniverse() {
@@ -530,12 +630,10 @@ public class FeatureImpl {
     }
 
     public static class BeforeCompilationAccessImpl extends CompilationAccessImpl implements Feature.BeforeCompilationAccess {
-        SharedRuntimeConfigurationBuilder runtimeBuilder;
 
-        BeforeCompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse, HostedMetaAccess hMetaAccess,
-                        NativeImageHeap heap, DebugContext debugContext, SharedRuntimeConfigurationBuilder runtime) {
-            super(featureHandler, imageClassLoader, aUniverse, hUniverse, hMetaAccess, heap, debugContext);
-            runtimeBuilder = runtime;
+        public BeforeCompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse,
+                        NativeImageHeap heap, DebugContext debugContext, SharedRuntimeConfigurationBuilder runtimeBuilder) {
+            super(featureHandler, imageClassLoader, aUniverse, hUniverse, heap, debugContext, runtimeBuilder);
         }
 
         public SharedRuntimeConfigurationBuilder getRuntimeBuilder() {
@@ -544,22 +642,39 @@ public class FeatureImpl {
     }
 
     public static class AfterCompilationAccessImpl extends CompilationAccessImpl implements Feature.AfterCompilationAccess {
-        AfterCompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse, HostedMetaAccess hMetaAccess,
-                        NativeImageHeap heap, DebugContext debugContext) {
-            super(featureHandler, imageClassLoader, aUniverse, hUniverse, hMetaAccess, heap, debugContext);
+        private final Map<HostedMethod, CompileTask> compilations;
+
+        public AfterCompilationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, AnalysisUniverse aUniverse, HostedUniverse hUniverse,
+                        Map<HostedMethod, CompileTask> compilations, NativeImageHeap heap, DebugContext debugContext, SharedRuntimeConfigurationBuilder runtimeBuilder) {
+            super(featureHandler, imageClassLoader, aUniverse, hUniverse, heap, debugContext, runtimeBuilder);
+            this.compilations = compilations;
+        }
+
+        public Collection<CompileTask> getCompilationTasks() {
+            return compilations.values();
+        }
+
+        public Map<HostedMethod, CompileTask> getCompilations() {
+            return compilations;
         }
     }
 
     public static class AfterHeapLayoutAccessImpl extends FeatureAccessImpl implements Feature.AfterHeapLayoutAccess {
         protected final HostedMetaAccess hMetaAccess;
+        protected final NativeImageHeap heap;
 
-        AfterHeapLayoutAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedMetaAccess hMetaAccess, DebugContext debugContext) {
+        public AfterHeapLayoutAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, NativeImageHeap heap, HostedMetaAccess hMetaAccess, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
+            this.heap = heap;
             this.hMetaAccess = hMetaAccess;
         }
 
         public HostedMetaAccess getMetaAccess() {
             return hMetaAccess;
+        }
+
+        public NativeImageHeap getHeap() {
+            return heap;
         }
     }
 
@@ -567,14 +682,14 @@ public class FeatureImpl {
         private List<Function<LinkerInvocation, LinkerInvocation>> linkerInvocationTransformers = null;
 
         protected final String imageName;
-        protected final AbstractBootImage image;
+        protected final AbstractImage image;
         protected final RuntimeConfiguration runtimeConfig;
         protected final AnalysisUniverse aUniverse;
         protected final HostedUniverse hUniverse;
         protected final HostedOptionProvider optionProvider;
         protected final HostedMetaAccess hMetaAccess;
 
-        BeforeImageWriteAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, String imageName, AbstractBootImage image, RuntimeConfiguration runtimeConfig,
+        BeforeImageWriteAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, String imageName, AbstractImage image, RuntimeConfiguration runtimeConfig,
                         AnalysisUniverse aUniverse, HostedUniverse hUniverse, HostedOptionProvider optionProvider, HostedMetaAccess hMetaAccess, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.imageName = imageName;
@@ -590,7 +705,7 @@ public class FeatureImpl {
             return imageName;
         }
 
-        public AbstractBootImage getImage() {
+        public AbstractImage getImage() {
             return image;
         }
 
@@ -627,15 +742,16 @@ public class FeatureImpl {
 
     public static class AfterImageWriteAccessImpl extends FeatureAccessImpl implements Feature.AfterImageWriteAccess {
         private final HostedUniverse hUniverse;
-        protected final Path imagePath;
+        protected final LinkerInvocation linkerInvocation;
         protected final Path tempDirectory;
         protected final NativeImageKind imageKind;
 
-        AfterImageWriteAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedUniverse hUniverse, Path imagePath, Path tempDirectory, NativeImageKind imageKind,
+        AfterImageWriteAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedUniverse hUniverse, LinkerInvocation linkerInvocation, Path tempDirectory,
+                        NativeImageKind imageKind,
                         DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.hUniverse = hUniverse;
-            this.imagePath = imagePath;
+            this.linkerInvocation = linkerInvocation;
             this.tempDirectory = tempDirectory;
             this.imageKind = imageKind;
         }
@@ -646,7 +762,7 @@ public class FeatureImpl {
 
         @Override
         public Path getImagePath() {
-            return imagePath;
+            return linkerInvocation.getOutputFile();
         }
 
         public Path getTempDirectory() {
@@ -655,6 +771,10 @@ public class FeatureImpl {
 
         public NativeImageKind getImageKind() {
             return imageKind;
+        }
+
+        public List<String> getImageSymbols(boolean onlyGlobal) {
+            return linkerInvocation.getImageSymbols(onlyGlobal);
         }
     }
 }

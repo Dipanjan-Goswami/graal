@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,18 +26,18 @@ package org.graalvm.compiler.nodes;
 
 import static org.graalvm.compiler.nodeinfo.InputType.Association;
 import static org.graalvm.compiler.nodeinfo.NodeCycles.CYCLES_0;
-import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_0;
+import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_4;
 
 import org.graalvm.compiler.graph.IterableNodeType;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeClass;
 import org.graalvm.compiler.graph.iterators.NodeIterable;
-import org.graalvm.compiler.graph.spi.Simplifiable;
-import org.graalvm.compiler.graph.spi.SimplifierTool;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
+import org.graalvm.compiler.nodes.spi.Simplifiable;
+import org.graalvm.compiler.nodes.spi.SimplifierTool;
 import org.graalvm.compiler.nodes.util.GraphUtil;
 
-@NodeInfo(allowedUsageTypes = {Association}, cycles = CYCLES_0, size = SIZE_0)
+@NodeInfo(allowedUsageTypes = {Association}, cycles = CYCLES_0, size = SIZE_4)
 public final class LoopExitNode extends BeginStateSplitNode implements IterableNodeType, Simplifiable {
 
     public static final NodeClass<LoopExitNode> TYPE = NodeClass.create(LoopExitNode.class);
@@ -57,6 +57,11 @@ public final class LoopExitNode extends BeginStateSplitNode implements IterableN
 
     public LoopBeginNode loopBegin() {
         return (LoopBeginNode) loopBegin;
+    }
+
+    public void setLoopBegin(AbstractBeginNode loopBegin) {
+        updateUsages(this.loopBegin, loopBegin);
+        this.loopBegin = loopBegin;
     }
 
     @Override
@@ -104,9 +109,17 @@ public final class LoopExitNode extends BeginStateSplitNode implements IterableN
     }
 
     public void removeExit() {
+        removeExit(false);
+    }
+
+    public void removeExit(boolean forKillCFG) {
         this.removeProxies();
         FrameState loopStateAfter = this.stateAfter();
-        graph().replaceFixedWithFixed(this, graph().add(new BeginNode()));
+        if (!forKillCFG || predecessor() != null) {
+            // When killing control flow, don't replace this node with a BeginNode if it appears
+            // this node is soon to be killed because it's missing a predecessor
+            graph().replaceFixedWithFixed(this, graph().add(new BeginNode()));
+        }
         if (loopStateAfter != null) {
             GraphUtil.tryKillUnused(loopStateAfter);
         }
@@ -117,9 +130,31 @@ public final class LoopExitNode extends BeginStateSplitNode implements IterableN
         Node prev = this.predecessor();
         while (tool.allUsagesAvailable() && prev instanceof BeginNode && prev.hasNoUsages()) {
             AbstractBeginNode begin = (AbstractBeginNode) prev;
-            this.setNodeSourcePosition(begin.getNodeSourcePosition());
-            prev = prev.predecessor();
-            graph().removeFixed(begin);
+            // Keep a single BeginNode in between LoopExitNodes and InvokeWithExceptionNodes
+            if (!(prev.predecessor() instanceof InvokeWithExceptionNode)) {
+                this.setNodeSourcePosition(begin.getNodeSourcePosition());
+                graph().removeFixed(begin);
+                prev = prev.predecessor();
+            } else {
+                break;
+            }
         }
+    }
+
+    @Override
+    public boolean verify() {
+        /*
+         * State verification for loop exits is special in that loop exits with exception handling
+         * BCIs must not survive until code generation, thus they are cleared shortly before frame
+         * state assignment, thus we only verify them until their removal
+         */
+        assert !this.graph().getGraphState().getFrameStateVerification().implies(GraphState.FrameStateVerificationFeature.LOOP_EXITS) ||
+                        this.stateAfter != null : "Loop exit must have a state until FSA " + this;
+
+        // Because the scheduler doesn't schedule ProxyNodes, the inputs to the ProxyNode can end up
+        // in the wrong place in the earliest local schedule. Ensuring there's a BeginNode before
+        // the LoopExitNode creates an earlier location where those nodes can be scheduled.
+        assert !(predecessor() instanceof InvokeWithExceptionNode);
+        return super.verify();
     }
 }

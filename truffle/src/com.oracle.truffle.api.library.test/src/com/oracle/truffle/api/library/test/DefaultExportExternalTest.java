@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.api.library.test;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import static org.junit.Assert.assertEquals;
 
 import java.util.Arrays;
@@ -180,6 +181,7 @@ public class DefaultExportExternalTest extends AbstractParametrizedLibraryTest {
     public static class ObjectExport {
         @ExportMessage
         static String m0(@SuppressWarnings("unused") Object receiver) {
+            CompilerDirectives.transferToInterpreter();
             throw new AssertionError();
         }
     }

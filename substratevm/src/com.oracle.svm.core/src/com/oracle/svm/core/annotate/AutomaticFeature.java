@@ -29,11 +29,19 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+
 /**
+ * Supported API is available to replace this non-API annotation: Instead of using this annotation,
+ * use {@code "--features <fqn.of.FeatureClass>"} in the {@code Args} of a
+ * {@code native-image.properties} file to ensure a user-provided feature gets processed.
+ *
  * Feature classes can use this annotation are unconditionally added when they are reachable on the
  * class path.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.TYPE})
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface AutomaticFeature {
 }

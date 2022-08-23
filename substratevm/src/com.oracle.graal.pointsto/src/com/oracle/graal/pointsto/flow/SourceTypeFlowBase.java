@@ -24,11 +24,12 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
+import com.oracle.graal.pointsto.util.AnalysisError;
+
+import jdk.vm.ci.code.BytecodePosition;
 
 /**
  * The all-instantiated type state is defined as the maximum state that is allowed. If our type was
@@ -53,35 +54,40 @@ import com.oracle.graal.pointsto.typestate.TypeState;
  * case that type can never be returned by this flow (and the only possible value is null, which is
  * set regardless of the type update).
  */
-public abstract class SourceTypeFlowBase extends TypeFlow<ValueNode> {
+public abstract class SourceTypeFlowBase extends TypeFlow<BytecodePosition> {
 
     /**
      * The source state is a temporary buffer for this flow's type state. The source state is added
      * to the flow, and propagated to its uses, only when its exact type is added to the
      * all-instantiated type state.
      */
-    protected final TypeState sourceState;
+    protected TypeState sourceState;
 
-    public SourceTypeFlowBase(ValueNode node, TypeState state) {
-        this(node, state.exactType(), state);
+    public SourceTypeFlowBase(BytecodePosition position, TypeState state) {
+        this(position, state.exactType(), state);
     }
 
-    public SourceTypeFlowBase(ValueNode node, AnalysisType declaredType, TypeState state) {
-        super(node, declaredType);
+    public SourceTypeFlowBase(BytecodePosition position, AnalysisType declaredType, TypeState state) {
+        super(position, declaredType);
         this.sourceState = state;
+        assert source != null;
     }
 
-    public SourceTypeFlowBase(BigBang bb, SourceTypeFlowBase original, MethodFlowsGraph methodFlows) {
+    public SourceTypeFlowBase(PointsToAnalysis bb, SourceTypeFlowBase original, MethodFlowsGraph methodFlows) {
         this(bb, original, methodFlows, original.sourceState);
     }
 
-    public SourceTypeFlowBase(@SuppressWarnings("unused") BigBang bb, SourceTypeFlowBase original, MethodFlowsGraph methodFlows, TypeState state) {
+    public SourceTypeFlowBase(@SuppressWarnings("unused") PointsToAnalysis bb, SourceTypeFlowBase original, MethodFlowsGraph methodFlows, TypeState state) {
         super(original, methodFlows);
         this.sourceState = state;
     }
 
+    public void setSourceState(TypeState sourceState) {
+        this.sourceState = sourceState;
+    }
+
     @Override
-    public void initClone(BigBang bb) {
+    public void initFlow(PointsToAnalysis bb) {
         /* When the clone is linked check if the all-instantiated contains the source state type. */
         if (sourceState.isNull() || sourceState.isEmpty() || bb.getAllInstantiatedTypeFlow().getState().containsType(sourceState.exactType())) {
             /* If yes, set the state and propagate it to uses. */
@@ -97,7 +103,7 @@ public abstract class SourceTypeFlowBase extends TypeFlow<ValueNode> {
     }
 
     @Override
-    public void onObservedUpdate(BigBang bb) {
+    public void onObservedUpdate(PointsToAnalysis bb) {
         /* When the all-instantiated changes it will notify the source flow. */
         if (bb.getAllInstantiatedTypeFlow().getState().containsType(sourceState.exactType())) {
             /* The source state type was instantiated. */
@@ -109,15 +115,23 @@ public abstract class SourceTypeFlowBase extends TypeFlow<ValueNode> {
     }
 
     @Override
-    public boolean addState(BigBang bb, TypeState add) {
-        /* Only a clone should be updated */
-        assert this.isClone();
-        return super.addState(bb, add);
+    public void onObservedSaturated(PointsToAnalysis bb, TypeFlow<?> observed) {
+        AnalysisError.shouldNotReachHere("NewInstanceTypeFlow cannot saturate.");
     }
 
     @Override
-    public void update(BigBang bb) {
-        assert !getState().isEmpty() : "why update when state is still empty?";
-        super.update(bb);
+    protected void onInputSaturated(PointsToAnalysis bb, TypeFlow<?> input) {
+        AnalysisError.shouldNotReachHere("NewInstanceTypeFlow cannot saturate.");
     }
+
+    @Override
+    protected void onSaturated(PointsToAnalysis bb) {
+        AnalysisError.shouldNotReachHere("NewInstanceTypeFlow cannot saturate.");
+    }
+
+    @Override
+    public boolean canSaturate() {
+        return false;
+    }
+
 }

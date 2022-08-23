@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2020, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,9 +29,15 @@
  */
 package com.oracle.truffle.llvm.parser.factories;
 
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.llvm.parser.factories.inlineasm.UnknownInlineAssemblyParser;
 import com.oracle.truffle.llvm.runtime.LLVMSyscallEntry;
 import com.oracle.truffle.llvm.runtime.memory.LLVMSyscallOperationNode;
 import com.oracle.truffle.llvm.runtime.nodes.asm.syscall.LLVMUnsupportedSyscallNode;
+import com.oracle.truffle.llvm.runtime.nodes.intrinsics.llvm.va.LLVMVAListNode;
+import com.oracle.truffle.llvm.runtime.nodes.intrinsics.llvm.va.LLVMVaListStorage.VAListPointerWrapperFactory;
+import com.oracle.truffle.llvm.runtime.pointer.LLVMPointer;
+import com.oracle.truffle.llvm.runtime.types.Type;
 
 /**
  * Fallback implementation for unknown platforms.
@@ -45,12 +51,12 @@ final class UnknownBasicPlatformCapability extends BasicPlatformCapability<Unkno
         /* DUMMY */;
         @Override
         public int value() {
-            throw new UnsupportedOperationException();
+            throw CompilerDirectives.shouldNotReachHere();
         }
     }
 
     UnknownBasicPlatformCapability(boolean loadCxxLibraries) {
-        super(UnknownSyscalls.class, loadCxxLibraries);
+        super(UnknownSyscalls.class, loadCxxLibraries, new UnknownInlineAssemblyParser());
     }
 
     @Override
@@ -60,6 +66,26 @@ final class UnknownBasicPlatformCapability extends BasicPlatformCapability<Unkno
 
     @Override
     protected LLVMSyscallOperationNode createSyscallNode(UnknownSyscalls syscall) {
-        throw new UnsupportedOperationException("Should not reach.");
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    @Override
+    public Object createVAListStorage(LLVMVAListNode allocaNode, LLVMPointer vaListStackPtr, Type vaListType) {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    @Override
+    public Type getGlobalVAListType(Type type) {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    @Override
+    public VAListPointerWrapperFactory createNativeVAListWrapper(boolean cached) {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    @Override
+    public OS getOS() {
+        throw CompilerDirectives.shouldNotReachHere();
     }
 }

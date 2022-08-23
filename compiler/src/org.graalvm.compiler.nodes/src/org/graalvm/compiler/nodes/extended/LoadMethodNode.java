@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,16 +32,17 @@ import org.graalvm.compiler.core.common.type.TypeReference;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.graph.spi.Canonicalizable;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
+import org.graalvm.compiler.nodes.spi.Canonicalizable;
+import org.graalvm.compiler.nodes.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.ConstantNode;
 import org.graalvm.compiler.nodes.FixedWithNextNode;
 import org.graalvm.compiler.nodes.NodeView;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.memory.MemoryAccess;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.compiler.nodes.type.StampTool;
+import org.graalvm.word.LocationIdentity;
 
 import jdk.vm.ci.meta.Assumptions;
 import jdk.vm.ci.meta.Assumptions.AssumptionResult;
@@ -53,7 +54,7 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * Loads a method from the virtual method table of a given hub.
  */
 @NodeInfo(cycles = CYCLES_2, size = SIZE_1)
-public final class LoadMethodNode extends FixedWithNextNode implements Lowerable, Canonicalizable {
+public final class LoadMethodNode extends FixedWithNextNode implements Lowerable, Canonicalizable, MemoryAccess {
 
     public static final NodeClass<LoadMethodNode> TYPE = NodeClass.create(LoadMethodNode.class);
     @Input ValueNode hub;
@@ -75,16 +76,10 @@ public final class LoadMethodNode extends FixedWithNextNode implements Lowerable
         this.callerType = callerType;
         this.hub = hub;
         this.method = method;
-        assert method.isConcrete() : "Cannot load abstract method from a hub";
         assert method.hasReceiver() : "Cannot load a static method from a hub";
         if (!method.isInVirtualMethodTable(receiverType)) {
             throw new GraalError("%s does not have a vtable entry in type %s", method, receiverType);
         }
-    }
-
-    @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
     }
 
     @Override
@@ -143,5 +138,10 @@ public final class LoadMethodNode extends FixedWithNextNode implements Lowerable
 
     public ResolvedJavaType getCallerType() {
         return callerType;
+    }
+
+    @Override
+    public LocationIdentity getLocationIdentity() {
+        return LocationIdentity.ANY_LOCATION;
     }
 }

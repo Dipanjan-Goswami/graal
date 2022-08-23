@@ -29,8 +29,11 @@
 # ----------------------------------------------------------------------------------------------------
 
 import os
-from os.path import exists
+from os.path import exists, join
 import re
+import tempfile
+import shutil
+import glob
 
 import mx
 
@@ -135,16 +138,65 @@ def checkLinks(javadocDir):
     if err:
         mx.abort('There are wrong references in Javadoc')
 
+def lsp_types_gen(args):
+    """generate Language Server Protocol types"""
+    generators_dir = join(_suite.dir, 'generators')
+    out = join(_suite.get_output_root(), 'lsp-types')
+    if exists(out):
+        mx.rmtree(out)
+    mx.run(['npm', 'install'], nonZeroIsFatal=True, cwd=generators_dir)
+    mx.run(['npm', 'run', 'compile'], nonZeroIsFatal=True, cwd=generators_dir)
+    repository = open(join(generators_dir, 'resources', 'LSP_REPOSITORY'), 'r').read()
+    branch = open(join(generators_dir, 'resources', 'LSP_VERSION'), 'r').read()
+    tmpdir = tempfile.mkdtemp()
+    catfile = open(join(tmpdir, 'lsp.ts'), 'w')
+    mx.run(['git', 'clone', '-b', branch, repository, 'lib'], nonZeroIsFatal=True, cwd=tmpdir)
+    spec_files = glob.glob(join(tmpdir, 'lib/types/src/*.ts'))
+    spec_files.extend(glob.glob(join(tmpdir, 'lib/jsonrpc/src/*.ts')))
+    spec_files.extend(glob.glob(join(tmpdir, 'lib/protocol/src/*.ts')))
+    for file_name in spec_files:
+        with open(file_name, 'r') as input_file:
+            shutil.copyfileobj(input_file, catfile)
+        catfile.flush()
+    pkg = open(join(generators_dir, 'resources', 'LSP_PACKAGE'), 'r').read()
+    mx.run(['node', 'out/generator.js', '--source', catfile.name, '--target', out, '--suffixNested', '--pkg', pkg, '--license', 'resources/LSP_license.txt'], nonZeroIsFatal=True, cwd=generators_dir)
+    mx.rmtree(tmpdir)
+    mx.run(['patch', '-p1', '-s', '-i', join(generators_dir, 'resources', 'LSP_patch.diff')], nonZeroIsFatal=True, cwd=out)
+    mx.log('LSP types generated to: ' + out)
+
+def dap_types_gen(args):
+    """generate Debug Adapter Protocol types"""
+    generators_dir = join(_suite.dir, 'generators')
+    out = join(_suite.get_output_root(), 'dap-types')
+    if exists(out):
+        mx.rmtree(out)
+    mx.run(['npm', 'install'], nonZeroIsFatal=True, cwd=generators_dir)
+    mx.run(['npm', 'run', 'compile'], nonZeroIsFatal=True, cwd=generators_dir)
+    repository = open(join(generators_dir, 'resources', 'DAP_REPOSITORY'), 'r').read()
+    tmpdir = tempfile.mkdtemp()
+    catfile = open(join(tmpdir, 'dap.ts'), 'wt')
+    mx.run(['git', 'clone', repository, 'lib'], nonZeroIsFatal=True, cwd=tmpdir)
+    spec_files = glob.glob(join(tmpdir, 'lib/protocol/src/*.ts'))
+    for file_name in spec_files:
+        with open(file_name, 'rt') as input_file:
+            for line in input_file:
+                catfile.write(line.replace('// type:', 'type:').replace('// command:', 'command:').replace('// event:', 'event:'))
+        catfile.flush()
+    pkg = open(join(generators_dir, 'resources', 'DAP_PACKAGE'), 'r').read()
+    mx.run(['node', 'out/generator.js', '--source', catfile.name, '--target', out, '--prefixNested', '--pkg', pkg, '--license', 'resources/DAP_license.txt'], nonZeroIsFatal=True, cwd=generators_dir)
+    mx.rmtree(tmpdir)
+    mx.run(['patch', '-p1', '-s', '-i', join(generators_dir, 'resources', 'DAP_patch.diff')], nonZeroIsFatal=True, cwd=out)
+    mx.log('DAP types generated to: ' + out)
+
 def _unittest_config_participant(config):
     vmArgs, mainClass, mainClassArgs = config
-    if mx.get_jdk(tag='default').javaCompliance > '1.8':
-        # This is required to access jdk.internal.module.Modules which
-        # in turn allows us to dynamically open fields/methods to reflection.
-        vmArgs = vmArgs + ['--add-exports=java.base/jdk.internal.module=ALL-UNNAMED']
+    # This is required to access jdk.internal.module.Modules which
+    # in turn allows us to dynamically open fields/methods to reflection.
+    vmArgs = vmArgs + ['--add-exports=java.base/jdk.internal.module=ALL-UNNAMED']
 
-        # This is required for the call to setAccessible in
-        # TruffleTCK.testValueWithSource to work.
-        vmArgs = vmArgs + ['--add-opens=org.graalvm.truffle/com.oracle.truffle.api.vm=ALL-UNNAMED', '--add-modules=ALL-MODULE-PATH']
+    # This is required for the call to setAccessible in
+    # TruffleTCK.testValueWithSource to work.
+    vmArgs = vmArgs + ['--add-opens=org.graalvm.truffle/com.oracle.truffle.polyglot=ALL-UNNAMED', '--add-modules=ALL-MODULE-PATH']
     return (vmArgs, mainClass, mainClassArgs)
 
 mx_unittest.add_config_participant(_unittest_config_participant)
@@ -173,6 +225,19 @@ mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
 
 mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     suite=_suite,
+    name='GraalVM Debug Protocol Server',
+    short_name='dap',
+    dir_name='dap',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle'],
+    truffle_jars=['tools:DAP'],
+    support_distributions=['tools:DAP_GRAALVM_SUPPORT'],
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
     name='GraalVM Chrome Inspector',
     short_name='ins',
     dir_name='chromeinspector',
@@ -186,14 +251,29 @@ mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
 
 mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     suite=_suite,
-    name='AgentScript',
-    short_name='ats',
-    dir_name='agentscript',
+    name='Insight',
+    short_name='insight',
+    dir_name='insight',
     license_files=[],
     third_party_license_files=[],
     dependencies=['Truffle'],
-    truffle_jars=['tools:AGENTSCRIPT'],
-    support_distributions=['tools:AGENTSCRIPT_GRAALVM_SUPPORT'],
+    truffle_jars=['tools:INSIGHT'],
+    support_distributions=['tools:INSIGHT_GRAALVM_SUPPORT'],
+    priority=10,
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
+    name='Insight Heap',
+    short_name='insightheap',
+    dir_name='insightheap',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle', 'insight'],
+    truffle_jars=['tools:INSIGHT_HEAP'],
+    support_distributions=['tools:INSIGHT_HEAP_GRAALVM_SUPPORT'],
+    priority=10,
     include_by_default=True,
 ))
 
@@ -223,26 +303,9 @@ mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     include_by_default=True,
 ))
 
-mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmJdkComponent(
-    suite=_suite,
-    name='VisualVM',
-    short_name='vvm',
-    dir_name='visualvm',
-    license_files=[],
-    third_party_license_files=[],
-    dependencies=[],
-    support_distributions=['tools:VISUALVM_GRAALVM_SUPPORT'],
-    provided_executables=['bin/<exe:jvisualvm>']
-))
-
-for mode in ['jvm', 'native']:
-    mx_sdk_vm.add_graalvm_hostvm_config(mode + '-cpusampler-exclude-inlined-roots', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=exclude_inlined_roots'])
-    mx_sdk_vm.add_graalvm_hostvm_config(mode + '-cpusampler-roots', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=roots'])
-    mx_sdk_vm.add_graalvm_hostvm_config(mode + '-cpusampler-statements', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=statements'])
-    mx_sdk_vm.add_graalvm_hostvm_config(mode + '-cputracer-roots', launcher_args=['--' + mode, '--cputracer', '--cputracer.TraceRoots=true'])
-    mx_sdk_vm.add_graalvm_hostvm_config(mode + '-cputracer-statements', launcher_args=['--' + mode, '--cputracer', '--cputracer.TraceStatements=true'])
-
 mx.update_commands(_suite, {
     'javadoc' : [javadoc, ''],
     'gate' : [mx_gate.gate, ''],
+    'lsp-types-gen' : [lsp_types_gen, ''],
+    'dap-types-gen' : [dap_types_gen, ''],
 })

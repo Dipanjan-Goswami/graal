@@ -55,7 +55,7 @@ import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 /**
  * A NFA that corresponds to the subtree of one {@link RegexASTSubtreeRootNode}.
  */
-public class PureNFA implements StateIndex<PureNFAState> {
+public final class PureNFA implements StateIndex<PureNFAState> {
 
     private final int subTreeId;
     @CompilationFinal(dimensions = 1) private final PureNFAState[] states;
@@ -162,6 +162,10 @@ public class PureNFA implements StateIndex<PureNFAState> {
     @Override
     public int getNumberOfStates() {
         return states.length;
+    }
+
+    public int getNumberOfTransitions() {
+        return transitions.length;
     }
 
     @Override

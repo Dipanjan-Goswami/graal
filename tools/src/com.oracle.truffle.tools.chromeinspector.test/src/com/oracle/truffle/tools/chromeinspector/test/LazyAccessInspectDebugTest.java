@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,21 +24,19 @@
  */
 package com.oracle.truffle.tools.chromeinspector.test;
 
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Collections;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.frame.FrameDescriptor;
 import org.graalvm.polyglot.Source;
 import org.junit.Test;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Scope;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.frame.FrameSlot;
-import com.oracle.truffle.api.frame.FrameSlotKind;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.GenerateWrapper;
 import com.oracle.truffle.api.instrumentation.InstrumentableNode;
@@ -67,11 +65,19 @@ public class LazyAccessInspectDebugTest {
     private static final String READ_READY = "readReady";
     private static final String READ_LAZY = "readLazy";
 
+    private static final String INVOKE_GETTER1 = "\"functionDeclaration\":" +
+                    "\"function invokeGetter(arrayStr){let result=this;const properties=JSON.parse(arrayStr);for(let i=0,n=properties.length;i<n;++i)\\nresult=result[properties[i]];return result;}\"";
+    private static final String INVOKE_GETTER2 = "\"functionDeclaration\":" +
+                    "\"function remoteFunction(propName) { return this[propName]; }\"";
+    private static final String INVOKE_GETTER3 = "\"functionDeclaration\":" +
+                    "\"function invokeGetter(arrayStr) {\\n      let result = this;\\n      const properties = JSON.parse(arrayStr);\\n      for (let i = 0, n = properties.length; i < n; ++i) {" +
+                    "\\n        result = result[properties[i]];\\n      }\\n      return result;\\n    }\"";
+
     // @formatter:off   The default formatting makes unnecessarily big indents and illogical line breaks
     // CheckStyle: stop line length check
     @Test
     public void testReadWithSideEffects() throws Exception {
-        final AtomicBoolean readLazyFlag = new AtomicBoolean(false);
+        final AtomicInteger readLazyCount = new AtomicInteger(0);
         InspectorTester tester = InspectorTester.start(true);
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.enable\"}");
         tester.sendMessage("{\"id\":2,\"method\":\"Debugger.enable\"}");
@@ -82,7 +88,7 @@ public class LazyAccessInspectDebugTest {
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{},\"id\":3}\n" +
                         "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
-        ProxyLanguage.setDelegate(new ReadWithSideEffectsLanguage(readLazyFlag));
+        ProxyLanguage.setDelegate(new ReadWithSideEffectsLanguage(readLazyCount));
         Source source = Source.newBuilder(ProxyLanguage.ID, "1", "ReadWithSideEffects.test").build();
         String sourceURI = InspectorTester.getStringURI(source.getURI());
         String hash = new Script(0, null, DebuggerTester.getSourceImpl(source)).getHash();
@@ -98,7 +104,7 @@ public class LazyAccessInspectDebugTest {
                                 "\"callFrames\":[{\"callFrameId\":\"0\",\"functionName\":\"TestRootNode\"," +
                                                  "\"scopeChain\":[{\"name\":\"TestRootNode\",\"type\":\"local\",\"object\":{\"description\":\"TestRootNode\",\"type\":\"object\",\"objectId\":\"1\"}}," +
                                                                  "{\"name\":\"top\",\"type\":\"global\",\"object\":{\"description\":\"top\",\"type\":\"object\",\"objectId\":\"2\"}}]," +
-                                                 "\"this\":{\"subtype\":\"null\",\"description\":\"null\",\"type\":\"object\",\"objectId\":\"3\"}," +
+                                                 "\"this\":null," +
                                                  "\"functionLocation\":{\"scriptId\":\"0\",\"columnNumber\":0,\"lineNumber\":0}," +
                                                  "\"location\":{\"scriptId\":\"0\",\"columnNumber\":0,\"lineNumber\":0}," +
                                                  "\"url\":\"" + sourceURI + "\"" +
@@ -107,62 +113,62 @@ public class LazyAccessInspectDebugTest {
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"1\"}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true," +
-                                "\"name\":\"o\",\"value\":{\"description\":\"Object LazyReadObject\",\"className\":\"Object\",\"type\":\"object\",\"objectId\":\"4\"},\"configurable\":true,\"writable\":true}]," +
+                                "\"name\":\"o\",\"value\":{\"description\":\"Object LazyReadObject\",\"className\":\"Object\",\"type\":\"object\",\"objectId\":\"3\"},\"configurable\":true,\"writable\":true}]," +
                                 "\"internalProperties\":[]},\"id\":1}\n"));
         // Ask for properties of 'o':
-        tester.sendMessage("{\"id\":2,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"4\"}}");
+        tester.sendMessage("{\"id\":2,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"3\"}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":[" +
                                 "{\"isOwn\":true,\"enumerable\":true,\"name\":\"readReady\",\"value\":{\"description\":\"42\",\"type\":\"number\",\"value\":42},\"configurable\":true,\"writable\":false}," +
-                                "{\"isOwn\":true,\"get\":{\"description\":\"\",\"className\":\"Function\",\"type\":\"function\",\"objectId\":\"6\"},\"enumerable\":true,\"name\":\"readLazy\",\"configurable\":true,\"writable\":false}]," +
+                                "{\"isOwn\":true,\"get\":{\"description\":\"\",\"className\":\"Function\",\"type\":\"function\",\"objectId\":\"5\"},\"enumerable\":true,\"name\":\"readLazy\",\"configurable\":true,\"writable\":false}]," +
                                 "\"internalProperties\":[]},\"id\":2}\n"));
         // The lazy value was not read yet:
-        assertFalse(readLazyFlag.get());
+        assertEquals(0, readLazyCount.get());
         // Invoke the lazy read (getter):
         tester.sendMessage("{\"id\":10,\"method\":\"Runtime.callFunctionOn\",\"params\":" +
-                        "{\"objectId\":\"4\"," +
-                         "\"functionDeclaration\":\"function invokeGetter(arrayStr){let result=this;const properties=JSON.parse(arrayStr);for(let i=0,n=properties.length;i<n;++i)\\nresult=result[properties[i]];return result;}\"," +
+                        "{\"objectId\":\"3\"," +
+                         INVOKE_GETTER1 + "," +
                          "\"arguments\":[{\"value\":\"[\\\"readLazy\\\"]\"}]," +
                          "\"silent\":true}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":{\"description\":\"43\",\"type\":\"number\",\"value\":43}},\"id\":10}\n"));
         // The lazy value was read now:
-        assertTrue(readLazyFlag.get());
-        readLazyFlag.set(false);
+        assertEquals(1, readLazyCount.get());
         // Test an alternate getter function:
         tester.sendMessage("{\"id\":11,\"method\":\"Runtime.callFunctionOn\",\"params\":" +
-                        "{\"objectId\":\"4\"," +
-                         "\"functionDeclaration\":\"function remoteFunction(propName) { return this[propName]; }\"," +
+                        "{\"objectId\":\"3\"," +
+                         INVOKE_GETTER2 + "," +
                          "\"arguments\":[{\"value\":\"readLazy\"}]," +
                          "\"silent\":true}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":{\"description\":\"43\",\"type\":\"number\",\"value\":43}},\"id\":11}\n"));
-        assertTrue(readLazyFlag.get());
+        assertEquals(2, readLazyCount.get());
 
         // Test lazy scope property:
-        readLazyFlag.set(false);
         tester.sendMessage("{\"id\":20,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"2\"}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"readReady\",\"value\":{\"description\":\"42\",\"type\":\"number\",\"value\":42},\"configurable\":true,\"writable\":false}," +
-                                                 "{\"isOwn\":true,\"get\":{\"description\":\"\",\"className\":\"Function\",\"type\":\"function\",\"objectId\":\"8\"},\"enumerable\":true,\"name\":\"readLazy\",\"configurable\":true,\"writable\":false}]," +
+                                                 "{\"isOwn\":true,\"get\":{\"description\":\"\",\"className\":\"Function\",\"type\":\"function\",\"objectId\":\"7\"},\"enumerable\":true,\"name\":\"readLazy\",\"configurable\":true,\"writable\":false}]," +
                                 "\"internalProperties\":[]},\"id\":20}\n"));
-        assertFalse(readLazyFlag.get());
+        assertEquals(2, readLazyCount.get());
         // Invoke the lazy read (getter):
         tester.sendMessage("{\"id\":21,\"method\":\"Runtime.callFunctionOn\",\"params\":" +
                         "{\"objectId\":\"2\"," +
-                         "\"functionDeclaration\":\"function invokeGetter(arrayStr){let result=this;const properties=JSON.parse(arrayStr);for(let i=0,n=properties.length;i<n;++i)\\nresult=result[properties[i]];return result;}\"," +
+                         INVOKE_GETTER3 + "," +
                          "\"arguments\":[{\"value\":\"[\\\"readLazy\\\"]\"}]," +
                          "\"silent\":true}}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{\"result\":{\"description\":\"43\",\"type\":\"number\",\"value\":43}},\"id\":21}\n"));
         // The lazy value was read now:
-        assertTrue(readLazyFlag.get());
+        assertEquals(3, readLazyCount.get());
 
         tester.sendMessage("{\"id\":100,\"method\":\"Debugger.resume\"}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{},\"id\":100}\n" +
                         "{\"method\":\"Debugger.resumed\"}\n"));
 
+        // Reset the delegate so that we can GC the tested Engine
+        ProxyLanguage.setDelegate(new ProxyLanguage());
         tester.finish();
     }
     // @formatter:on
@@ -170,42 +176,27 @@ public class LazyAccessInspectDebugTest {
 
     static class ReadWithSideEffectsLanguage extends ProxyLanguage {
 
-        private final AtomicBoolean readLazyFlag;
+        private final AtomicInteger readLazyCount;
 
-        ReadWithSideEffectsLanguage(AtomicBoolean readLazyFlag) {
-            this.readLazyFlag = readLazyFlag;
+        ReadWithSideEffectsLanguage(AtomicInteger readLazyCount) {
+            this.readLazyCount = readLazyCount;
         }
 
         @Override
         protected final CallTarget parse(TruffleLanguage.ParsingRequest request) throws Exception {
-            return Truffle.getRuntime().createCallTarget(new TestRootNode(languageInstance, request.getSource()));
+            return new TestRootNode(languageInstance, request.getSource()).getCallTarget();
         }
 
         @Override
-        protected String toString(LanguageContext context, Object value) {
-            if (value instanceof LazyReadObject) {
-                return LazyReadObject.class.getSimpleName();
-            }
-            return super.toString(context, value);
-        }
-
-        @Override
-        protected Object findMetaObject(LanguageContext context, Object value) {
-            if (value instanceof TruffleObject) {
-                return "Object";
-            }
-            return super.findMetaObject(context, value);
-        }
-
-        @Override
-        protected Iterable<Scope> findTopScopes(LanguageContext context) {
-            return Collections.singletonList(Scope.newBuilder("top", new LazyReadObject()).build());
+        protected Object getScope(LanguageContext context) {
+            return new LazyReadObject(true);
         }
 
         final class TestRootNode extends RootNode {
 
             @Node.Child private TestStatementNode statement;
             private final SourceSection statementSection;
+            @CompilationFinal private volatile Integer slotIndex;
 
             TestRootNode(TruffleLanguage<?> language, com.oracle.truffle.api.source.Source source) {
                 super(language);
@@ -226,10 +217,19 @@ public class LazyAccessInspectDebugTest {
 
             @Override
             public Object execute(VirtualFrame frame) {
-                TruffleObject obj = new LazyReadObject();
-                FrameSlot slot = frame.getFrameDescriptor().findOrAddFrameSlot("o", FrameSlotKind.Object);
-                frame.setObject(slot, obj);
+                TruffleObject obj = new LazyReadObject(false);
+                int slot = getSlotIndex(frame.getFrameDescriptor());
+                frame.setAuxiliarySlot(slot, obj);
                 return statement.execute(frame);
+            }
+
+            private int getSlotIndex(FrameDescriptor fd) {
+                Integer index = this.slotIndex;
+                if (index == null) {
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    this.slotIndex = index = fd.findOrAddAuxiliarySlot("o");
+                }
+                return index;
             }
 
             @Override
@@ -277,7 +277,21 @@ public class LazyAccessInspectDebugTest {
 
         private class LazyReadObject extends ProxyInteropObject {
 
-            LazyReadObject() {
+            private final boolean isScope;
+
+            LazyReadObject(boolean isScope) {
+                this.isScope = isScope;
+            }
+
+            @Override
+            protected boolean hasLanguage() {
+                // Provides the ProxyLanguage by default.
+                return true;
+            }
+
+            @Override
+            protected boolean isScope() {
+                return isScope;
             }
 
             @Override
@@ -305,12 +319,55 @@ public class LazyAccessInspectDebugTest {
                 if (READ_READY.equals(member)) {
                     return 42;
                 } else if (READ_LAZY.equals(member)) {
-                    readLazyFlag.set(true);
+                    readLazyCount.incrementAndGet();
                     return 43;
                 } else {
                     throw UnknownIdentifierException.create(member);
                 }
             }
+
+            @Override
+            protected boolean hasMetaObject() {
+                return true;
+            }
+
+            @Override
+            protected Object getMetaObject() throws UnsupportedMessageException {
+                return new MetaObject();
+            }
+
+            @Override
+            protected Object toDisplayString(boolean allowSideEffects) {
+                if (isScope) {
+                    return "top";
+                } else {
+                    return LazyReadObject.class.getSimpleName();
+                }
+            }
+        }
+
+        private static class MetaObject extends ProxyInteropObject {
+
+            @Override
+            protected boolean isMetaObject() {
+                return true;
+            }
+
+            @Override
+            protected boolean isMetaInstance(Object instance) {
+                return instance instanceof LazyReadObject;
+            }
+
+            @Override
+            protected String getMetaSimpleName() throws UnsupportedMessageException {
+                return "Object";
+            }
+
+            @Override
+            protected String getMetaQualifiedName() throws UnsupportedMessageException {
+                return "Object";
+            }
+
         }
 
         private static class Keys extends ProxyInteropObject {

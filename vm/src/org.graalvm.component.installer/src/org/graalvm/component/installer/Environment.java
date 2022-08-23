@@ -44,7 +44,7 @@ import java.util.function.Supplier;
 /**
  * Implementation of feedback and input for commands.
  */
-public class Environment implements Feedback, CommandInput {
+public class Environment implements Feedback, CommandInput, Config {
     private static final ResourceBundle BUNDLE = ResourceBundle.getBundle(
                     "org.graalvm.component.installer.Bundle");
 
@@ -60,10 +60,11 @@ public class Environment implements Feedback, CommandInput {
     private ComponentRegistry localRegistry;
     private boolean stacktraces;
     private ComponentIterable fileIterable;
-    private Map<URL, Path> fileMap = new HashMap<>();
+    private final Map<URL, Path> fileMap = new HashMap<>();
     private boolean allOutputToErr;
     private boolean autoYesEnabled;
     private boolean nonInteractive;
+    private boolean silent;
     private Path graalHome;
     private FileOperations fileOperations;
     private CatalogFactory catalogFactory;
@@ -105,23 +106,28 @@ public class Environment implements Feedback, CommandInput {
         this.fileIterable = new FileIterable(this, this);
     }
 
-    Environment enableStacktraces() {
+    @Override
+    public Environment enableStacktraces() {
         this.stacktraces = true;
         return this;
     }
 
+    @Override
     public boolean isAutoYesEnabled() {
         return autoYesEnabled;
     }
 
+    @Override
     public void setAutoYesEnabled(boolean autoYesEnabled) {
         this.autoYesEnabled = autoYesEnabled;
     }
 
+    @Override
     public boolean isNonInteractive() {
         return nonInteractive;
     }
 
+    @Override
     public void setNonInteractive(boolean nonInteractive) {
         this.nonInteractive = nonInteractive;
     }
@@ -130,6 +136,7 @@ public class Environment implements Feedback, CommandInput {
         return allOutputToErr;
     }
 
+    @Override
     public void setAllOutputToErr(boolean allOutputToErr) {
         this.allOutputToErr = allOutputToErr;
         if (allOutputToErr) {
@@ -139,10 +146,12 @@ public class Environment implements Feedback, CommandInput {
         }
     }
 
+    @Override
     public void setFileIterable(ComponentIterable fileIterable) {
         this.fileIterable = fileIterable;
     }
 
+    @Override
     public void setCatalogFactory(CatalogFactory catalogFactory) {
         this.catalogFactory = catalogFactory;
     }
@@ -150,7 +159,7 @@ public class Environment implements Feedback, CommandInput {
     @Override
     public ComponentCatalog getRegistry() {
         if (componentCatalog == null) {
-            componentCatalog = catalogFactory.createComponentCatalog(this, getLocalRegistry());
+            componentCatalog = catalogFactory.createComponentCatalog(this);
         }
         return componentCatalog;
     }
@@ -179,10 +188,16 @@ public class Environment implements Feedback, CommandInput {
 
     @Override
     public void error(String bundleKey, Throwable error, Object... args) {
-        print(false, bundle, err, bundleKey, args);
+        error(bundleKey, bundle, error, args);
+    }
+
+    private void error(String bundleKey, ResourceBundle srcBundle, Throwable error, Object... args) {
+        boolean wasSilent = setSilent(false);
+        print(false, srcBundle, err, bundleKey, args);
         if (stacktraces && error != null) {
             error.printStackTrace(err);
         }
+        setSilent(wasSilent);
     }
 
     /**
@@ -306,10 +321,7 @@ public class Environment implements Feedback, CommandInput {
 
             @Override
             public void error(String key, Throwable t, Object... params) {
-                print(false, localBundle, err, key, params);
-                if (stacktraces && t != null) {
-                    t.printStackTrace(err);
-                }
+                Environment.this.error(key, localBundle, t, params);
             }
 
             @Override
@@ -368,6 +380,21 @@ public class Environment implements Feedback, CommandInput {
             public Path getLocalCache(URL location) {
                 return Environment.this.getLocalCache(location);
             }
+
+            @Override
+            public boolean isNonInteractive() {
+                return Environment.this.isNonInteractive();
+            }
+
+            @Override
+            public boolean isSilent() {
+                return Environment.this.isSilent();
+            }
+
+            @Override
+            public boolean setSilent(boolean silent) {
+                return Environment.this.setSilent(silent);
+            }
         };
     }
 
@@ -404,7 +431,7 @@ public class Environment implements Feedback, CommandInput {
     }
 
     private void print(boolean beVerbose, boolean addNewline, ResourceBundle msgBundle, PrintStream stm, String bundleKey, Object... args) {
-        if (beVerbose && !this.verbose) {
+        if (silent || (beVerbose && !this.verbose)) {
             return;
         }
         if (addNewline) {
@@ -492,6 +519,9 @@ public class Environment implements Feedback, CommandInput {
                 sb.append(c);
             }
         }
+        if (sb.length() > 0 && sb.charAt(sb.length() - 1) == '\r') {
+            sb.delete(sb.length() - 1, sb.length());
+        }
         return sb.toString();
     }
 
@@ -573,4 +603,15 @@ public class Environment implements Feedback, CommandInput {
         }
     }
 
+    @Override
+    public boolean isSilent() {
+        return silent;
+    }
+
+    @Override
+    public boolean setSilent(boolean silent) {
+        boolean wasSilent = this.silent;
+        this.silent = silent;
+        return wasSilent;
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,36 +40,55 @@
  */
 package com.oracle.truffle.regex.tregex.buffer;
 
+import com.oracle.truffle.regex.RegexLanguage;
 import com.oracle.truffle.regex.RegexSource;
-import com.oracle.truffle.regex.charset.RangesAccumulator;
+import com.oracle.truffle.regex.charset.CodePointSet;
+import com.oracle.truffle.regex.charset.CodePointSetAccumulator;
 import com.oracle.truffle.regex.tregex.TRegexCompiler;
+import com.oracle.truffle.regex.tregex.matchers.CharMatcher;
+import com.oracle.truffle.regex.tregex.nodes.dfa.DFACaptureGroupPartialTransition;
+import com.oracle.truffle.regex.tregex.string.Encodings.Encoding;
+import com.oracle.truffle.regex.util.TBitSet;
+import org.graalvm.collections.EconomicMap;
 
 /**
  * This class is instantiated once per compilation of a regular expression in
- * {@link TRegexCompiler#compile(RegexSource)} and is supposed to reduce the amount of allocations
- * during automaton generation. It provides various "scratch-pad" buffers for the creation of arrays
- * of unknown size. When using these buffers, take extra care not to use them in two places
- * simultaneously! {@link TRegexCompiler#compile(RegexSource)} is designed to be run
- * single-threaded, but nested functions may still lead to "simultaneous" use of these buffers.
+ * {@link TRegexCompiler#compile(RegexLanguage, RegexSource)} )} and is supposed to reduce the
+ * amount of allocations during automaton generation. It provides various "scratch-pad" buffers for
+ * the creation of arrays of unknown size. When using these buffers, take extra care not to use them
+ * in two places simultaneously! {@link TRegexCompiler#compile(RegexLanguage, RegexSource)} is
+ * designed to be run single-threaded, but nested functions may still lead to "simultaneous" use of
+ * these buffers.
  *
  * @see ObjectArrayBuffer
  * @see ByteArrayBuffer
  * @see ShortArrayBuffer
- * @see CharRangesBuffer
  */
 public class CompilationBuffer {
 
+    private final Encoding encoding;
     private ObjectArrayBuffer<Object> objectBuffer1;
     private ObjectArrayBuffer<Object> objectBuffer2;
+    private ObjectArrayBuffer<Object> objectBuffer3;
     private ByteArrayBuffer byteArrayBuffer;
-    private ShortArrayBuffer shortArrayBuffer;
-    private CharRangesBuffer charRangesBuffer1;
-    private CharRangesBuffer charRangesBuffer2;
-    private CharRangesBuffer charRangesBuffer3;
+    private ShortArrayBuffer shortArrayBuffer1;
+    private ShortArrayBuffer shortArrayBuffer2;
     private IntRangesBuffer intRangesBuffer1;
     private IntRangesBuffer intRangesBuffer2;
     private IntRangesBuffer intRangesBuffer3;
-    private RangesAccumulator<IntRangesBuffer> intRangesAccumulator;
+    private CodePointSetAccumulator codePointSetAccumulator1;
+    private CodePointSetAccumulator codePointSetAccumulator2;
+    private TBitSet byteSizeBitSet;
+    private EconomicMap<CodePointSet, CharMatcher> matcherDeduplicationMap;
+    private EconomicMap<DFACaptureGroupPartialTransition, DFACaptureGroupPartialTransition> lazyTransitionDeduplicationMap;
+
+    public CompilationBuffer(Encoding encoding) {
+        this.encoding = encoding;
+    }
+
+    public Encoding getEncoding() {
+        return encoding;
+    }
 
     @SuppressWarnings("unchecked")
     public <T> ObjectArrayBuffer<T> getObjectBuffer1() {
@@ -89,6 +108,15 @@ public class CompilationBuffer {
         return (ObjectArrayBuffer<T>) objectBuffer2;
     }
 
+    @SuppressWarnings("unchecked")
+    public <T> ObjectArrayBuffer<T> getObjectBuffer3() {
+        if (objectBuffer3 == null) {
+            objectBuffer3 = new ObjectArrayBuffer<>();
+        }
+        objectBuffer3.clear();
+        return (ObjectArrayBuffer<T>) objectBuffer3;
+    }
+
     public ByteArrayBuffer getByteArrayBuffer() {
         if (byteArrayBuffer == null) {
             byteArrayBuffer = new ByteArrayBuffer();
@@ -97,36 +125,20 @@ public class CompilationBuffer {
         return byteArrayBuffer;
     }
 
-    public ShortArrayBuffer getShortArrayBuffer() {
-        if (shortArrayBuffer == null) {
-            shortArrayBuffer = new ShortArrayBuffer();
+    public ShortArrayBuffer getShortArrayBuffer1() {
+        if (shortArrayBuffer1 == null) {
+            shortArrayBuffer1 = new ShortArrayBuffer();
         }
-        shortArrayBuffer.clear();
-        return shortArrayBuffer;
+        shortArrayBuffer1.clear();
+        return shortArrayBuffer1;
     }
 
-    public CharRangesBuffer getCharRangesBuffer1() {
-        if (charRangesBuffer1 == null) {
-            charRangesBuffer1 = new CharRangesBuffer(64);
+    public ShortArrayBuffer getShortArrayBuffer2() {
+        if (shortArrayBuffer2 == null) {
+            shortArrayBuffer2 = new ShortArrayBuffer();
         }
-        charRangesBuffer1.clear();
-        return charRangesBuffer1;
-    }
-
-    public CharRangesBuffer getCharRangesBuffer2() {
-        if (charRangesBuffer2 == null) {
-            charRangesBuffer2 = new CharRangesBuffer(64);
-        }
-        charRangesBuffer2.clear();
-        return charRangesBuffer2;
-    }
-
-    public CharRangesBuffer getCharRangesBuffer3() {
-        if (charRangesBuffer3 == null) {
-            charRangesBuffer3 = new CharRangesBuffer(64);
-        }
-        charRangesBuffer3.clear();
-        return charRangesBuffer3;
+        shortArrayBuffer2.clear();
+        return shortArrayBuffer2;
     }
 
     public IntRangesBuffer getIntRangesBuffer1() {
@@ -153,11 +165,41 @@ public class CompilationBuffer {
         return intRangesBuffer3;
     }
 
-    public RangesAccumulator<IntRangesBuffer> getIntRangesAccumulator() {
-        if (intRangesAccumulator == null) {
-            intRangesAccumulator = new RangesAccumulator<>(new IntRangesBuffer());
+    public CodePointSetAccumulator getCodePointSetAccumulator1() {
+        if (codePointSetAccumulator1 == null) {
+            codePointSetAccumulator1 = new CodePointSetAccumulator();
         }
-        intRangesAccumulator.clear();
-        return intRangesAccumulator;
+        codePointSetAccumulator1.clear();
+        return codePointSetAccumulator1;
+    }
+
+    public CodePointSetAccumulator getCodePointSetAccumulator2() {
+        if (codePointSetAccumulator2 == null) {
+            codePointSetAccumulator2 = new CodePointSetAccumulator();
+        }
+        codePointSetAccumulator2.clear();
+        return codePointSetAccumulator2;
+    }
+
+    public TBitSet getByteSizeBitSet() {
+        if (byteSizeBitSet == null) {
+            byteSizeBitSet = new TBitSet(256);
+        }
+        byteSizeBitSet.clear();
+        return byteSizeBitSet;
+    }
+
+    public EconomicMap<CodePointSet, CharMatcher> getMatcherDeduplicationMap() {
+        if (matcherDeduplicationMap == null) {
+            matcherDeduplicationMap = EconomicMap.create();
+        }
+        return matcherDeduplicationMap;
+    }
+
+    public EconomicMap<DFACaptureGroupPartialTransition, DFACaptureGroupPartialTransition> getLazyTransitionDeduplicationMap() {
+        if (lazyTransitionDeduplicationMap == null) {
+            lazyTransitionDeduplicationMap = EconomicMap.create();
+        }
+        return lazyTransitionDeduplicationMap;
     }
 }

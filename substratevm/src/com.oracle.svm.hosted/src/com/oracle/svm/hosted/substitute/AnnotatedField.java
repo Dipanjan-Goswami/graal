@@ -25,21 +25,25 @@
 package com.oracle.svm.hosted.substitute;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 
 import com.oracle.graal.pointsto.infrastructure.OriginalFieldProvider;
+import com.oracle.graal.pointsto.util.GraalAccess;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.InjectAccessors;
 import com.oracle.svm.core.meta.ReadableJavaField;
-import com.oracle.svm.hosted.c.GraalAccess;
+import com.oracle.svm.util.AnnotationWrapper;
+import com.oracle.svm.util.ClassUtil;
 
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaType;
+import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
-public class AnnotatedField implements ReadableJavaField, OriginalFieldProvider {
+public class AnnotatedField implements ReadableJavaField, OriginalFieldProvider, AnnotationWrapper {
 
     static Annotation[] appendAnnotationTo(Annotation[] array, Annotation element) {
         Annotation[] result = Arrays.copyOf(array, array.length + 1);
@@ -57,26 +61,18 @@ public class AnnotatedField implements ReadableJavaField, OriginalFieldProvider 
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return appendAnnotationTo(original.getAnnotations(), injectedAnnotation);
+    public AnnotatedElement getAnnotationRoot() {
+        return original;
     }
 
     @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return appendAnnotationTo(original.getDeclaredAnnotations(), injectedAnnotation);
+    public Annotation[] getInjectedAnnotations() {
+        return new Annotation[]{injectedAnnotation};
     }
 
     @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        if (annotationClass.isInstance(injectedAnnotation)) {
-            return annotationClass.cast(injectedAnnotation);
-        }
-        return original.getAnnotation(annotationClass);
-    }
-
-    @Override
-    public JavaConstant readValue(JavaConstant receiver) {
-        return ReadableJavaField.readFieldValue(GraalAccess.getOriginalProviders().getConstantReflection(), original, receiver);
+    public JavaConstant readValue(MetaAccessProvider metaAccess, JavaConstant receiver) {
+        return ReadableJavaField.readFieldValue(metaAccess, GraalAccess.getOriginalProviders().getConstantReflection(), original, receiver);
     }
 
     @Override
@@ -86,7 +82,7 @@ public class AnnotatedField implements ReadableJavaField, OriginalFieldProvider 
          * constant folding is not valid.
          */
         assert (injectedAnnotation instanceof Delete) || (injectedAnnotation instanceof InjectAccessors) : "Unknown annotation @" +
-                        injectedAnnotation.annotationType().getSimpleName() + ", should constant folding be permitted?";
+                        ClassUtil.getUnqualifiedName(injectedAnnotation.annotationType()) + ", should constant folding be permitted?";
         return false;
     }
 

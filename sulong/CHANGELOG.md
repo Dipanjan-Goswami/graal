@@ -1,33 +1,213 @@
+# Version 22.2.0
+
+New Features:
+
+* Support for the darwin-aarch64 platform (aka. Apple Silicon).
+
+Changes:
+
+* Updated LLVM toolchain to version 14.0.3.
+
+# Version 22.1.0
+
+New Features:
+
+* Support exporting native byte buffers. See the new APIs in `graalvm/llvm/polyglot-buffer.h`.
+* Support for Time, Date, TimeZone and Instant polyglot interop. See new APIs in `graalvm/llvm/polyglot-time.h`.
+* Support converting primitive types such as boolean values into polyglot
+  values. See `polyglot_from_*` functions in `graalvm/llvm/polyglot.h`.
+* Support for thread local globals.
+
+Changes:
+
+* Option `--llvm.printLifetimeAnalysisStats` is replaced by `--log.llvm.LifetimeAnalysis.level=FINER`.
+* Option `--llvm.debugLoader` is replaced by `--log.llvm.Loader.level=FINER`.
+* Option `--llvm.printNativeCallStats` is replaced by `--log.llvm.NativeCallStats.level=FINER`.
+* Option `--llvm.sysCalls` is replaced by `--log.llvm.SysCalls.level=FINER`.
+* Option `--llvm.llDebugVerbose` is replaced by `--log.llvm.LLDebug.level=FINER`.
+* Option `--llvm.traceIR` is replaced by `--log.llvm.TraceIR.level=FINER`.
+* Option `--llvm.printAST` is replaced by `--llvm.printASTFilter` and accepts all functions by default. AST printing must be enabled by setting `--log.llvm.AST.level=FINEST`.
+* The function `__sulong_print_stacktrace` now prints stack traces to the `llvm.StackTrace` logs instead of stdout.
+* Introduce `polyglot_value` type to replace `void *` in `graalvm/llvm/polyglot.h`. 
+  The compiler flag `POLYGLOT_STRICT_MODE` can be used to treat `polyglot_value` as a distinct type.
+
+# Version 22.0.0
+
+Changes:
+
+* Sulong adopted the new Frame API.
+
+# Version 21.3.0
+
+Changes:
+
+* Updated LLVM toolchain to version 12.0.0.
+
+Removals:
+
+* Removed ReferenceLibrary (deprecated since version 20.2).
+  Implement InteropLibrary.isIdenticalOrUndefined instead.
+
+# Version 21.2.0
+
+Fixes:
+
+* Fix LLVM toolchain not working correctly for C++ on MacOS 11.3.
+
+* Fix exceptions being swallowed and not printed out on Sulong context disposal.
+
+* Thread return values are now correctly removed from the context when joining the
+  respective thread.
+
+New features:
+
+* Support implicitly typed XADD instructions in inline assembly.
+
+* Support some atomic variants of certain inline assembly instructions. Currently
+  supported instructions are: xchg, cmpxchg and xadd along with their explicitly typed
+  variants, and various unary instructions including incb/w/l/q and decb/w/l/q.
+
+* System calls that return pointers are now supported.
+
+* Support passing pointers as operands to inline assembly instructions.
+
+* Support C++ virtual calls via interop.
+
+# Version 21.1.0
+
+New features:
+
+* Added a sanity check to verify that loaded bitcode files have been compiled correctly.
+  If not, a _mismatching target triple_ error is reported. To make this error non-fatal,
+  set `--llvm.verifyBitcode=false`. To silence the message, set `--log.llvm.BitcodeVerifier.level=OFF`.
+
+* Allow accessing foreign buffers from LLVM bitcode via the interop buffers API.
+
+* Added intrinsic functions for pthread_setname_np and pthread_getname_np.
+
+* Added intrinsic functions for dlopen and dlsym.
+
+# Version 21.0.0
+
+Fixes:
+
+* Improve AST sharing, and support auxiliary engine caching.
+  On top of the regular AST sharing that allows sharing code between multiple contexts in a
+  single engine, this allows persisting of the shared code, to share it across process boundaries.
+
+* Add support for MacOS Big Sur.
+
+Deprecations:
+
+* Add deprecation warning for the old header locations `polyglot.h` and `llvm/api/toolchain.h`.
+  This header files were deprecated already in 20.3.0, but without a warning.
+
+# Version 20.3.0
+
+New features:
+
+* Introduced [handles API](projects/com.oracle.truffle.llvm.libraries.graalvm.llvm/include/graalvm/llvm/handles.h)
+  for storing managed pointers in native memory.
+
+* Enabled AST sharing in the GraalVM LLVM runtime. This allows code of bitcode libraries
+  to be shared between multiple contexts within a single engine.
+
+Changes:
+
+* Updated LLVM toolchain to version 10.0.0.
+
+* Improved for `va_list` / varargs handling across language boundaries.
+  Using `va_start` in an LLVM function that was called from a foreign language no longer forces
+  all arguments into native memory. The resulting `va_list` object can be passed to code written
+  in other languages, and accessed there using standard interop APIs.
+
+* Moved `polyglot.h` to `graalvm/llvm/polyglot.h` and `llvm/api/toolchain.h` to `graalvm/llvm/toolchain-api.h`.
+  The old header locations are deprecated, and will be removed in a future release.
+
+* Renamed `libpolyglot-mock.so` to `libgraalvm-llvm.so`.
+  The old name is deprecated and will be removed in a future release.
+
+* Use the version of the LLVM toolchain as the LLVM language version (see `lli --version`).
+
+# Version 20.2.0
+
+New features:
+
+* Support reading multi-byte values from polyglot arrays explicitly typed as i8 arrays.
+
+* Fail when a function is called over interop with fewer arguments than it expects.
+
+* Support `InteropLibrary.isIdentical` and related messages.
+
+* Added the `--print-toolchain-api-identifier`,  `--print-toolchain-api-tool <tool-name>`
+  and `--print-toolchain-api-paths <path-name>` arguments to the `lli` launcher.
+  These can be used to query the [Toolchain API](docs/contributor/TOOLCHAIN.md)
+  from the command line.
+
+* The [Java API of the Toolchain](projects/com.oracle.truffle.llvm.api/src/com/oracle/truffle/llvm/api/Toolchain.java)
+  now supports requesting locations via the `#getPaths()` method. For example
+  the location of the toolchain executables or libraries. See the JavaDoc for
+  more details.
+
+* Added `llvm/api/toolchain.h` header for accessing the [Toolchain](docs/contributor/TOOLCHAIN.md)
+  from C code.
+
+Removed:
+
+* Removed the `--llvm.sourcePath` option (deprecated since 19.0), use
+  `--inspect.SourcePath` instead.
+
+* Removed support for the application/x-llvm-ir-bitcode-base64 mime-type
+  (deprecated since 19.0).
+
 # Version 20.1.0
 
 Changes:
+
+* `libc++` and `libc++abi` are now shipped as bitcode libraries. For building
+  those `cmake` is required to be installed.
+
+* C++ support (libsulong++) is no longer loaded by default. Instead, it is
+  enabled if `libc++` is loaded. Executables (ELF, Mach-O) compiled with
+  the toolchain usually have a dependency on this library and will continue
+  to work.  Plain bitcode files, which do not allow to specify dependencies,
+  may fail with an error similar to the following:
+  ```
+  Global variable _ZNSt3__15ctypeIcE2idE is declared but not defined.
+  ```
+  This can be solved by either compiling it into a proper executable, or by
+  specifying the dependency on the command line (e.g., `lli --lib libc++.so.1 ...`
+  on Linux or `lli --lib libc++.1.dylib` on macOS).
 
 * Module initialization order is now only based on the dependencies recorded in the
   ELF/Mach-O file instead of looking at imported symbols. Consequently, the order
   plain bitcode files are initialized might change since they do not allow recording
   dependencies. If the initialization order is important, the suggested approach to
-  use ELF/Mach-O files. The [Toolchain](docs/TOOLCHAIN.md) can help creating those.
+  use ELF/Mach-O files. The [Toolchain](docs/contributor/TOOLCHAIN.md) can help creating those.
 
 * Cover more cases when calling functions that receive structs by value across interop
   boundaries.
+
+* Bitcode execution now supports on-stack-replacement of loops, i.e., compiling
+  long-running loops before the surrounding function is compiled.
 
 # Version 20.0.0
 
 Changes:
 
-* The [Toolchain](docs/TOOLCHAIN.md) is now based on LLVM 9.0.0.
+* The [Toolchain](docs/contributor/TOOLCHAIN.md) is now based on LLVM 9.0.0.
 
 New features:
 
 * Support accessing `llvm-ar`, `llvm-nm`, `llvm-objcopy`,
   `llvm-objdump`, `llvm-ranlib`, `llvm-readelf`, `llvm-readobj` and
-  `llvm-strip` via the [toolchain](docs/TOOLCHAIN.md).
+  `llvm-strip` via the [toolchain](docs/contributor/TOOLCHAIN.md).
 
 # Version 19.3.0
 
 Changes:
 
-* The [Toolchain](docs/TOOLCHAIN.md) is no longer experimental.
+* The [Toolchain](docs/contributor/TOOLCHAIN.md) is no longer experimental.
 
 New features:
 
@@ -55,7 +235,7 @@ Improvements:
 
 * Clang and other LLVM tools are no longer required to be installed for building
   the GraalVM LLVM runtime. Instead, the LLVM distribution bundled with the
-  [Toolchain](docs/TOOLCHAIN.md) is used.
+  [Toolchain](docs/contributor/TOOLCHAIN.md) is used.
 
 # Version 19.2.0
 
@@ -63,7 +243,7 @@ New features:
 
 * Support locating dynamic libraries relatively using (`rpath`).
 * Preliminary support for compiling to bitcode using the LLVM toolchain.
-  See [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md) for more details.
+  See [docs/contributor/TOOLCHAIN.md](docs/contributor/TOOLCHAIN.md) for more details.
   *WARNING*: The toolchain is experimental. Functionality may be added,
   changed or removed without prior notice.
 * Support for simple pointer arithmetics with foreign objects.
@@ -189,7 +369,7 @@ Changes:
 * Removed support for implicit polyglot types for local variables
   as the availability of type information is not guaranteed.
   Explicit polyglot casts are now strictly required (`polyglot_as_typed`).
-  See [docs/INTEROP.md](docs/INTEROP.md) and [polyglot.h](projects/com.oracle.truffle.llvm.libraries.bitcode/include/polyglot.h)
+  See [docs/contributor/INTEROP.md](docs/contributor/INTEROP.md) and [polyglot.h](projects/com.oracle.truffle.llvm.libraries.graalvm.llvm/include/polyglot.h)
   for more details.
 * Support for IR-level tracing.
 * Preliminary support for LLVM 7.

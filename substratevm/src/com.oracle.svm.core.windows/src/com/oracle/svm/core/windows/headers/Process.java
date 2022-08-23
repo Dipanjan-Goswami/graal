@@ -24,18 +24,18 @@
  */
 package com.oracle.svm.core.windows.headers;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.CFunction.Transition;
-import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.nativeimage.c.struct.CStruct;
-import org.graalvm.nativeimage.c.type.CCharPointer;
-import org.graalvm.nativeimage.c.type.CCharPointerPointer;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.word.PointerBase;
+import org.graalvm.word.WordBase;
+
+import com.oracle.svm.core.windows.headers.WinBase.FILETIME;
+import com.oracle.svm.core.windows.headers.WinBase.HANDLE;
+import com.oracle.svm.core.windows.headers.WinBase.LPHANDLE;
 
 //Checkstyle: stop
 
@@ -43,33 +43,17 @@ import org.graalvm.word.PointerBase;
  * Definitions for Windows process.h
  */
 @CContext(WindowsDirectives.class)
-@Platforms(Platform.WINDOWS.class)
 public class Process {
 
-    public static final int TOKEN_QUERY = 0x08;
+    @CConstant
+    public static native int PROCESS_TERMINATE();
 
     @CConstant
-    public static native int _P_WAIT();
+    public static native int TOKEN_QUERY();
 
     @CFunction
-    public static native int _spawnv(int mode, CCharPointer cmdname, CCharPointerPointer argv);
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native WinBase.HANDLE GetCurrentProcess();
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetCurrentProcessId();
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetProcessId(WinBase.HANDLE pHandle);
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int OpenProcessToken(WinBase.HANDLE pHandle, int desiredAccess,
-                    WinBase.LPHANDLE tokenHandle);
-
-    @CFunction
-    public static native WinBase.HANDLE _beginthreadex(PointerBase security, int stacksize, CFunctionPointer start_address,
-                    PointerBase arglist, int initflag, CIntPointer thrdaddr);
+    public static native HANDLE _beginthreadex(PointerBase security, int stacksize, PointerBase start_address,
+                    WordBase arglist, int initflag, CIntPointer thrdaddr);
 
     @CConstant
     public static native int CREATE_SUSPENDED();
@@ -78,22 +62,16 @@ public class Process {
     public static native int STACK_SIZE_PARAM_IS_A_RESERVATION();
 
     @CFunction
-    public static native int ResumeThread(WinBase.HANDLE hThread);
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetExitCodeThread(WinBase.HANDLE hThread, CIntPointer lpExitCode);
+    public static native int ResumeThread(HANDLE hThread);
 
     @CFunction
     public static native int SwitchToThread();
 
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetCurrentThreadId();
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native WinBase.HANDLE GetCurrentThread();
-
     @CConstant
     public static native int SYNCHRONIZE();
+
+    @CConstant
+    public static native int THREAD_QUERY_LIMITED_INFORMATION();
 
     @CStruct
     public interface PCRITICAL_SECTION extends PointerBase {
@@ -103,20 +81,8 @@ public class Process {
     public interface CRITICAL_SECTION extends PointerBase {
     }
 
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void InitializeCriticalSection(PCRITICAL_SECTION mutex);
-
-    @CFunction(transition = Transition.TO_NATIVE)
+    @CFunction
     public static native void EnterCriticalSection(PCRITICAL_SECTION mutex);
-
-    @CFunction(value = "EnterCriticalSection", transition = Transition.NO_TRANSITION)
-    public static native void EnterCriticalSectionNoTrans(PCRITICAL_SECTION mutex);
-
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void LeaveCriticalSection(PCRITICAL_SECTION mutex);
-
-    @CFunction(value = "LeaveCriticalSection", transition = Transition.NO_TRANSITION)
-    public static native void LeaveCriticalSectionNoTrans(PCRITICAL_SECTION mutex);
 
     @CStruct
     public interface PCONDITION_VARIABLE extends PointerBase {
@@ -126,18 +92,66 @@ public class Process {
     public interface CONDITION_VARIABLE extends PointerBase {
     }
 
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void InitializeConditionVariable(PCONDITION_VARIABLE cond);
-
     @CFunction
     public static native int SleepConditionVariableCS(PCONDITION_VARIABLE cond, PCRITICAL_SECTION mutex, int dwMilliseconds);
 
-    @CFunction(value = "SleepConditionVariableCS", transition = Transition.NO_TRANSITION)
-    public static native int SleepConditionVariableCSNoTrans(PCONDITION_VARIABLE cond, PCRITICAL_SECTION mutex, int dwMilliseconds);
+    public static class NoTransitions {
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native HANDLE _beginthreadex(PointerBase security, int stacksize, PointerBase start_address,
+                        WordBase arglist, int initflag, CIntPointer thrdaddr);
 
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void WakeConditionVariable(PCONDITION_VARIABLE cond);
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native HANDLE GetCurrentProcess();
 
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void WakeAllConditionVariable(PCONDITION_VARIABLE cond);
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native HANDLE OpenProcess(int dwDesiredAccess, int bInheritHandle, int dwProcessId);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int TerminateProcess(HANDLE hProcess, int uExitCode);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int GetCurrentProcessId();
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int GetProcessId(HANDLE hProcess);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int OpenProcessToken(HANDLE processHandle, int desiredAccess, LPHANDLE tokenHandle);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int GetExitCodeThread(HANDLE hThread, CIntPointer lpExitCode);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int SwitchToThread();
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int GetCurrentThreadId();
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native HANDLE GetCurrentThread();
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void InitializeCriticalSection(PCRITICAL_SECTION mutex);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void EnterCriticalSection(PCRITICAL_SECTION mutex);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void LeaveCriticalSection(PCRITICAL_SECTION mutex);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void InitializeConditionVariable(PCONDITION_VARIABLE cond);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int SleepConditionVariableCS(PCONDITION_VARIABLE cond, PCRITICAL_SECTION mutex, int dwMilliseconds);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void WakeConditionVariable(PCONDITION_VARIABLE cond);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void WakeAllConditionVariable(PCONDITION_VARIABLE cond);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native boolean GetThreadTimes(HANDLE hThread, FILETIME creationTime, FILETIME exitTime, FILETIME kernelTime, FILETIME userTime);
+    }
 }

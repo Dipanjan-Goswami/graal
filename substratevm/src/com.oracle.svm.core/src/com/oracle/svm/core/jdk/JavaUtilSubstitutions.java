@@ -30,16 +30,17 @@ import java.util.NavigableMap;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.LogManager;
 
+import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.annotate.Alias;
-import com.oracle.svm.core.annotate.InjectAccessors;
+import com.oracle.svm.core.annotate.Inject;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.core.util.VMError;
 
 /*
  * Lazily initialized cache fields of collection classes need to be reset. They are not needed in
@@ -88,13 +89,6 @@ final class Target_java_util_EnumMap {
 
 @TargetClass(java.util.IdentityHashMap.class)
 final class Target_java_util_IdentityHashMap {
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset)//
-    Set<?> entrySet;
-}
-
-@TargetClass(className = "sun.misc.SoftCache", onlyWith = JDK8OrEarlier.class)
-final class Target_sun_misc_SoftCache {
 
     @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset)//
     Set<?> entrySet;
@@ -201,14 +195,8 @@ final class Target_java_util_concurrent_ConcurrentSkipListMap {
     Target_java_util_concurrent_ConcurrentSkipListMap_Values values;
 
     @Alias //
-    @TargetElement(name = "descendingMap", onlyWith = JDK8OrEarlier.class) //
     @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset)//
-    ConcurrentNavigableMap<?, ?> descendingMapJDK8OrEarlier;
-
-    @Alias //
-    @TargetElement(name = "descendingMap", onlyWith = JDK11OrLater.class) //
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset)//
-    Target_java_util_concurrent_ConcurrentSkipListMap_SubMap descendingMapJDK11OrLater;
+    Target_java_util_concurrent_ConcurrentSkipListMap_SubMap descendingMap;
 }
 
 @TargetClass(value = java.util.concurrent.ConcurrentSkipListMap.class, innerClass = "KeySet")
@@ -219,7 +207,7 @@ final class Target_java_util_concurrent_ConcurrentSkipListMap_KeySet {
 final class Target_java_util_concurrent_ConcurrentSkipListMap_EntrySet {
 }
 
-@TargetClass(value = java.util.concurrent.ConcurrentSkipListMap.class, innerClass = "SubMap", onlyWith = JDK11OrLater.class)
+@TargetClass(value = java.util.concurrent.ConcurrentSkipListMap.class, innerClass = "SubMap")
 final class Target_java_util_concurrent_ConcurrentSkipListMap_SubMap {
 }
 
@@ -227,75 +215,62 @@ final class Target_java_util_concurrent_ConcurrentSkipListMap_SubMap {
 final class Target_java_util_concurrent_ConcurrentSkipListMap_Values {
 }
 
-@TargetClass(java.util.SplittableRandom.class)
-final class Target_java_util_SplittableRandom {
-
-    @Alias @InjectAccessors(SplittableRandomAccessors.class)//
-    private static AtomicLong defaultGen;
-
-    @Alias
-    static native long mix64(long z);
-}
-
-class SplittableRandomAccessors {
-
-    /*
-     * We run this code deliberately during image generation, so that the SecureRandom code is only
-     * reachable and included in the image when requested by the application.
-     */
-    private static final boolean SECURE_SEED = java.security.AccessController.doPrivileged(
-                    new java.security.PrivilegedAction<Boolean>() {
-                        @Override
-                        public Boolean run() {
-                            return Boolean.getBoolean("java.util.secureRandomSeed");
-                        }
-                    });
-
-    private static volatile AtomicLong defaultGen;
-
-    /** The get-accessor for SplittableRandom.defaultGen. */
-    static AtomicLong getDefaultGen() {
-        AtomicLong result = defaultGen;
-        if (result == null) {
-            result = initialize();
-        }
-        return result;
-    }
-
-    // Checkstyle: allow synchronization
-    private static synchronized AtomicLong initialize() {
-        AtomicLong result = defaultGen;
-        if (result != null) {
-            return result;
-        }
-
-        /*
-         * The code below to compute the seed is taken from the original
-         * SplittableRandom.initialSeed() implementation.
-         */
-        long seed;
-        if (SECURE_SEED) {
-            byte[] seedBytes = java.security.SecureRandom.getSeed(8);
-            seed = seedBytes[0] & 0xffL;
-            for (int i = 1; i < 8; ++i) {
-                seed = (seed << 8) | (seedBytes[i] & 0xffL);
-            }
-        } else {
-            seed = Target_java_util_SplittableRandom.mix64(System.currentTimeMillis()) ^ Target_java_util_SplittableRandom.mix64(System.nanoTime());
-        }
-
-        result = new AtomicLong(seed);
-        defaultGen = result;
-        return result;
-    }
-    // Checkstyle: disallow synchronization
-}
-
 @TargetClass(java.util.Currency.class)
 final class Target_java_util_Currency {
     @Alias//
     @RecomputeFieldValue(kind = Kind.NewInstance, declClass = ConcurrentHashMap.class)//
     private static ConcurrentMap<String, Currency> instances;
+}
+
+/**
+ * During LogManager initialization a shutdown hook is added to close all handlers. However, this
+ * shutdown hook is lost for native-image because (i) all hooks are reinitialized within the image
+ * (see {@link Target_java_lang_Shutdown}) and (ii) the LogManager must be build-time initialized
+ * (see LoggingFeature). As a workaround, extra logic is placed within (LogManager getLogManager())
+ * so that during runtime the first time the log handler is accessed the equivalent shutdown hook is
+ * added.
+ */
+@TargetClass(value = LogManager.class)
+final class Target_java_util_logging_LogManager {
+
+    @Inject @RecomputeFieldValue(kind = Kind.NewInstance, declClass = AtomicBoolean.class) private AtomicBoolean addedShutdownHook = new AtomicBoolean();
+
+    @Alias static LogManager manager;
+
+    @Alias
+    native void ensureLogManagerInitialized();
+
+    @Substitute
+    public static LogManager getLogManager() {
+        /* First performing logic originally in getLogManager. */
+        if (manager == null) {
+            return manager;
+        }
+        Target_java_util_logging_LogManager managerAlias = SubstrateUtil.cast(manager, Target_java_util_logging_LogManager.class);
+        managerAlias.ensureLogManagerInitialized();
+
+        /* Logic for adding shutdown hook. */
+        if (!managerAlias.addedShutdownHook.getAndSet(true)) {
+            /* Add a shutdown hook to close the global handlers. */
+            try {
+                Runtime.getRuntime().addShutdownHook(SubstrateUtil.cast(new Target_java_util_logging_LogManager_Cleaner(managerAlias), Thread.class));
+            } catch (IllegalStateException e) {
+                /* If the VM is already shutting down, we do not need to register shutdownHook. */
+            }
+        }
+
+        return manager;
+    }
+}
+
+@TargetClass(value = LogManager.class, innerClass = "Cleaner")
+final class Target_java_util_logging_LogManager_Cleaner {
+
+    @Alias
+    @SuppressWarnings("unused")
+    Target_java_util_logging_LogManager_Cleaner(Target_java_util_logging_LogManager outer) {
+        throw VMError.shouldNotReachHere("This is an alias to the original constructor in the target class, so this code is unreachable");
+    }
 }
 
 /** Dummy class to have a class with the file's name. */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,7 @@ import java.util.EnumMap;
 import java.util.Formatter;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.function.Function;
@@ -45,6 +46,7 @@ import org.graalvm.compiler.core.common.SuppressFBWarnings;
 import org.graalvm.compiler.core.common.cfg.AbstractControlFlowGraph;
 import org.graalvm.compiler.core.common.cfg.BlockMap;
 import org.graalvm.compiler.debug.Assertions;
+import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Graph.NodeEvent;
 import org.graalvm.compiler.graph.Graph.NodeEventListener;
 import org.graalvm.compiler.graph.Graph.NodeEventScope;
@@ -59,9 +61,11 @@ import org.graalvm.compiler.nodes.ControlSinkNode;
 import org.graalvm.compiler.nodes.ControlSplitNode;
 import org.graalvm.compiler.nodes.DeoptimizeNode;
 import org.graalvm.compiler.nodes.FixedNode;
+import org.graalvm.compiler.nodes.GraphState;
+import org.graalvm.compiler.nodes.GraphState.GuardsStage;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.GuardNode;
 import org.graalvm.compiler.nodes.IfNode;
-import org.graalvm.compiler.nodes.KillingBeginNode;
 import org.graalvm.compiler.nodes.LoopBeginNode;
 import org.graalvm.compiler.nodes.LoopExitNode;
 import org.graalvm.compiler.nodes.PhiNode;
@@ -70,7 +74,6 @@ import org.graalvm.compiler.nodes.StartNode;
 import org.graalvm.compiler.nodes.StaticDeoptimizingNode;
 import org.graalvm.compiler.nodes.StaticDeoptimizingNode.GuardPriority;
 import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.StructuredGraph.GuardsStage;
 import org.graalvm.compiler.nodes.StructuredGraph.ScheduleResult;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.VirtualState;
@@ -81,14 +84,16 @@ import org.graalvm.compiler.nodes.cfg.ControlFlowGraph;
 import org.graalvm.compiler.nodes.cfg.HIRLoop;
 import org.graalvm.compiler.nodes.cfg.LocationSet;
 import org.graalvm.compiler.nodes.memory.FloatingReadNode;
+import org.graalvm.compiler.nodes.memory.MemoryKill;
 import org.graalvm.compiler.nodes.memory.MultiMemoryKill;
 import org.graalvm.compiler.nodes.memory.SingleMemoryKill;
+import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.nodes.spi.ValueProxy;
 import org.graalvm.compiler.options.OptionValues;
-import org.graalvm.compiler.phases.Phase;
+import org.graalvm.compiler.phases.BasePhase;
 import org.graalvm.word.LocationIdentity;
 
-public final class SchedulePhase extends Phase {
+public final class SchedulePhase extends BasePhase<CoreProviders> {
 
     public enum SchedulingStrategy {
         EARLIEST_WITH_GUARD_ORDER,
@@ -123,7 +128,7 @@ public final class SchedulePhase extends Phase {
     }
 
     public SchedulePhase(boolean immutableGraph, OptionValues options) {
-        this(OptScheduleOutOfLoops.getValue(options) ? SchedulingStrategy.LATEST_OUT_OF_LOOPS : SchedulingStrategy.LATEST, immutableGraph);
+        this(getDefaultStrategy(options), immutableGraph);
     }
 
     public SchedulePhase(SchedulingStrategy strategy) {
@@ -133,6 +138,10 @@ public final class SchedulePhase extends Phase {
     public SchedulePhase(SchedulingStrategy strategy, boolean immutableGraph) {
         this.selectedStrategy = strategy;
         this.immutableGraph = immutableGraph;
+    }
+
+    public static SchedulingStrategy getDefaultStrategy(OptionValues options) {
+        return OptScheduleOutOfLoops.getValue(options) ? SchedulingStrategy.LATEST_OUT_OF_LOOPS : SchedulingStrategy.LATEST;
     }
 
     private NodeEventScope verifyImmutableGraph(StructuredGraph graph) {
@@ -149,17 +158,39 @@ public final class SchedulePhase extends Phase {
     }
 
     @Override
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return ALWAYS_APPLICABLE;
+    }
+
+    @Override
     @SuppressWarnings("try")
-    protected void run(StructuredGraph graph) {
+    protected void run(StructuredGraph graph, CoreProviders context) {
         try (NodeEventScope scope = verifyImmutableGraph(graph)) {
-            Instance inst = new Instance();
+            Instance inst = new Instance(context.getLowerer().supportsImplicitNullChecks());
             inst.run(graph, selectedStrategy, immutableGraph);
         }
     }
 
-    public static void run(StructuredGraph graph, SchedulingStrategy strategy, ControlFlowGraph cfg) {
-        Instance inst = new Instance(cfg);
-        inst.run(graph, strategy, false);
+    public static void runWithoutContextOptimizations(StructuredGraph graph) {
+        runWithoutContextOptimizations(graph, getDefaultStrategy(graph.getOptions()));
+    }
+
+    public static void runWithoutContextOptimizations(StructuredGraph graph, SchedulingStrategy strategy) {
+        runWithoutContextOptimizations(graph, strategy, ControlFlowGraph.computeForSchedule(graph), false);
+    }
+
+    public static void runWithoutContextOptimizations(StructuredGraph graph, SchedulingStrategy strategy, boolean immutable) {
+        runWithoutContextOptimizations(graph, strategy, ControlFlowGraph.computeForSchedule(graph), immutable);
+    }
+
+    public static void runWithoutContextOptimizations(StructuredGraph graph, SchedulingStrategy strategy, ControlFlowGraph cfg, boolean immutable) {
+        Instance inst = new Instance(cfg, false);
+        inst.run(graph, strategy, immutable);
+    }
+
+    public static void run(StructuredGraph graph, SchedulingStrategy strategy, ControlFlowGraph cfg, CoreProviders context, boolean immutable) {
+        Instance inst = new Instance(cfg, context.getLowerer().supportsImplicitNullChecks());
+        inst.run(graph, strategy, immutable);
     }
 
     public static class Instance {
@@ -171,19 +202,19 @@ public final class SchedulePhase extends Phase {
         protected ControlFlowGraph cfg;
         protected BlockMap<List<Node>> blockToNodesMap;
         protected NodeMap<Block> nodeToBlockMap;
+        protected boolean supportsImplicitNullChecks;
 
-        public Instance() {
-            this(null);
+        public Instance(boolean supportsImplicitNullChecks) {
+            this(null, supportsImplicitNullChecks);
         }
 
-        public Instance(ControlFlowGraph cfg) {
+        public Instance(ControlFlowGraph cfg, boolean supportsImplicitNullChecks) {
             this.cfg = cfg;
+            this.supportsImplicitNullChecks = supportsImplicitNullChecks;
         }
 
         @SuppressWarnings("try")
         public void run(StructuredGraph graph, SchedulingStrategy selectedStrategy, boolean immutableGraph) {
-            // assert GraphOrder.assertNonCyclicGraph(graph);
-
             if (this.cfg == null) {
                 this.cfg = ControlFlowGraph.compute(graph, true, true, true, false);
             }
@@ -204,7 +235,7 @@ public final class SchedulePhase extends Phase {
                 }
 
                 BlockMap<ArrayList<FloatingReadNode>> watchListMap = calcLatestBlocks(selectedStrategy, currentNodeMap, earliestBlockToNodesMap, visited, latestBlockToNodesMap, immutableGraph);
-                sortNodesLatestWithinBlock(cfg, earliestBlockToNodesMap, latestBlockToNodesMap, currentNodeMap, watchListMap, visited);
+                sortNodesLatestWithinBlock(cfg, earliestBlockToNodesMap, latestBlockToNodesMap, currentNodeMap, watchListMap, visited, supportsImplicitNullChecks);
 
                 assert verifySchedule(cfg, latestBlockToNodesMap, currentNodeMap);
                 assert (!Assertions.detailedAssertionsEnabled(graph.getOptions())) ||
@@ -283,9 +314,8 @@ public final class SchedulePhase extends Phase {
 
         protected static void selectLatestBlock(Node currentNode, Block currentBlock, Block latestBlock, NodeMap<Block> currentNodeMap, BlockMap<ArrayList<FloatingReadNode>> watchListMap,
                         LocationIdentity constrainingLocation, BlockMap<List<Node>> latestBlockToNodesMap) {
-
-            assert checkLatestEarliestRelation(currentNode, currentBlock, latestBlock);
             if (currentBlock != latestBlock) {
+                checkLatestEarliestRelation(currentNode, currentBlock, latestBlock);
 
                 currentNodeMap.setAndGrow(currentNode, latestBlock);
 
@@ -300,10 +330,9 @@ public final class SchedulePhase extends Phase {
             latestBlockToNodesMap.get(latestBlock).add(currentNode);
         }
 
-        private static boolean checkLatestEarliestRelation(Node currentNode, Block earliestBlock, Block latestBlock) {
-            assert AbstractControlFlowGraph.dominates(earliestBlock, latestBlock) || (currentNode instanceof VirtualState && latestBlock == earliestBlock.getDominator()) : String.format(
+        private static void checkLatestEarliestRelation(Node currentNode, Block earliestBlock, Block latestBlock) {
+            GraalError.guarantee(AbstractControlFlowGraph.dominates(earliestBlock, latestBlock) || (currentNode instanceof VirtualState && latestBlock == earliestBlock.getDominator()),
                             "%s %s (%s) %s (%s)", currentNode, earliestBlock, earliestBlock.getBeginNode(), latestBlock, latestBlock.getBeginNode());
-            return true;
         }
 
         private static boolean verifySchedule(ControlFlowGraph cfg, BlockMap<List<Node>> blockToNodesMap, NodeMap<Block> nodeMap) {
@@ -359,15 +388,6 @@ public final class SchedulePhase extends Phase {
                 lastBlock = currentBlock;
             }
 
-            if (lastBlock.getBeginNode() instanceof KillingBeginNode) {
-                LocationIdentity locationIdentity = ((KillingBeginNode) lastBlock.getBeginNode()).getKilledLocationIdentity();
-                if ((locationIdentity.isAny() || locationIdentity.equals(location)) && lastBlock != earliestBlock) {
-                    // The begin of this block kills the location, so we *have* to schedule the node
-                    // in the dominating block.
-                    lastBlock = lastBlock.getDominator();
-                }
-            }
-
             return lastBlock;
         }
 
@@ -375,13 +395,13 @@ public final class SchedulePhase extends Phase {
             if (!killed.isAny()) {
                 for (Node n : subList) {
                     // Check if this node kills a node in the watch list.
-                    if (n instanceof SingleMemoryKill) {
+                    if (MemoryKill.isSingleMemoryKill(n)) {
                         LocationIdentity identity = ((SingleMemoryKill) n).getKilledLocationIdentity();
                         killed.add(identity);
                         if (killed.isAny()) {
                             return;
                         }
-                    } else if (n instanceof MultiMemoryKill) {
+                    } else if (MemoryKill.isMultiMemoryKill(n)) {
                         for (LocationIdentity identity : ((MultiMemoryKill) n).getKilledLocationIdentities()) {
                             killed.add(identity);
                             if (killed.isAny()) {
@@ -394,14 +414,14 @@ public final class SchedulePhase extends Phase {
         }
 
         private static void sortNodesLatestWithinBlock(ControlFlowGraph cfg, BlockMap<List<Node>> earliestBlockToNodesMap, BlockMap<List<Node>> latestBlockToNodesMap, NodeMap<Block> currentNodeMap,
-                        BlockMap<ArrayList<FloatingReadNode>> watchListMap, NodeBitMap visited) {
+                        BlockMap<ArrayList<FloatingReadNode>> watchListMap, NodeBitMap visited, boolean supportsImplicitNullChecks) {
             for (Block b : cfg.getBlocks()) {
-                sortNodesLatestWithinBlock(b, earliestBlockToNodesMap, latestBlockToNodesMap, currentNodeMap, watchListMap, visited);
+                sortNodesLatestWithinBlock(b, earliestBlockToNodesMap, latestBlockToNodesMap, currentNodeMap, watchListMap, visited, supportsImplicitNullChecks);
             }
         }
 
         private static void sortNodesLatestWithinBlock(Block b, BlockMap<List<Node>> earliestBlockToNodesMap, BlockMap<List<Node>> latestBlockToNodesMap, NodeMap<Block> nodeMap,
-                        BlockMap<ArrayList<FloatingReadNode>> watchListMap, NodeBitMap unprocessed) {
+                        BlockMap<ArrayList<FloatingReadNode>> watchListMap, NodeBitMap unprocessed, boolean supportsImplicitNullChecks) {
             List<Node> earliestSorting = earliestBlockToNodesMap.get(b);
             ArrayList<Node> result = new ArrayList<>(earliestSorting.size());
             ArrayList<FloatingReadNode> watchList = null;
@@ -437,7 +457,7 @@ public final class SchedulePhase extends Phase {
                         sortIntoList(n, b, result, nodeMap, unprocessed, null);
                     } else if (nodeMap.get(n) == b && n instanceof FloatingReadNode) {
                         FloatingReadNode floatingReadNode = (FloatingReadNode) n;
-                        if (isImplicitNullOpportunity(floatingReadNode, b)) {
+                        if (isImplicitNullOpportunity(floatingReadNode, b, supportsImplicitNullChecks)) {
                             // Schedule at the beginning of the block.
                             sortIntoList(floatingReadNode, b, result, nodeMap, unprocessed, null);
                         } else {
@@ -472,10 +492,10 @@ public final class SchedulePhase extends Phase {
         private static void checkWatchList(Block b, NodeMap<Block> nodeMap, NodeBitMap unprocessed, ArrayList<Node> result, ArrayList<FloatingReadNode> watchList, Node n) {
             if (watchList != null && !watchList.isEmpty()) {
                 // Check if this node kills a node in the watch list.
-                if (n instanceof SingleMemoryKill) {
+                if (MemoryKill.isSingleMemoryKill(n)) {
                     LocationIdentity identity = ((SingleMemoryKill) n).getKilledLocationIdentity();
                     checkWatchList(watchList, identity, b, result, nodeMap, unprocessed);
-                } else if (n instanceof MultiMemoryKill) {
+                } else if (MemoryKill.isMultiMemoryKill(n)) {
                     for (LocationIdentity identity : ((MultiMemoryKill) n).getKilledLocationIdentities()) {
                         checkWatchList(watchList, identity, b, result, nodeMap, unprocessed);
                     }
@@ -566,7 +586,8 @@ public final class SchedulePhase extends Phase {
                         Block previousCurrentBlock = currentBlock;
                         currentBlock = currentBlock.getDominator();
                         if (previousCurrentBlock.isLoopHeader()) {
-                            if (currentBlock.getRelativeFrequency() < latestBlock.getRelativeFrequency() || ((StructuredGraph) currentNode.graph()).hasValueProxies()) {
+                            if (compareRelativeFrequencies(currentBlock.getRelativeFrequency(), latestBlock.getRelativeFrequency()) <= 0 ||
+                                            ((StructuredGraph) currentNode.graph()).isBeforeStage(StageFlag.VALUE_PROXY_REMOVAL)) {
                                 // Only assign new latest block if frequency is actually lower or if
                                 // loop proxies would be required otherwise.
                                 latestBlock = currentBlock;
@@ -580,7 +601,7 @@ public final class SchedulePhase extends Phase {
                 }
             }
 
-            if (latestBlock != earliestBlock && strategy.considerImplicitNullChecks() && isImplicitNullOpportunity(currentNode, earliestBlock) &&
+            if (latestBlock != earliestBlock && strategy.considerImplicitNullChecks() && isImplicitNullOpportunity(currentNode, earliestBlock, supportsImplicitNullChecks) &&
                             earliestBlock.getRelativeFrequency() < latestBlock.getRelativeFrequency() * IMPLICIT_NULL_CHECK_OPPORTUNITY_PROBABILITY_FACTOR) {
                 latestBlock = earliestBlock;
             }
@@ -588,7 +609,22 @@ public final class SchedulePhase extends Phase {
             selectLatestBlock(currentNode, earliestBlock, latestBlock, currentNodeMap, watchListMap, constrainingLocation, latestBlockToNodesMap);
         }
 
-        protected static boolean isImplicitNullOpportunity(Node currentNode, Block block) {
+        public static int compareRelativeFrequencies(double f1, double f2) {
+            double delta = 0.01D;
+            double res = f1 - f2;
+            if (res > delta) {
+                return 1;
+            }
+            if (res < -delta) {
+                return -1;
+            }
+            return 0;
+        }
+
+        protected static boolean isImplicitNullOpportunity(Node currentNode, Block block, boolean supportsImplicitNullChecks) {
+            if (!supportsImplicitNullChecks) {
+                return false;
+            }
             if (currentNode instanceof FloatingReadNode) {
                 FloatingReadNode floatingReadNode = (FloatingReadNode) currentNode;
                 Node pred = block.getBeginNode().predecessor();
@@ -1184,9 +1220,9 @@ public final class SchedulePhase extends Phase {
         private static void printNode(Node n) {
             Formatter buf = new Formatter();
             buf.format("%s", n);
-            if (n instanceof SingleMemoryKill) {
+            if (MemoryKill.isSingleMemoryKill(n)) {
                 buf.format(" // kills %s", ((SingleMemoryKill) n).getKilledLocationIdentity());
-            } else if (n instanceof MultiMemoryKill) {
+            } else if (MemoryKill.isMultiMemoryKill(n)) {
                 buf.format(" // kills ");
                 for (LocationIdentity locid : ((MultiMemoryKill) n).getKilledLocationIdentities()) {
                     buf.format("%s, ", locid);

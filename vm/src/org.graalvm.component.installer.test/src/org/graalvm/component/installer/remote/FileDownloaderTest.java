@@ -43,7 +43,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import org.junit.Before;
 import org.junit.Test;
-import sun.net.ConnectionResetException;
+import java.net.SocketException;
 
 public class FileDownloaderTest extends NetworkTestBase {
 
@@ -52,9 +52,9 @@ public class FileDownloaderTest extends NetworkTestBase {
         @Override
         public String l10n(String key, Object... params) {
             switch (key) {
-                case "MSG_DownloadProgress":
+                case "MSG_DownloadProgress@":
                     return "[                    ]";
-                case "MSG_DownloadProgressSignChar":
+                case "MSG_DownloadProgressSignChar@":
                     return "#";
             }
             return key;
@@ -102,7 +102,7 @@ public class FileDownloaderTest extends NetworkTestBase {
         dn.download();
 
         byte[] check = SystemUtils.toHashBytes("b649fe3b9309d1b3ae4d2dbae70eebd4d2978af32cd1ce7d262ebf7e0f0f53fa");
-        assertArrayEquals(check, dn.getDigest());
+        assertArrayEquals(check, dn.getReceivedDigest());
     }
 
     class Check extends FA {
@@ -367,6 +367,12 @@ public class FileDownloaderTest extends NetworkTestBase {
         dn.setDisplayProgress(true);
         synchronized (conn) {
             conn.nextChunk = 130 * 1024;
+
+            ProxyConnectionFactory pcf = new ProxyConnectionFactory(this, u);
+            dn.setConnectionFactory(pcf);
+
+            pcf.envHttpProxy = null;
+            pcf.envHttpsProxy = null;
         }
 
         AtomicReference<Throwable> exc = new AtomicReference<>();
@@ -385,7 +391,7 @@ public class FileDownloaderTest extends NetworkTestBase {
 
         assertTrue(conn.reachedSem.tryAcquire(1, TimeUnit.SECONDS));
         // conn.reachedSem.acquire();
-        conn.readException = new ConnectionResetException();
+        conn.readException = new SocketException();
         conn.nextSem.release();
         t.join(1000);
         // t.join();

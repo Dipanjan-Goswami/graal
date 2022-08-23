@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,9 +27,9 @@ package com.oracle.svm.core.jdk;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.graalvm.nativeimage.ImageSingletons;
@@ -70,7 +70,7 @@ public final class NativeLibrarySupport {
 
     private final ReentrantLock lock = new ReentrantLock();
 
-    private final List<NativeLibrary> knownLibraries = new ArrayList<>();
+    private final List<NativeLibrary> knownLibraries = new CopyOnWriteArrayList<>();
 
     private final Deque<NativeLibrary> currentLoadContext = new ArrayDeque<>();
 
@@ -97,13 +97,14 @@ public final class NativeLibrarySupport {
         return knownLibraries.stream().anyMatch(l -> l.isBuiltin() && l.getCanonicalIdentifier().equals(name));
     }
 
-    public void loadLibrary(String name, boolean isAbsolute) {
-        if (isAbsolute) {
-            if (loadLibrary0(new File(name), false)) {
-                return;
-            }
-            throw new UnsatisfiedLinkError("Can't load library: " + name);
+    public void loadLibraryAbsolute(File file) {
+        if (loadLibrary0(file, false)) {
+            return;
         }
+        throw new UnsatisfiedLinkError("Can't load library: " + file);
+    }
+
+    public void loadLibraryRelative(String name) {
         // Test if this is a built-in library
         if (loadLibrary0(new File(name), true)) {
             return;
@@ -123,8 +124,8 @@ public final class NativeLibrarySupport {
             if (loadLibrary0(libpath, false)) {
                 return;
             }
-            File altpath = Target_java_lang_ClassLoaderHelper.mapAlternativeName(libpath);
-            if (altpath != null && loadLibrary0(libpath, false)) {
+            File altpath = Target_jdk_internal_loader_ClassLoaderHelper.mapAlternativeName(libpath);
+            if (altpath != null && loadLibrary0(altpath, false)) {
                 return;
             }
         }
@@ -141,7 +142,7 @@ public final class NativeLibrarySupport {
         return addLibrary(asBuiltin, canonical, true);
     }
 
-    private boolean addLibrary(boolean asBuiltin, String canonical, boolean loadAndInitialize) {
+    private boolean addLibrary(boolean asBuiltin, String canonical, boolean initialize) {
         lock.lock();
         try {
             NativeLibrary lib = null;
@@ -171,19 +172,22 @@ public final class NativeLibrarySupport {
                 lib = PlatformNativeLibrarySupport.singleton().createLibrary(canonical, asBuiltin);
                 created = true;
             }
-            if (loadAndInitialize) {
-                currentLoadContext.push(lib);
-                try {
-                    if (!lib.load()) {
-                        return false;
-                    }
-                    if (libraryInitializer != null) {
-                        libraryInitializer.initialize(lib);
-                    }
-                } finally {
-                    NativeLibrary top = currentLoadContext.pop();
-                    assert top == lib;
+            currentLoadContext.push(lib);
+            try {
+                if (!lib.load()) {
+                    return false;
                 }
+                /*
+                 * Initialization of a library must be skipped if it can be initialized at most once
+                 * per process and another isolate has already initialized it. However, the library
+                 * must be (marked as) loaded above so it cannot be loaded and initialized later.
+                 */
+                if (initialize && libraryInitializer != null) {
+                    libraryInitializer.initialize(lib);
+                }
+            } finally {
+                NativeLibrary top = currentLoadContext.pop();
+                assert top == lib;
             }
             if (created) {
                 knownLibraries.add(lib);
@@ -210,6 +214,7 @@ public final class NativeLibrarySupport {
     }
 
     public void registerInitializedBuiltinLibrary(String name) {
-        addLibrary(true, name, false);
+        boolean success = addLibrary(true, name, false);
+        assert success;
     }
 }

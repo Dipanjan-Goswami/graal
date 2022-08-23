@@ -31,26 +31,16 @@ import java.lang.reflect.Array;
 import org.graalvm.compiler.word.BarrieredAccess;
 import org.graalvm.word.UnsignedWord;
 
+import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.util.VMError;
 
 @TargetClass(java.lang.reflect.Array.class)
 final class Target_java_lang_reflect_Array {
-
-    @Substitute
-    private static int getLength(Object array) {
-        if (array == null) {
-            throw new NullPointerException();
-        } else if (!array.getClass().isArray()) {
-            throw new IllegalArgumentException();
-        }
-        return KnownIntrinsics.readArrayLength(array);
-    }
 
     @Substitute
     private static boolean getBoolean(Object array, int index) {
@@ -376,7 +366,15 @@ final class Target_java_lang_reflect_Array {
     private static Object multiNewArray(Class<?> componentType, int[] dimensions) {
         if (componentType == null) {
             throw new NullPointerException();
-        } else if (dimensions.length == 0 || componentType == void.class) {
+        }
+        if (dimensions.length == 0 || componentType == void.class) {
+            throw new IllegalArgumentException();
+        }
+        int requestedDimension = dimensions.length;
+        if (componentType.isArray()) {
+            requestedDimension += SubstrateUtil.arrayTypeDimension(componentType);
+        }
+        if (requestedDimension > 255) {
             throw new IllegalArgumentException();
         }
         for (int i = 0; i < dimensions.length; i++) {

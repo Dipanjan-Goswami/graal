@@ -26,7 +26,6 @@ package com.oracle.svm.graal;
 
 import static com.oracle.svm.core.annotate.RecomputeFieldValue.Kind.Custom;
 import static com.oracle.svm.core.annotate.RecomputeFieldValue.Kind.FromAlias;
-import static com.oracle.svm.core.annotate.RecomputeFieldValue.Kind.Reset;
 
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -61,13 +60,19 @@ import org.graalvm.compiler.phases.BasePhase;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
 import org.graalvm.compiler.phases.tiers.HighTierContext;
 import org.graalvm.compiler.printer.NoDeadCodeVerifyHandler;
+import org.graalvm.nativeimage.CurrentIsolate;
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 
+import com.oracle.svm.core.SubstrateTargetDescription;
 import com.oracle.svm.core.annotate.Alias;
+import com.oracle.svm.core.annotate.Inject;
+import com.oracle.svm.core.annotate.InjectAccessors;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.option.HostedOptionValues;
 import com.oracle.svm.core.util.VMError;
@@ -76,11 +81,8 @@ import com.oracle.svm.graal.hosted.GraalFeature;
 import com.oracle.svm.graal.meta.SubstrateMethod;
 import com.oracle.svm.util.ReflectionUtil;
 
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
+import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
-
-// Checkstyle: stop
 
 @TargetClass(value = org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins.class, onlyWith = GraalFeature.IsEnabledAndNotLibgraal.class)
 final class Target_org_graalvm_compiler_nodes_graphbuilderconf_InvocationPlugins {
@@ -134,12 +136,13 @@ final class Target_org_graalvm_compiler_debug_DebugContext_Invariants {
 
 @TargetClass(value = DebugContext.class, innerClass = "Immutable", onlyWith = GraalFeature.IsEnabled.class)
 final class Target_org_graalvm_compiler_debug_DebugContext_Immutable {
-    static class ClearImmutableCache implements RecomputeFieldValue.CustomFieldValueComputer {
-
+    static class ClearImmutableCache implements FieldValueTransformer {
         @Override
-        public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
+        public Object transform(Object receiver, Object originalValue) {
             for (Class<?> c : DebugContext.class.getDeclaredClasses()) {
+                // Checkstyle: allow Class.getSimpleName
                 if (c.getSimpleName().equals("Immutable")) {
+                    // Checkstyle: disallow Class.getSimpleName
                     Object[] cache = ReflectionUtil.readStaticField(c, "CACHE");
                     Object[] clearedCache = cache.clone();
                     for (int i = 0; i < clearedCache.length; i++) {
@@ -148,7 +151,7 @@ final class Target_org_graalvm_compiler_debug_DebugContext_Immutable {
                     return clearedCache;
                 }
             }
-            throw VMError.shouldNotReachHere("Cannot find " + DebugContext.class.getName() + ".Immutable");
+            throw VMError.shouldNotReachHere(String.format("Cannot find %s.Immutable", DebugContext.class.getName()));
         }
     }
 
@@ -162,10 +165,9 @@ final class Target_org_graalvm_compiler_debug_DebugContext_Immutable {
 
 @TargetClass(value = DebugHandlersFactory.class, onlyWith = GraalFeature.IsEnabled.class)
 final class Target_org_graalvm_compiler_debug_DebugHandlersFactory {
-    static class CachedFactories implements RecomputeFieldValue.CustomFieldValueComputer {
-
+    static class CachedFactories implements FieldValueTransformer {
         @Override
-        public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
+        public Object transform(Object receiver, Object originalValue) {
             return GraalSupport.get().debugHandlersFactories;
         }
     }
@@ -178,38 +180,12 @@ final class Target_org_graalvm_compiler_debug_DebugHandlersFactory {
     private static Iterable<DebugHandlersFactory> LOADER;
 }
 
-@TargetClass(value = DebugContext.class, onlyWith = GraalFeature.IsEnabled.class)
-final class Target_org_graalvm_compiler_debug_DebugContext {
-
-    /**
-     * Arbitrary threads cannot be in the image so null out {@code DebugContext.invariants} which
-     * holds onto a thread and is only used for assertions.
-     */
-    @Alias @RecomputeFieldValue(kind = Reset)//
-    private Target_org_graalvm_compiler_debug_DebugContext_Invariants invariants;
-
-    /**
-     * Initialization of {@code TTY.out} causes the pointsto analysis to see
-     * HotSpotTTYStreamProvider (the only implementation of TTYStreamProvider). Since SVM images
-     * must not include HotSpot code, a substitution is required.
-     */
-    @Alias @RecomputeFieldValue(kind = FromAlias)//
-    public static PrintStream DEFAULT_LOG_STREAM = Log.logStream();
-
-    /**
-     * SVM doesn't currently support {@code Throwable.fillInStackTrace()}. This substitution should
-     * be removed once GR-3763 is resolved.
-     */
-    @Substitute
-    static StackTraceElement[] getStackTrace(@SuppressWarnings("unused") Thread thread) {
-        return new StackTraceElement[0];
-    }
-}
-
 @TargetClass(value = TimeSource.class, onlyWith = GraalFeature.IsEnabled.class)
 final class Target_org_graalvm_compiler_debug_TimeSource {
+    // Checkstyle: stop
     @Alias @RecomputeFieldValue(kind = FromAlias)//
     private static boolean USING_THREAD_CPU_TIME = false;
+    // Checkstyle: resume
 }
 
 @TargetClass(value = org.graalvm.compiler.debug.TTY.class, onlyWith = GraalFeature.IsEnabledAndNotLibgraal.class)
@@ -219,19 +195,23 @@ final class Target_org_graalvm_compiler_debug_TTY {
     private static PrintStream out = Log.logStream();
 }
 
+@TargetClass(className = "org.graalvm.compiler.serviceprovider.IsolateUtil", onlyWith = GraalFeature.IsEnabled.class)
+final class Target_org_graalvm_compiler_serviceprovider_IsolateUtil {
+
+    @Substitute
+    public static long getIsolateAddress() {
+        return CurrentIsolate.getIsolate().rawValue();
+    }
+
+    @Substitute
+    public static long getIsolateID() {
+        return ImageSingletons.lookup(GraalSupport.class).getIsolateId();
+    }
+}
+
 /*
  * The following substitutions replace methods where reflection is used in the Graal code.
  */
-
-@TargetClass(value = org.graalvm.compiler.virtual.phases.ea.EffectList.class, onlyWith = GraalFeature.IsEnabled.class)
-@SuppressWarnings({"static-method", "unused"})
-final class Target_org_graalvm_compiler_virtual_phases_ea_EffectList {
-
-    @Substitute
-    private void toString(StringBuilder str, int i) {
-        str.append("<Effect - no string representation possible>");
-    }
-}
 
 @TargetClass(value = org.graalvm.compiler.debug.KeyRegistry.class, onlyWith = GraalFeature.IsEnabled.class)
 final class Target_org_graalvm_compiler_debug_KeyRegistry {
@@ -243,7 +223,7 @@ final class Target_org_graalvm_compiler_debug_KeyRegistry {
     private static List<MetricKey> keys = new ArrayList<>();
 }
 
-@TargetClass(value = org.graalvm.compiler.core.match.MatchRuleRegistry.class, onlyWith = GraalFeature.IsEnabledAndNotLibgraal.class)
+@TargetClass(value = org.graalvm.compiler.core.match.MatchRuleRegistry.class, onlyWith = GraalFeature.IsEnabled.class)
 final class Target_org_graalvm_compiler_core_match_MatchRuleRegistry {
 
     @Substitute
@@ -251,7 +231,7 @@ final class Target_org_graalvm_compiler_core_match_MatchRuleRegistry {
                     @SuppressWarnings("unused") DebugContext debug) {
         EconomicMap<Class<? extends Node>, List<MatchStatement>> result = GraalSupport.get().matchRuleRegistry.get(theClass);
         if (result == null) {
-            VMError.shouldNotReachHere("MatchRuleRegistry.lookup(): unexpected class " + theClass.getName());
+            throw VMError.shouldNotReachHere(String.format("MatchRuleRegistry.lookup(): unexpected class %s", theClass.getName()));
         }
         return result;
     }
@@ -290,7 +270,7 @@ final class Target_org_graalvm_compiler_phases_BasePhase {
     static BasePhase.BasePhaseStatistics getBasePhaseStatistics(Class<?> clazz) {
         BasePhase.BasePhaseStatistics result = GraalSupport.get().basePhaseStatistics.get(clazz);
         if (result == null) {
-            throw VMError.shouldNotReachHere("Missing statistics for phase class: " + clazz.getName() + "\n");
+            throw VMError.shouldNotReachHere(String.format("Missing statistics for phase class: %s\n", clazz.getName()));
         }
         return result;
     }
@@ -303,7 +283,7 @@ final class Target_org_graalvm_compiler_lir_phases_LIRPhase {
     static LIRPhase.LIRPhaseStatistics getLIRPhaseStatistics(Class<?> clazz) {
         LIRPhase.LIRPhaseStatistics result = GraalSupport.get().lirPhaseStatistics.get(clazz);
         if (result == null) {
-            throw VMError.shouldNotReachHere("Missing statistics for phase class: " + clazz.getName() + "\n");
+            throw VMError.shouldNotReachHere(String.format("Missing statistics for phase class: %s\n", clazz.getName()));
         }
         return result;
     }
@@ -322,9 +302,9 @@ final class Target_org_graalvm_compiler_graph_NodeClass {
     @SuppressWarnings("unlikely-arg-type")
     @SuppressFBWarnings(value = {"GC_UNRELATED_TYPES"}, justification = "Class is DynamicHub")
     public static NodeClass<?> get(Class<?> clazz) {
-        NodeClass<?> nodeClass = GraalSupport.get().nodeClasses.get(DynamicHub.fromClass(clazz));
+        NodeClass<?> nodeClass = GraalSupport.get().nodeClasses.get(clazz);
         if (nodeClass == null) {
-            throw VMError.shouldNotReachHere("Unknown node class: " + clazz.getName() + "\n");
+            throw VMError.shouldNotReachHere(String.format("Unknown node class: %s\n", clazz.getName()));
         }
         return nodeClass;
     }
@@ -346,9 +326,9 @@ final class Target_org_graalvm_compiler_lir_LIRInstructionClass {
     @SuppressWarnings("unlikely-arg-type")
     @SuppressFBWarnings(value = {"GC_UNRELATED_TYPES"}, justification = "Class is DynamicHub")
     public static LIRInstructionClass<?> get(Class<? extends LIRInstruction> clazz) {
-        LIRInstructionClass<?> instructionClass = GraalSupport.get().instructionClasses.get(DynamicHub.fromClass(clazz));
+        LIRInstructionClass<?> instructionClass = GraalSupport.get().instructionClasses.get(clazz);
         if (instructionClass == null) {
-            throw VMError.shouldNotReachHere("Unknown instruction class: " + clazz.getName() + "\n");
+            throw VMError.shouldNotReachHere(String.format("Unknown instruction class: %s\n", clazz.getName()));
         }
         return instructionClass;
     }
@@ -361,9 +341,9 @@ final class Target_org_graalvm_compiler_lir_CompositeValueClass {
     @SuppressWarnings("unlikely-arg-type")
     @SuppressFBWarnings(value = {"GC_UNRELATED_TYPES"}, justification = "Class is DynamicHub")
     public static CompositeValueClass<?> get(Class<? extends CompositeValue> clazz) {
-        CompositeValueClass<?> compositeValueClass = GraalSupport.get().compositeValueClasses.get(DynamicHub.fromClass(clazz));
+        CompositeValueClass<?> compositeValueClass = GraalSupport.get().compositeValueClasses.get(clazz);
         if (compositeValueClass == null) {
-            throw VMError.shouldNotReachHere("Unknown composite value class: " + clazz.getName() + "\n");
+            throw VMError.shouldNotReachHere(String.format("Unknown composite value class: %s\n", clazz.getName()));
         }
         return compositeValueClass;
     }
@@ -381,6 +361,36 @@ final class Target_org_graalvm_compiler_nodes_NamedLocationIdentity_DB {
     @Alias//
     @RecomputeFieldValue(kind = FromAlias, declClass = EconomicMap.class)//
     private static EconomicSet<String> map = EconomicSet.create(Equivalence.DEFAULT);
+}
+
+/**
+ * Workaround so that {@link TargetDescription} can distinguish between AOT compilation and runtime
+ * compilation. Ideally, each case would have its own {@link TargetDescription}, but currently it is
+ * created just once during the image build and accessed via {@link ConfigurationValues} and
+ * {@link ImageSingletons} from many locations.
+ */
+@TargetClass(value = TargetDescription.class, onlyWith = GraalFeature.IsEnabled.class)
+final class Target_jdk_vm_ci_code_TargetDescription {
+    @Alias @InjectAccessors(value = InlineObjectsAccessor.class) //
+    boolean inlineObjects;
+
+    @Inject @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
+    Boolean inlineObjectsValue;
+
+    @SuppressWarnings("unused")
+    static class InlineObjectsAccessor {
+        static boolean get(Target_jdk_vm_ci_code_TargetDescription receiver) {
+            if (receiver.inlineObjectsValue == null) {
+                receiver.inlineObjectsValue = SubstrateTargetDescription.shouldInlineObjectsInRuntimeCode();
+            }
+            return receiver.inlineObjectsValue;
+        }
+
+        /** For TargetDescription constructor at runtime (e.g. Libgraal). */
+        static void set(Target_jdk_vm_ci_code_TargetDescription receiver, boolean value) {
+            receiver.inlineObjectsValue = value;
+        }
+    }
 }
 
 /** Dummy class to have a class with the file's name. Do not remove. */

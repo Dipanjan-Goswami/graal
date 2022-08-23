@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,14 +40,13 @@
  */
 package com.oracle.truffle.polyglot;
 
-import com.oracle.truffle.api.CallTarget;
+import java.util.Objects;
+
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.nodes.RootNode;
-import com.oracle.truffle.polyglot.PolyglotLanguage.ContextProfile;
 
 abstract class HostToGuestRootNode extends RootNode {
 
@@ -58,14 +57,26 @@ abstract class HostToGuestRootNode extends RootNode {
     @CompilationFinal private boolean seenEnter;
     @CompilationFinal private boolean seenNonEnter;
 
-    @CompilationFinal private volatile ContextProfile profile;
+    private final PolyglotLanguage language;
+    private final PolyglotSharingLayer layer;
+    @CompilationFinal private boolean seenError;
 
-    private final PolyglotEngineImpl engine;
-
-    HostToGuestRootNode() {
+    /*
+     * This constructor is only used for uncached locations. Which will never get executed.
+     */
+    HostToGuestRootNode(PolyglotSharingLayer layer) {
         super(null);
-        this.engine = (PolyglotEngineImpl) EngineAccessor.NODES.getPolyglotEngine(this);
-        assert this.engine != null : "all host to guest root nodes need to be initialized when entered";
+        assert layer != null;
+        this.layer = layer;
+        this.language = null;
+        EngineAccessor.NODES.setSharingLayer(this, layer);
+    }
+
+    HostToGuestRootNode(PolyglotLanguageInstance language) {
+        super(null);
+        EngineAccessor.NODES.setSharingLayer(this, language.sharing);
+        this.layer = language.sharing;
+        this.language = language.language;
     }
 
     protected abstract Class<?> getReceiverType();
@@ -73,23 +84,38 @@ abstract class HostToGuestRootNode extends RootNode {
     @Override
     public final Object execute(VirtualFrame frame) {
         Object[] args = frame.getArguments();
-        PolyglotLanguageContext languageContext = profileContext(args[0]);
-        assert languageContext != null;
-        PolyglotContextImpl context = languageContext.context;
-        boolean needsEnter = languageContext != null && engine.needsEnter(context);
-        Object prev;
-        if (needsEnter) {
-            if (!seenEnter) {
-                CompilerDirectives.transferToInterpreterAndInvalidate();
-                seenEnter = true;
+        PolyglotLanguageContext languageContext = layer.getSingleConstantLanguageContext(language);
+        if (languageContext == null) {
+            languageContext = (PolyglotLanguageContext) args[0];
+        }
+        PolyglotContextImpl constantContext = layer.getSingleConstantContext();
+        if (constantContext == null) {
+            constantContext = languageContext.context;
+        }
+        assert languageContext.context == constantContext;
+        PolyglotContextImpl context = constantContext;
+
+        assert Objects.equals(layer, languageContext.context.layer) : PolyglotSharingLayer.invalidSharingError(this, layer, languageContext.context.layer);
+
+        Object[] prev;
+        boolean needsEnter;
+        try {
+            needsEnter = layer.engine.needsEnter(context);
+            if (needsEnter) {
+                if (!seenEnter) {
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    seenEnter = true;
+                }
+                prev = layer.engine.enterCached(context, true);
+            } else {
+                if (!seenNonEnter) {
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    seenNonEnter = true;
+                }
+                prev = null;
             }
-            prev = engine.enter(context);
-        } else {
-            if (!seenNonEnter) {
-                CompilerDirectives.transferToInterpreterAndInvalidate();
-                seenNonEnter = true;
-            }
-            prev = null;
+        } catch (Throwable e) {
+            throw handleException(languageContext, e, false, RuntimeException.class);
         }
         try {
             Object[] arguments = frame.getArguments();
@@ -99,32 +125,31 @@ abstract class HostToGuestRootNode extends RootNode {
             assert !(result instanceof TruffleObject);
             return result;
         } catch (Throwable e) {
-            CompilerDirectives.transferToInterpreter();
-            throw PolyglotImpl.wrapGuestException((languageContext), e);
+            throw handleException(languageContext, e, true, RuntimeException.class);
         } finally {
             if (needsEnter) {
-                engine.leave(prev, context);
+                try {
+                    layer.engine.leaveCached(prev, context);
+                } catch (Throwable e) {
+                    throw handleException(languageContext, e, false, RuntimeException.class);
+                }
             }
         }
     }
 
-    private PolyglotLanguageContext profileContext(Object languageContext) {
-        ContextProfile localProfile = this.profile;
-        if (localProfile == null) {
+    @SuppressWarnings({"unchecked", "unused"})
+    private <E extends Throwable> E handleException(PolyglotLanguageContext languageContext, Throwable e, boolean entered, Class<E> exceptionType) throws E {
+        if (!seenError) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            profile = localProfile = ((PolyglotLanguageContext) languageContext).language.profile;
+            seenError = true;
         }
-        return localProfile.profile(languageContext);
+        throw PolyglotImpl.guestToHostException(languageContext, e, entered);
     }
 
     protected abstract Object executeImpl(PolyglotLanguageContext languageContext, Object receiver, Object[] args);
 
-    protected static CallTarget createTarget(HostToGuestRootNode node) {
-        return Truffle.getRuntime().createCallTarget(node);
-    }
-
     static <T> T installHostCodeCache(PolyglotLanguageContext languageContext, Object key, T value, Class<T> expectedType) {
-        T result = expectedType.cast(languageContext.getLanguageInstance().hostInteropCodeCache.putIfAbsent(key, value));
+        T result = expectedType.cast(languageContext.getLanguageInstance().hostToGuestCodeCache.putIfAbsent(key, value));
         if (result != null) {
             return result;
         } else {
@@ -133,7 +158,7 @@ abstract class HostToGuestRootNode extends RootNode {
     }
 
     static <T> T lookupHostCodeCache(PolyglotLanguageContext languageContext, Object key, Class<T> expectedType) {
-        return expectedType.cast(languageContext.getLanguageInstance().hostInteropCodeCache.get(key));
+        return expectedType.cast(languageContext.getLanguageInstance().hostToGuestCodeCache.get(key));
     }
 
 }

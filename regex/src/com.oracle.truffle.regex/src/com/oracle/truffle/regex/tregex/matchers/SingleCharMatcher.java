@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,43 +40,41 @@
  */
 package com.oracle.truffle.regex.tregex.matchers;
 
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-
-import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.regex.tregex.util.DebugUtil;
 
 /**
  * Matcher that matches a single character.
  */
-public abstract class SingleCharMatcher extends InvertibleCharMatcher {
+public final class SingleCharMatcher extends InvertibleCharMatcher {
 
-    private final char c;
+    private final int c;
 
     /**
      * Constructs a new {@link SingleCharMatcher}.
-     * 
+     *
      * @param invert see {@link InvertibleCharMatcher}.
      * @param c character to match.
      */
-    SingleCharMatcher(boolean invert, char c) {
+    SingleCharMatcher(boolean invert, int c) {
         super(invert);
         this.c = c;
     }
 
-    public static SingleCharMatcher create(boolean invert, char c) {
-        return SingleCharMatcherNodeGen.create(invert, c);
+    public static SingleCharMatcher create(boolean invert, int c) {
+        return new SingleCharMatcher(invert, c);
     }
 
     /**
      * @return the character to match.
      */
-    public char getChar() {
+    public int getChar() {
         return c;
     }
 
-    @Specialization
-    public boolean match(char m, boolean compactString) {
-        return result((!compactString || c < 256) && c == m);
+    @Override
+    public boolean match(int m) {
+        return result(c == m);
     }
 
     @Override

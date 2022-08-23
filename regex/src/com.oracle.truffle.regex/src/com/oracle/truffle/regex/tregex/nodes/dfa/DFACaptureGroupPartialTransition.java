@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,44 +41,52 @@
 package com.oracle.truffle.regex.tregex.nodes.dfa;
 
 import java.util.Arrays;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+
+import org.graalvm.collections.EconomicMap;
 
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.regex.tregex.dfa.DFAGenerator;
+import com.oracle.truffle.regex.tregex.parser.Counter;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonArray;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
 import com.oracle.truffle.regex.tregex.util.json.JsonValue;
+import com.oracle.truffle.regex.util.EmptyArrays;
 
 public final class DFACaptureGroupPartialTransition implements JsonConvertible {
 
     public static final int FINAL_STATE_RESULT_INDEX = 0;
 
-    public static final byte[] EMPTY_REORDER_SWAPS = {};
-    public static final byte[] EMPTY_ARRAY_COPIES = {};
-    public static final byte[][] EMPTY_INDEX_UPDATES = {};
-    public static final byte[][] EMPTY_INDEX_CLEARS = {};
+    public static final byte[] EMPTY = EmptyArrays.BYTE;
+    public static final IndexOperation[] EMPTY_INDEX_OPS = {};
+    public static final LastGroupUpdate[] EMPTY_LAST_GROUP_UPDATES = {};
 
     private static final DFACaptureGroupPartialTransition EMPTY_INSTANCE = new DFACaptureGroupPartialTransition(
-                    0, EMPTY_REORDER_SWAPS, EMPTY_ARRAY_COPIES, EMPTY_INDEX_UPDATES, EMPTY_INDEX_CLEARS, (byte) 0);
+                    0, EMPTY, EMPTY, EMPTY_INDEX_OPS, EMPTY_INDEX_OPS, EMPTY_LAST_GROUP_UPDATES, (byte) 0);
 
     private final int id;
     @CompilationFinal(dimensions = 1) private final byte[] reorderSwaps;
     @CompilationFinal(dimensions = 1) private final byte[] arrayCopies;
-    @CompilationFinal(dimensions = 2) private final byte[][] indexUpdates;
-    @CompilationFinal(dimensions = 2) private final byte[][] indexClears;
+    @CompilationFinal(dimensions = 1) private final IndexOperation[] indexUpdates;
+    @CompilationFinal(dimensions = 1) private final IndexOperation[] indexClears;
+    @CompilationFinal(dimensions = 1) private final LastGroupUpdate[] lastGroupUpdates;
     private final byte preReorderFinalStateResultIndex;
 
-    private DFACaptureGroupPartialTransition(int id, byte[] reorderSwaps, byte[] arrayCopies, byte[][] indexUpdates, byte[][] indexClears,
-                    byte preReorderFinalStateResultIndex) {
+    private DFACaptureGroupPartialTransition(int id, byte[] reorderSwaps, byte[] arrayCopies, IndexOperation[] indexUpdates, IndexOperation[] indexClears,
+                    LastGroupUpdate[] lastGroupUpdates, byte preReorderFinalStateResultIndex) {
         this.id = id;
         this.reorderSwaps = reorderSwaps;
         this.arrayCopies = arrayCopies;
         this.indexUpdates = indexUpdates;
         this.indexClears = indexClears;
+        this.lastGroupUpdates = lastGroupUpdates;
         this.preReorderFinalStateResultIndex = preReorderFinalStateResultIndex;
     }
 
@@ -129,9 +137,9 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
      *            {@link DFACaptureGroupTrackingData#results} shall be updated to
      *            {@code currentIndex} in
      *            {@link #apply(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int)},
-     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, boolean, int)}
+     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int, boolean)}
      *            and
-     *            {@link #applyFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, boolean, int)}
+     *            {@link #applyFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int)}
      *            . In every row (1st dimension element) of this 2D array, the first value is the
      *            index of one row in {@link DFACaptureGroupTrackingData#results}, all following
      *            values are indices in that row that shall be set to {@code currentIndex}.
@@ -145,15 +153,15 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
      * @param indexClears denotes which index of which array in
      *            {@link DFACaptureGroupTrackingData#results} shall be updated to {@code 0} in
      *            {@link #apply(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int)},
-     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, boolean, int)}
+     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int, boolean)}
      *            and
-     *            {@link #applyFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, boolean, int)}
+     *            {@link #applyFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int)}
      *            , analogous to {@code indexUpdates}.
      * @param preReorderFinalStateResultIndex denotes the row (1st dimension element) of
      *            {@link DFACaptureGroupTrackingData#results} that corresponds to the NFA final
      *            state <em>before</em> the reordering given by {@code reorderSwaps} is applied.
      *            This is needed in
-     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, boolean, int)}
+     *            {@link #applyPreFinalStateTransition(TRegexDFAExecutorNode, DFACaptureGroupTrackingData, int, boolean)}
      *            when {@link TRegexDFAExecutorNode#isSearching()} is {@code true}, because in that
      *            case we need to be able to apply copy the current result corresponding to the NFA
      *            final state without doing any reordering.
@@ -164,19 +172,147 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
                     DFAGenerator dfaGen,
                     byte[] reorderSwaps,
                     byte[] arrayCopies,
-                    byte[][] indexUpdates,
-                    byte[][] indexClears,
+                    IndexOperation[] indexUpdates,
+                    IndexOperation[] indexClears,
+                    LastGroupUpdate[] lastGroupUpdates,
+                    byte preReorderFinalStateResultIndex) {
+        Counter idCounter = dfaGen.getCgPartialTransitionIDCounter();
+        DFACaptureGroupPartialTransition ret = createInternal(idCounter.getCount(), reorderSwaps, arrayCopies, indexUpdates, indexClears, lastGroupUpdates, preReorderFinalStateResultIndex);
+        if (ret.isEmpty()) {
+            return ret;
+        }
+        EconomicMap<DFACaptureGroupPartialTransition, DFACaptureGroupPartialTransition> dedup = dfaGen.getCompilationBuffer().getLazyTransitionDeduplicationMap();
+        DFACaptureGroupPartialTransition lookup = dedup.get(ret);
+        if (lookup != null) {
+            return lookup;
+        }
+        dedup.put(ret, ret);
+        idCounter.inc();
+        return ret;
+    }
+
+    private static DFACaptureGroupPartialTransition createInternal(
+                    int id,
+                    byte[] reorderSwaps,
+                    byte[] arrayCopies,
+                    IndexOperation[] indexUpdates,
+                    IndexOperation[] indexClears,
+                    LastGroupUpdate[] lastGroupUpdates,
                     byte preReorderFinalStateResultIndex) {
         assert (reorderSwaps.length & 1) == 0 : "reorderSwaps must have an even number of elements";
-        if (reorderSwaps.length == 0 && arrayCopies.length == 0 && indexUpdates.length == 0 && indexClears.length == 0 && preReorderFinalStateResultIndex == 0) {
+        if (reorderSwaps.length == 0 && arrayCopies.length == 0 && indexUpdates.length == 0 && indexClears.length == 0 && lastGroupUpdates.length == 0 && preReorderFinalStateResultIndex == 0) {
             return getEmptyInstance();
         }
-        return new DFACaptureGroupPartialTransition(dfaGen.getCgPartialTransitionIDCounter().inc(),
-                        reorderSwaps, arrayCopies, indexUpdates, indexClears, preReorderFinalStateResultIndex);
+        return new DFACaptureGroupPartialTransition(id, reorderSwaps, arrayCopies, indexUpdates, indexClears, lastGroupUpdates, preReorderFinalStateResultIndex);
+    }
+
+    public static DFACaptureGroupPartialTransition intersect(DFACaptureGroupPartialTransition[] transitions) {
+        byte[] reorderSwaps = commonArray(transitions, DFACaptureGroupPartialTransition::getReorderSwaps);
+        byte[] arrayCopies = commonArray(transitions, DFACaptureGroupPartialTransition::getArrayCopies);
+        if (reorderSwaps == null || arrayCopies == null || !samePreReorderFinalStateResultIndex(transitions)) {
+            // can't extract common operations from partial transitions that re-arrange the target
+            // arrays in different ways
+            return getEmptyInstance();
+        }
+        return createInternal(0,
+                        reorderSwaps,
+                        arrayCopies,
+                        commonOps(transitions, DFACaptureGroupPartialTransition::getIndexUpdates, IndexOperation[]::new, EMPTY_INDEX_OPS),
+                        commonOps(transitions, DFACaptureGroupPartialTransition::getIndexClears, IndexOperation[]::new, EMPTY_INDEX_OPS),
+                        commonOps(transitions, DFACaptureGroupPartialTransition::getLastGroupUpdates, LastGroupUpdate[]::new, EMPTY_LAST_GROUP_UPDATES),
+                        transitions[0].preReorderFinalStateResultIndex);
+    }
+
+    private static boolean samePreReorderFinalStateResultIndex(DFACaptureGroupPartialTransition[] transitions) {
+        byte cmp = transitions[0].preReorderFinalStateResultIndex;
+        for (int i = 1; i < transitions.length; i++) {
+            if (cmp != transitions[i].preReorderFinalStateResultIndex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static byte[] commonArray(DFACaptureGroupPartialTransition[] transitions, Function<DFACaptureGroupPartialTransition, byte[]> getter) {
+        byte[] array = getter.apply(transitions[0]);
+        for (int i = 1; i < transitions.length; i++) {
+            if (!Arrays.equals(array, getter.apply(transitions[i]))) {
+                return null;
+            }
+        }
+        return array;
+    }
+
+    private static <T> T[] commonOps(DFACaptureGroupPartialTransition[] transitions, Function<DFACaptureGroupPartialTransition, T[]> getter, IntFunction<T[]> arraySupplier, T[] emptyInstance) {
+        T[] first = getter.apply(transitions[0]);
+        if (first == emptyInstance) {
+            return emptyInstance;
+        }
+        T[] common = arraySupplier.apply(first.length);
+        int iC = 0;
+        for (T op : first) {
+            if (allContain(transitions, op, getter)) {
+                common[iC++] = op;
+            }
+        }
+        return iC == 0 ? emptyInstance : iC == common.length ? first : Arrays.copyOf(common, iC);
+    }
+
+    private static <T> boolean allContain(DFACaptureGroupPartialTransition[] transitions, T op, Function<DFACaptureGroupPartialTransition, T[]> getter) {
+        for (int i = 1; i < transitions.length; i++) {
+            if (!contains(getter.apply(transitions[i]), op)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public DFACaptureGroupPartialTransition subtract(DFACaptureGroupPartialTransition other) {
+        assert other.reorderSwaps == EMPTY || Arrays.equals(other.reorderSwaps, reorderSwaps);
+        assert other.arrayCopies == EMPTY || Arrays.equals(other.arrayCopies, arrayCopies);
+        return createInternal(id,
+                        other.reorderSwaps != EMPTY ? EMPTY : reorderSwaps,
+                        other.arrayCopies != EMPTY ? EMPTY : arrayCopies,
+                        subtract(indexUpdates, other.indexUpdates, IndexOperation[]::new, EMPTY_INDEX_OPS),
+                        subtract(indexClears, other.indexClears, IndexOperation[]::new, EMPTY_INDEX_OPS),
+                        subtract(lastGroupUpdates, other.lastGroupUpdates, LastGroupUpdate[]::new, EMPTY_LAST_GROUP_UPDATES),
+                        preReorderFinalStateResultIndex);
+    }
+
+    private static <T> T[] subtract(T[] a, T[] b, IntFunction<T[]> arraySupplier, T[] emptyInstance) {
+        if (b == emptyInstance) {
+            return a;
+        }
+        if (b.length == a.length) {
+            return emptyInstance;
+        }
+        assert a.length > b.length;
+        T[] subtracted = arraySupplier.apply(a.length - b.length);
+        int i = 0;
+        for (T op : a) {
+            if (!contains(b, op)) {
+                subtracted[i++] = op;
+            }
+        }
+        assert i == subtracted.length;
+        return subtracted;
+    }
+
+    private static <T> boolean contains(T[] ops, T op) {
+        for (T cmp : ops) {
+            if (op.equals(cmp)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static DFACaptureGroupPartialTransition getEmptyInstance() {
         return EMPTY_INSTANCE;
+    }
+
+    public boolean isEmpty() {
+        return this == EMPTY_INSTANCE;
     }
 
     public int getId() {
@@ -187,37 +323,92 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
         return reorderSwaps.length > 0;
     }
 
+    public byte[] getReorderSwaps() {
+        return reorderSwaps;
+    }
+
     public byte[] getArrayCopies() {
         return arrayCopies;
     }
 
+    public IndexOperation[] getIndexUpdates() {
+        return indexUpdates;
+    }
+
+    public IndexOperation[] getIndexClears() {
+        return indexClears;
+    }
+
+    public LastGroupUpdate[] getLastGroupUpdates() {
+        return lastGroupUpdates;
+    }
+
     public void apply(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, final int currentIndex) {
+        apply(executor, d, currentIndex, false, false);
+    }
+
+    public void apply(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, final int currentIndex, boolean preFinal, boolean export) {
+        if (preFinal) {
+            applyPreFinalStateTransition(executor, d, currentIndex, export);
+        } else {
+            applyRegular(executor, d, currentIndex);
+        }
+    }
+
+    private void applyRegular(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, final int currentIndex) {
         if (executor.recordExecution()) {
             executor.getDebugRecorder().recordCGPartialTransition(currentIndex, id);
         }
         CompilerAsserts.partialEvaluationConstant(this);
-        applyReorder(d.currentResultOrder);
-        applyArrayCopy(d.results, d.currentResultOrder, d.currentResult.length);
-        applyIndexUpdate(d.results, d.currentResultOrder, currentIndex);
-        applyIndexClear(d.results, d.currentResultOrder);
+        CompilerAsserts.partialEvaluationConstant(executor);
+        if (executor.getMaxNumberOfNFAStates() == 1) {
+            assert d.currentResultOrder == null;
+            assert reorderSwaps.length == 0;
+            assert arrayCopies.length == 0;
+            assert indexUpdates.length <= 1;
+            assert indexClears.length <= 1;
+            assert lastGroupUpdates.length <= 1;
+            if (indexUpdates.length > 0) {
+                writeDirect(d.results, 0, indexUpdates[0].indices, currentIndex);
+            }
+            if (indexClears.length > 0) {
+                writeDirect(d.results, 0, indexClears[0].indices, -1);
+            }
+            if (lastGroupUpdates.length > 0 && executor.getProperties().tracksLastGroup()) {
+                assert lastGroupUpdates[0].getTargetArray() == 0;
+                d.results[d.results.length - 1] = lastGroupUpdates[0].getLastGroup();
+            }
+        } else {
+            applyReorder(d.currentResultOrder);
+            applyArrayCopy(d.results, d.currentResultOrder, d.currentResult.length);
+            applyIndexOps(indexUpdates, d.results, d.currentResultOrder, currentIndex);
+            applyIndexOps(indexClears, d.results, d.currentResultOrder, -1);
+            if (executor.getProperties().tracksLastGroup()) {
+                applyLastGroupUpdate(d.results, d.currentResultOrder, d.currentResult.length);
+            }
+        }
     }
 
-    public void applyPreFinalStateTransition(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, boolean searching, final int currentIndex) {
+    private void applyPreFinalStateTransition(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, final int currentIndex, boolean export) {
         CompilerAsserts.partialEvaluationConstant(this);
-        if (!searching) {
+        CompilerAsserts.partialEvaluationConstant(executor);
+        if (!executor.isSearching()) {
             apply(executor, d, currentIndex);
             return;
         }
         if (executor.recordExecution()) {
             executor.getDebugRecorder().recordCGPartialTransition(currentIndex, id);
         }
-        d.exportResult(preReorderFinalStateResultIndex);
-        applyFinalStateTransition(executor, d, true, currentIndex);
+        if (export) {
+            d.exportResult(executor, preReorderFinalStateResultIndex);
+        }
+        applyFinalStateTransition(executor, d, currentIndex);
     }
 
-    public void applyFinalStateTransition(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, boolean searching, int currentIndex) {
+    public void applyFinalStateTransition(TRegexDFAExecutorNode executor, DFACaptureGroupTrackingData d, int currentIndex) {
         CompilerAsserts.partialEvaluationConstant(this);
-        if (!searching) {
+        CompilerAsserts.partialEvaluationConstant(executor);
+        if (!executor.isSearching()) {
             apply(executor, d, currentIndex);
             return;
         }
@@ -227,29 +418,20 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
         assert arrayCopies.length == 0;
         assert indexUpdates.length <= 1;
         assert indexClears.length <= 1;
+        assert lastGroupUpdates.length <= 1;
         if (indexUpdates.length == 1) {
-            assert indexUpdates[0][0] == 0;
-            applyFinalStateTransitionIndexUpdates(d, currentIndex);
+            assert indexUpdates[0].targetArray == 0;
+            writeDirect(d.currentResult, 0, indexUpdates[0].indices, currentIndex);
         }
         if (indexClears.length == 1) {
-            assert indexClears[0][0] == 0;
-            applyFinalStateTransitionIndexClears(d);
+            assert indexClears[0].targetArray == 0;
+            writeDirect(d.currentResult, 0, indexClears[0].indices, -1);
         }
-    }
-
-    @ExplodeLoop
-    private void applyFinalStateTransitionIndexUpdates(DFACaptureGroupTrackingData d, int currentIndex) {
-        for (int i = 1; i < indexUpdates[0].length; i++) {
-            final int targetIndex = Byte.toUnsignedInt(indexUpdates[0][i]);
-            d.currentResult[targetIndex] = currentIndex;
-        }
-    }
-
-    @ExplodeLoop
-    private void applyFinalStateTransitionIndexClears(DFACaptureGroupTrackingData d) {
-        for (int i = 1; i < indexClears[0].length; i++) {
-            final int targetIndex = Byte.toUnsignedInt(indexClears[0][i]);
-            d.currentResult[targetIndex] = 0;
+        if (executor.getProperties().tracksLastGroup()) {
+            if (lastGroupUpdates.length == 1) {
+                assert lastGroupUpdates[0].targetArray == 0;
+                d.currentResult[d.currentResult.length - 1] = lastGroupUpdates[0].getLastGroup();
+            }
         }
     }
 
@@ -274,37 +456,42 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
     }
 
     @ExplodeLoop
-    private void applyIndexUpdate(int[] results, int[] currentResultOrder, int currentIndex) {
-        for (byte[] indexUpdate : indexUpdates) {
-            assert indexUpdate.length > 1;
-            final int targetArray = Byte.toUnsignedInt(indexUpdate[0]);
-            for (int i = 1; i < indexUpdate.length; i++) {
-                final int targetIndex = Byte.toUnsignedInt(indexUpdate[i]);
-                results[currentResultOrder[targetArray] + targetIndex] = currentIndex;
-            }
+    private static void applyIndexOps(IndexOperation[] indexOps, int[] results, int[] currentResultOrder, int currentIndex) {
+        for (IndexOperation op : indexOps) {
+            writeDirect(results, currentResultOrder[op.getTargetArray()], op.indices, currentIndex);
         }
     }
 
     @ExplodeLoop
-    private void applyIndexClear(int[] results, int[] currentResultOrder) {
-        for (byte[] indexClear : indexClears) {
-            assert indexClear.length > 1;
-            final int targetArray = Byte.toUnsignedInt(indexClear[0]);
-            for (int i = 1; i < indexClear.length; i++) {
-                final int targetIndex = Byte.toUnsignedInt(indexClear[i]);
-                results[currentResultOrder[targetArray] + targetIndex] = 0;
-            }
+    private static void writeDirect(int[] array, int offset, byte[] indices, int value) {
+        for (int i = 0; i < indices.length; i++) {
+            array[offset + Byte.toUnsignedInt(indices[i])] = value;
+        }
+    }
+
+    @ExplodeLoop
+    private void applyLastGroupUpdate(int[] results, int[] currentResultOrder, int length) {
+        for (LastGroupUpdate lastGroupUpdate : lastGroupUpdates) {
+            final int targetArray = lastGroupUpdate.getTargetArray();
+            results[currentResultOrder[targetArray] + length - 1] = lastGroupUpdate.getLastGroup();
         }
     }
 
     @Override
     public boolean equals(Object obj) {
+        if (this == obj) {
+            return true;
+        }
         if (!(obj instanceof DFACaptureGroupPartialTransition)) {
             return false;
         }
         DFACaptureGroupPartialTransition o = (DFACaptureGroupPartialTransition) obj;
-        return Arrays.equals(reorderSwaps, o.reorderSwaps) && Arrays.equals(arrayCopies, o.arrayCopies) &&
-                        Arrays.deepEquals(indexUpdates, o.indexUpdates) && Arrays.deepEquals(indexClears, o.indexClears);
+        return Arrays.equals(reorderSwaps, o.reorderSwaps) &&
+                        Arrays.equals(arrayCopies, o.arrayCopies) &&
+                        Arrays.equals(indexUpdates, o.indexUpdates) &&
+                        Arrays.equals(indexClears, o.indexClears) &&
+                        Arrays.equals(lastGroupUpdates, o.lastGroupUpdates) &&
+                        preReorderFinalStateResultIndex == o.preReorderFinalStateResultIndex;
     }
 
     @Override
@@ -312,8 +499,10 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
         final int prime = 31;
         int result = Arrays.hashCode(reorderSwaps);
         result = prime * result + Arrays.hashCode(arrayCopies);
-        result = prime * result + Arrays.deepHashCode(indexUpdates);
-        result = prime * result + Arrays.deepHashCode(indexClears);
+        result = prime * result + Arrays.hashCode(indexUpdates);
+        result = prime * result + Arrays.hashCode(indexClears);
+        result = prime * result + Arrays.hashCode(lastGroupUpdates);
+        result = prime * result + preReorderFinalStateResultIndex;
         return result;
     }
 
@@ -338,19 +527,11 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
     }
 
     @TruffleBoundary
-    private static void indexManipulationsToString(StringBuilder sb, byte[][] indexManipulations, String name) {
+    private static void indexManipulationsToString(StringBuilder sb, IndexOperation[] indexManipulations, String name) {
         if (indexManipulations.length > 0) {
             sb.append(System.lineSeparator()).append(name).append(": ");
-            for (byte[] indexManipulation : indexManipulations) {
-                final int targetArray = Byte.toUnsignedInt(indexManipulation[0]);
-                sb.append(System.lineSeparator()).append("    ").append(targetArray).append(" <- [");
-                for (int i = 1; i < indexManipulation.length; i++) {
-                    if (i > 1) {
-                        sb.append(", ");
-                    }
-                    sb.append(Byte.toUnsignedInt(indexManipulation[i]));
-                }
-                sb.append("]");
+            for (IndexOperation indexManipulation : indexManipulations) {
+                sb.append(System.lineSeparator()).append("    ").append(indexManipulation);
             }
         }
     }
@@ -366,42 +547,148 @@ public final class DFACaptureGroupPartialTransition implements JsonConvertible {
             copies.append(Json.obj(Json.prop("source", source), Json.prop("target", target)));
         }
         json.append(Json.prop("arrayCopies", copies));
-        for (byte[] indexUpdate : indexUpdates) {
-            json.append(indexManipulationToProp("indexUpdates", indexUpdate, true));
+        for (IndexOperation indexUpdate : indexUpdates) {
+            json.append(Json.prop("indexUpdates", indexUpdate));
         }
-        for (byte[] indexClear : indexClears) {
-            json.append(indexManipulationToProp("indexClears", indexClear, true));
+        for (IndexOperation indexClear : indexClears) {
+            json.append(Json.prop("indexClears", indexClear));
         }
         return json;
     }
 
-    @TruffleBoundary
-    static JsonObject.JsonObjectProperty indexManipulationToProp(String name, byte[] values, boolean hasTarget) {
-        return Json.prop(name, Json.obj(
-                        Json.prop("target", hasTarget ? Byte.toUnsignedInt(values[0]) : 0),
-                        Json.prop("groupStarts", groupEntriesToJsonArray(values, hasTarget)),
-                        Json.prop("groupEnds", groupExitsToJsonArray(values, hasTarget))));
-    }
+    public static final class IndexOperation implements JsonConvertible {
 
-    @TruffleBoundary
-    private static JsonArray groupEntriesToJsonArray(byte[] gbArray, boolean hasTarget) {
-        return groupBoundariesToJsonArray(gbArray, true, hasTarget);
-    }
+        private final byte targetArray;
+        @CompilationFinal(dimensions = 1) private final byte[] indices;
 
-    @TruffleBoundary
-    private static JsonArray groupExitsToJsonArray(byte[] gbArray, boolean hasTarget) {
-        return groupBoundariesToJsonArray(gbArray, false, hasTarget);
-    }
-
-    @TruffleBoundary
-    private static JsonArray groupBoundariesToJsonArray(byte[] gbArray, boolean entries, boolean hasTarget) {
-        JsonArray array = Json.array();
-        for (int i = hasTarget ? 1 : 0; i < gbArray.length; i++) {
-            int intValue = Byte.toUnsignedInt(gbArray[i]);
-            if ((intValue & 1) == (entries ? 0 : 1)) {
-                array.append(Json.val(intValue / 2));
-            }
+        public IndexOperation(int targetArray, byte[] indices) {
+            assert targetArray < 256;
+            this.targetArray = (byte) targetArray;
+            this.indices = indices;
         }
-        return array;
+
+        public int getTargetArray() {
+            return Byte.toUnsignedInt(targetArray);
+        }
+
+        public int getNumberOfIndices() {
+            return indices.length;
+        }
+
+        public int getIndex(int i) {
+            return Byte.toUnsignedInt(indices[i]);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            IndexOperation that = (IndexOperation) o;
+            return targetArray == that.targetArray && Arrays.equals(indices, that.indices);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hash(targetArray);
+            result = 31 * result + Arrays.hashCode(indices);
+            return result;
+        }
+
+        @TruffleBoundary
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            sb.append(getTargetArray()).append(" <- [");
+            for (int i = 0; i < getNumberOfIndices(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(getIndex(i));
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+
+        @TruffleBoundary
+        @Override
+        public JsonValue toJson() {
+            return Json.obj(Json.prop("target", getTargetArray()),
+                            Json.prop("groupStarts", groupEntriesToJsonArray(indices)),
+                            Json.prop("groupEnds", groupExitsToJsonArray(indices)));
+        }
+
+        @TruffleBoundary
+        private static JsonArray groupEntriesToJsonArray(byte[] gbArray) {
+            return groupBoundariesToJsonArray(gbArray, true);
+        }
+
+        @TruffleBoundary
+        private static JsonArray groupExitsToJsonArray(byte[] gbArray) {
+            return groupBoundariesToJsonArray(gbArray, false);
+        }
+
+        @TruffleBoundary
+        private static JsonArray groupBoundariesToJsonArray(byte[] gbArray, boolean entries) {
+            JsonArray array = Json.array();
+            for (int i = 0; i < gbArray.length; i++) {
+                int intValue = Byte.toUnsignedInt(gbArray[i]);
+                if ((intValue & 1) == (entries ? 0 : 1)) {
+                    array.append(Json.val(intValue / 2));
+                }
+            }
+            return array;
+        }
+
+        @TruffleBoundary
+        public static JsonValue groupBoundariesToJsonObject(byte[] arr) {
+            return Json.obj(Json.prop("groupStarts", groupEntriesToJsonArray(arr)),
+                            Json.prop("groupEnds", groupExitsToJsonArray(arr)));
+        }
+    }
+
+    public static final class LastGroupUpdate implements JsonConvertible {
+
+        private final byte targetArray;
+        private final byte lastGroup;
+
+        public LastGroupUpdate(int targetArray, int lastGroup) {
+            assert targetArray < 256;
+            assert lastGroup < Byte.MAX_VALUE;
+            assert lastGroup > 0;
+            this.targetArray = (byte) targetArray;
+            this.lastGroup = (byte) lastGroup;
+        }
+
+        public int getTargetArray() {
+            return Byte.toUnsignedInt(targetArray);
+        }
+
+        public int getLastGroup() {
+            return lastGroup;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            return o instanceof LastGroupUpdate && targetArray == ((LastGroupUpdate) o).targetArray && lastGroup == ((LastGroupUpdate) o).lastGroup;
+        }
+
+        @Override
+        public int hashCode() {
+            return (Byte.toUnsignedInt(targetArray) << 8) | Byte.toUnsignedInt(lastGroup);
+        }
+
+        @TruffleBoundary
+        @Override
+        public JsonValue toJson() {
+            return Json.obj(Json.prop("target", getTargetArray()),
+                            Json.prop("lastGroup", getLastGroup()));
+        }
     }
 }

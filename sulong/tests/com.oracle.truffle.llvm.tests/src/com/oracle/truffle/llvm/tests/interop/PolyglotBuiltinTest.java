@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -44,7 +44,6 @@ import org.junit.runner.RunWith;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.TruffleOptions;
 import com.oracle.truffle.api.interop.InteropLibrary;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
 import com.oracle.truffle.llvm.tests.interop.values.ArrayObject;
@@ -58,11 +57,11 @@ import com.oracle.truffle.tck.TruffleRunner.Inject;
 @RunWith(TruffleRunner.class)
 public class PolyglotBuiltinTest extends InteropTestBase {
 
-    private static TruffleObject testLibrary;
+    private static Object testLibrary;
 
     @BeforeClass
     public static void loadTestBitcode() {
-        testLibrary = InteropTestBase.loadTestBitcodeInternal("polyglotBuiltinTest");
+        testLibrary = loadTestBitcodeInternal("polyglotBuiltinTest.c");
     }
 
     public static class TestNewNode extends SulongTestNode {

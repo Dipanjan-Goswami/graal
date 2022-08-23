@@ -24,78 +24,71 @@
  */
 package com.oracle.svm.hosted.config;
 
-import java.lang.reflect.Modifier;
+import org.graalvm.compiler.core.common.NumUtil;
 
 import com.oracle.svm.core.annotate.Hybrid;
 import com.oracle.svm.core.config.ObjectLayout;
 import com.oracle.svm.hosted.meta.HostedField;
 import com.oracle.svm.hosted.meta.HostedInstanceClass;
 import com.oracle.svm.hosted.meta.HostedMetaAccess;
+import com.oracle.svm.hosted.meta.HostedType;
 
 import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.ResolvedJavaField;
+import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaType;
-import org.graalvm.compiler.core.common.NumUtil;
 
 /**
- * Defines the layout for a hybrid class.
+ * Provides sizes and offsets of a hybrid class.
  *
  * @see Hybrid
- *
- * @param <T> The class which has a layout in hybrid form. It must be annotated with the
- *            {@link Hybrid} annotation.
  */
 public class HybridLayout<T> {
 
     public static boolean isHybrid(ResolvedJavaType clazz) {
-        return clazz.getAnnotation(Hybrid.class) != null;
+        return HybridLayoutSupport.singleton().isHybrid(clazz);
     }
 
-    public static boolean isHybridField(ResolvedJavaField field) {
-        return field.getAnnotation(Hybrid.Array.class) != null || field.getAnnotation(Hybrid.Bitset.class) != null;
+    public static boolean isHybridField(HostedField field) {
+        return HybridLayoutSupport.singleton().isHybridField(field);
+    }
+
+    public static boolean canHybridFieldsBeDuplicated(HostedType clazz) {
+        return HybridLayoutSupport.singleton().canHybridFieldsBeDuplicated(clazz);
+    }
+
+    public static boolean canInstantiateAsInstance(HostedType clazz) {
+        return HybridLayoutSupport.singleton().canInstantiateAsInstance(clazz);
     }
 
     private final ObjectLayout layout;
+    private final HostedType arrayType;
     private final HostedField arrayField;
-    private final HostedField bitsetField;
-    private final int instanceSize;
+    private final HostedField typeIDSlotsField;
+    private final int arrayBaseOffset;
 
     public HybridLayout(Class<T> hybridClass, ObjectLayout layout, HostedMetaAccess metaAccess) {
-        this((HostedInstanceClass) metaAccess.lookupJavaType(hybridClass), layout);
+        this((HostedInstanceClass) metaAccess.lookupJavaType(hybridClass), layout, metaAccess);
     }
 
-    public HybridLayout(HostedInstanceClass hybridClass, ObjectLayout layout) {
+    public HybridLayout(HostedInstanceClass hybridClass, ObjectLayout layout, MetaAccessProvider metaAccess) {
         this.layout = layout;
+        HybridLayoutSupport.HybridInfo hybridInfo = HybridLayoutSupport.singleton().inspectHybrid(hybridClass, metaAccess);
+        this.arrayType = hybridInfo.arrayType;
+        this.arrayField = hybridInfo.arrayField;
+        this.typeIDSlotsField = hybridInfo.typeIDSlotsField;
+        this.arrayBaseOffset = NumUtil.roundUp(hybridClass.getAfterFieldsOffset(), layout.sizeInBytes(getArrayElementStorageKind()));
+    }
 
-        assert hybridClass.getAnnotation(Hybrid.class) != null;
-        assert Modifier.isFinal(hybridClass.getModifiers());
-
-        HostedField foundArrayField = null;
-        HostedField foundBitsetField = null;
-        for (HostedField field : hybridClass.getInstanceFields(true)) {
-            if (field.getAnnotation(Hybrid.Array.class) != null) {
-                assert foundArrayField == null : "must have exactly one hybrid array field";
-                assert field.getType().isArray();
-                foundArrayField = field;
-            }
-            if (field.getAnnotation(Hybrid.Bitset.class) != null) {
-                assert foundBitsetField == null : "must have at most one hybrid bitset field";
-                assert !field.getType().isArray();
-                foundBitsetField = field;
-            }
-        }
-        assert foundArrayField != null : "must have exactly one hybrid array field";
-        arrayField = foundArrayField;
-        bitsetField = foundBitsetField;
-        instanceSize = hybridClass.getInstanceSize();
+    public HostedType getArrayType() {
+        return arrayType;
     }
 
     public JavaKind getArrayElementStorageKind() {
-        return arrayField.getType().getComponentType().getStorageKind();
+        return arrayType.getComponentType().getStorageKind();
     }
 
     public int getArrayBaseOffset() {
-        return NumUtil.roundUp(instanceSize, layout.sizeInBytes(getArrayElementStorageKind()));
+        return arrayBaseOffset;
     }
 
     public long getArrayElementOffset(int index) {
@@ -110,15 +103,11 @@ public class HybridLayout<T> {
         return arrayField;
     }
 
-    public HostedField getBitsetField() {
-        return bitsetField;
+    public HostedField getTypeIDSlotsField() {
+        return typeIDSlotsField;
     }
 
-    public int getInstanceSize() {
-        return instanceSize;
-    }
-
-    public int getBitFieldOffset() {
+    public static int getTypeIDSlotsFieldOffset(ObjectLayout layout) {
         return layout.getArrayLengthOffset() + layout.sizeInBytes(JavaKind.Int);
     }
 }

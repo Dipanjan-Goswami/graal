@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,28 +24,26 @@
  */
 package org.graalvm.compiler.hotspot.stubs;
 
+import java.util.BitSet;
+
 import org.graalvm.compiler.api.replacements.Snippet;
-import org.graalvm.compiler.api.replacements.Snippet.ConstantParameter;
-import org.graalvm.compiler.api.replacements.Snippet.NonNullParameter;
 import org.graalvm.compiler.core.common.CompilationIdentifier;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.hotspot.HotSpotForeignCallLinkage;
 import org.graalvm.compiler.hotspot.meta.HotSpotProviders;
+import org.graalvm.compiler.nodes.GraphState.GuardsStage;
 import org.graalvm.compiler.nodes.NodeView;
 import org.graalvm.compiler.nodes.ParameterNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.StructuredGraph.GuardsStage;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
+import org.graalvm.compiler.nodes.spi.SnippetParameterInfo;
 import org.graalvm.compiler.options.OptionValues;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
-import org.graalvm.compiler.phases.common.LoweringPhase;
+import org.graalvm.compiler.phases.common.HighTierLoweringPhase;
 import org.graalvm.compiler.replacements.SnippetTemplate;
 import org.graalvm.compiler.replacements.Snippets;
 
-import jdk.vm.ci.meta.Local;
-import jdk.vm.ci.meta.LocalVariableTable;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
@@ -90,19 +88,20 @@ public abstract class SnippetStub extends Stub implements Snippets {
     protected StructuredGraph getGraph(DebugContext debug, CompilationIdentifier compilationId) {
         // Stubs cannot have optimistic assumptions since they have
         // to be valid for the entire run of the VM.
-        final StructuredGraph graph = buildInitialGraph(debug, compilationId, makeConstArgs());
+        SnippetParameterInfo info = providers.getReplacements().getSnippetParameterInfo(method);
+        final StructuredGraph graph = buildInitialGraph(debug, compilationId, makeConstArgs(info), SnippetParameterInfo.getNonNullParameters(info));
         try (DebugContext.Scope outer = debug.scope("SnippetStub", graph)) {
             for (ParameterNode param : graph.getNodes(ParameterNode.TYPE)) {
                 int index = param.index();
-                if (method.getParameterAnnotation(NonNullParameter.class, index) != null) {
+                if (info.isNonNullParameter(index)) {
                     param.setStamp(param.stamp(NodeView.DEFAULT).join(StampFactory.objectNonNull()));
                 }
             }
 
-            graph.setGuardsStage(GuardsStage.FLOATING_GUARDS);
+            graph.getGraphState().setGuardsStage(GuardsStage.FLOATING_GUARDS);
             CanonicalizerPhase canonicalizer = CanonicalizerPhase.create();
             canonicalizer.apply(graph, providers);
-            new LoweringPhase(canonicalizer, LoweringTool.StandardLoweringStage.HIGH_TIER).apply(graph, providers);
+            new HighTierLoweringPhase(canonicalizer).apply(graph, providers);
         } catch (Throwable e) {
             throw debug.handle(e);
         }
@@ -110,27 +109,14 @@ public abstract class SnippetStub extends Stub implements Snippets {
         return graph;
     }
 
-    protected StructuredGraph buildInitialGraph(DebugContext debug, CompilationIdentifier compilationId, Object[] args) {
-        return providers.getReplacements().getSnippet(method, null, args, false, null, options).copyWithIdentifier(compilationId, debug);
+    protected StructuredGraph buildInitialGraph(DebugContext debug, CompilationIdentifier compilationId, Object[] args, BitSet nonNullParameters) {
+        return providers.getReplacements().getSnippet(method, null, args, nonNullParameters, false, null, options).copyWithIdentifier(compilationId, debug);
     }
 
-    protected boolean checkConstArg(int index, String expectedName) {
-        assert method.getParameterAnnotation(ConstantParameter.class, index) != null : String.format("parameter %d of %s is expected to be constant", index, method.format("%H.%n(%p)"));
-        LocalVariableTable lvt = method.getLocalVariableTable();
-        if (lvt != null) {
-            Local local = lvt.getLocal(index, 0);
-            assert local != null;
-            String actualName = local.getName();
-            assert actualName.equals(expectedName) : String.format("parameter %d of %s is expected to be named %s, not %s", index, method.format("%H.%n(%p)"), expectedName, actualName);
-        }
-        return true;
-    }
-
-    protected Object[] makeConstArgs() {
-        int count = method.getSignature().getParameterCount(false);
-        Object[] args = new Object[count];
+    protected Object[] makeConstArgs(SnippetParameterInfo info) {
+        Object[] args = new Object[info.getParameterCount()];
         for (int i = 0; i < args.length; i++) {
-            if (method.getParameterAnnotation(ConstantParameter.class, i) != null) {
+            if (info.isConstantParameter(i)) {
                 args[i] = getConstantParameterValue(i, null);
             }
         }

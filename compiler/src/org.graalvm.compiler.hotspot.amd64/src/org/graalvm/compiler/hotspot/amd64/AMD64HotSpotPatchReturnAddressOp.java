@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -53,7 +53,7 @@ final class AMD64HotSpotPatchReturnAddressOp extends AMD64LIRInstruction {
 
     @Override
     public void emitCode(CompilationResultBuilder crb, AMD64MacroAssembler masm) {
-        int returnAddressOffset = crb.frameMap.totalFrameSize() - masm.target.arch.getReturnAddressSize();
+        int returnAddressOffset = crb.frameMap.totalFrameSize() - masm.getReturnAddressSize();
         masm.movq(new AMD64Address(rsp, returnAddressOffset), asRegister(address));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -183,7 +183,7 @@ designator returns [DebugExpressionPair p] :
   )*;
 
 
-actPars returns [List l] :
+actPars returns [List<DebugExpressionPair> l] :
   {
   $l = new LinkedList<DebugExpressionPair>();
   }
@@ -352,7 +352,8 @@ baseType returns [DebugExprType ty] :
   | 'short'                                                         { $ty = DebugExprType.getIntType(16, true); }
   | 'int'                                                           { $ty = DebugExprType.getIntType(32, true); }
   | ( 'long'                                                        { $ty = DebugExprType.getIntType(64, true); }
-     ( 'double' )?                                                  { $ty = DebugExprType.getFloatType(128); }
+     ( 'double'                                                     { $ty = DebugExprType.getFloatType(128); }
+     )?
     )
   | 'float'                                                         { $ty = DebugExprType.getFloatType(32); }
   | 'double'                                                        { $ty = DebugExprType.getFloatType(64); }

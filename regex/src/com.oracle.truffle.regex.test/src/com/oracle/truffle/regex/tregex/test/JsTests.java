@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.regex.tregex.test;
 
+import com.oracle.truffle.regex.tregex.TRegexOptions;
 import org.junit.Test;
 
 public class JsTests extends RegexTestBase {
@@ -82,5 +83,85 @@ public class JsTests extends RegexTestBase {
         test("(a||b){100,200}", "", "ab", 0, true, 0, 2, 1, 2);
         test("(a||b){100,200}?", "", "ab", 0, true, 0, 1, 1, 1);
         test("(a||b){100,200}?$", "", "ab", 0, true, 0, 2, 1, 2);
+    }
+
+    @Test
+    public void escapedZero() {
+        test("\\0", "u", "\u0000", 0, true, 0, 1);
+    }
+
+    @Test
+    public void gr29379() {
+        test("(?=^)|(?=$)", "", "", 0, true, 0, 0);
+        test("(?=^)|(?=$)(?=^)|(?=$)", "", "", 0, true, 0, 0);
+    }
+
+    @Test
+    public void gr29388() {
+        test(".+(?=bar)|.+", "", "foobar", 0, true, 0, 3);
+    }
+
+    @Test
+    public void gr28905() {
+        test("\\B", "y", "abc", 0, false);
+        test("(?<=[a-z])[A-Z]", "y", "aA", 0, false);
+    }
+
+    @Test
+    public void lastGroupNotSet() {
+        // IndexOf
+        test("(a)", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // StartsWith
+        test("^(a)", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // EndsWith
+        test("(a)$", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // Equals
+        test("^(a)$", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // RegionMatches
+        test("(a)", "y", "a", 0, true, 0, 1, 0, 1, -1);
+        // EmptyIndexOf
+        test("()", "", "", 0, true, 0, 0, 0, 0, -1);
+        // EmptyStartsWith
+        test("^()", "", "", 0, true, 0, 0, 0, 0, -1);
+        // EmptyEndsWith
+        test("()$", "", "", 0, true, 0, 0, 0, 0, -1);
+        // EmptyEquals
+        test("^()$", "", "", 0, true, 0, 0, 0, 0, -1);
+
+        // Single possible CG result: exercises NFA, DFA and backtracker.
+        test("([a0-9])", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // TraceFinder: exercises NFA, DFA and backtracker.
+        test("x?([a0-9])", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // Unbounded length of match, unambiguous: exercises NFA, lazy DFA, simpleCG DFA and
+        // backtracker.
+        test("x*([a0-9])", "", "a", 0, true, 0, 1, 0, 1, -1);
+        // Unbounded length of match, ambiguous: exercises NFA, lazy DFA, eager DFA and backtracker.
+        test(".*([a0-9])", "", "a", 0, true, 0, 1, 0, 1, -1);
+    }
+
+    @Test
+    public void gr35771() {
+        test("(^\\s*)|(\\s*$)", "", "", 0, true, 0, 0, 0, 0, -1, -1);
+    }
+
+    @Test
+    public void justLookBehind() {
+        test("(?<=\\n)", "", "__\n__", 0, true, 3, 3);
+    }
+
+    @Test
+    public void justLookBehindSticky() {
+        test("(?<=\\n)", "y", "__\n__", 3, true, 3, 3);
+    }
+
+    @Test
+    public void gr21421() {
+        test("(?=(\\3?)|([^\\W\uaa3bt-\ua4b9]){4294967296}|(?=[^]+[\\n-\u4568\\uD3D5\\u00ca-\\u00fF]*)*|(?:\\2|^)?.){33554431}(?:(?:\\S{1,}(?:\\b|\\w{1,}))(?:\\2?)+){4,}", "im",
+                        "\u4568\u4568\u4568\u4568________\\xee0000", 0, true, 0, 20, 0, 0, -1, -1);
+    }
+
+    @Test
+    public void gr37496() {
+        test("(?:(?:" + "a".repeat(TRegexOptions.TRegexMaxParseTreeSizeForDFA) + ")?(?<=a))+", "", "", 0, false);
     }
 }

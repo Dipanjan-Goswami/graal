@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,8 +24,8 @@
  */
 package org.graalvm.compiler.hotspot.replacements;
 
-import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfigBase.INJECTED_METAACCESS;
-import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfigBase.INJECTED_VMCONFIG;
+import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_METAACCESS;
+import static org.graalvm.compiler.hotspot.GraalHotSpotVMConfig.INJECTED_VMCONFIG;
 import static org.graalvm.compiler.hotspot.meta.HotSpotForeignCallsProviderImpl.VERIFY_OOP;
 
 import java.lang.ref.Reference;
@@ -39,7 +39,6 @@ import org.graalvm.compiler.core.common.type.TypeReference;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.Node.ConstantNodeParameter;
 import org.graalvm.compiler.graph.Node.NodeIntrinsic;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
 import org.graalvm.compiler.hotspot.GraalHotSpotVMConfig;
 import org.graalvm.compiler.hotspot.word.KlassPointer;
 import org.graalvm.compiler.nodes.CanonicalizableLocation;
@@ -54,14 +53,13 @@ import org.graalvm.compiler.nodes.extended.LoadHubNode;
 import org.graalvm.compiler.nodes.extended.LoadHubOrNullNode;
 import org.graalvm.compiler.nodes.extended.RawLoadNode;
 import org.graalvm.compiler.nodes.extended.StoreHubNode;
-import org.graalvm.compiler.nodes.graphbuilderconf.IntrinsicContext;
 import org.graalvm.compiler.nodes.memory.AddressableMemoryAccess;
 import org.graalvm.compiler.nodes.memory.address.AddressNode;
 import org.graalvm.compiler.nodes.memory.address.OffsetAddressNode;
+import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.nodes.type.StampTool;
 import org.graalvm.compiler.replacements.ReplacementsUtil;
 import org.graalvm.compiler.replacements.nodes.ReadRegisterNode;
-import org.graalvm.compiler.replacements.nodes.WriteRegisterNode;
 import org.graalvm.compiler.word.Word;
 import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.WordFactory;
@@ -92,7 +90,7 @@ public class HotSpotReplacementsUtil {
         }
 
         @Override
-        public abstract ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool);
+        public abstract ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool);
 
         protected ValueNode findReadHub(ValueNode object) {
             ValueNode base = object;
@@ -139,16 +137,9 @@ public class HotSpotReplacementsUtil {
         }
     }
 
-    @Fold
-    public static ResolvedJavaType methodHolderClass(@InjectedParameter IntrinsicContext context) {
-        return context.getOriginalMethod().getDeclaringClass();
-    }
-
-    @Fold
-    static ResolvedJavaType getType(@Fold.InjectedParameter IntrinsicContext context, String typeName) {
+    public static ResolvedJavaType getType(ResolvedJavaType accessingClass, String typeName) {
         try {
-            UnresolvedJavaType unresolved = UnresolvedJavaType.create(typeName);
-            return unresolved.resolve(methodHolderClass(context));
+            return UnresolvedJavaType.create(typeName).resolve(accessingClass);
         } catch (LinkageError e) {
             throw new GraalError(e);
         }
@@ -156,9 +147,13 @@ public class HotSpotReplacementsUtil {
 
     @Fold
     public static int getFieldOffset(ResolvedJavaType type, String fieldName) {
+        return getField(type, fieldName).getOffset();
+    }
+
+    public static ResolvedJavaField getField(ResolvedJavaType type, String fieldName) {
         for (ResolvedJavaField field : type.getInstanceFields(true)) {
             if (field.getName().equals(fieldName)) {
-                return field.getOffset();
+                return field;
             }
         }
         throw new GraalError("missing field " + fieldName + " in type " + type);
@@ -188,16 +183,12 @@ public class HotSpotReplacementsUtil {
         return config.useG1GC;
     }
 
-    @Fold
-    public static boolean verifyOops(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.verifyOops;
-    }
-
     /**
      * @see GraalHotSpotVMConfig#doingUnsafeAccessOffset
      */
     @Fold
     public static int doingUnsafeAccessOffset(@InjectedParameter GraalHotSpotVMConfig config) {
+        assert config.doingUnsafeAccessOffset != Integer.MAX_VALUE;
         return config.doingUnsafeAccessOffset;
     }
 
@@ -304,24 +295,7 @@ public class HotSpotReplacementsUtil {
      */
     public static final LocationIdentity JAVA_THREAD_THREAD_OBJECT_LOCATION = NamedLocationIdentity.immutable("JavaThread::_threadObj");
 
-    @Fold
-    public static int threadObjectOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.threadObjectOffset;
-    }
-
     public static final LocationIdentity JAVA_THREAD_OSTHREAD_LOCATION = NamedLocationIdentity.mutable("JavaThread::_osthread");
-
-    @Fold
-    public static int osThreadOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        assert config.osThreadOffset != Integer.MAX_VALUE;
-        return config.osThreadOffset;
-    }
-
-    @Fold
-    public static int osThreadInterruptedOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        assert config.osThreadInterruptedOffset != Integer.MAX_VALUE;
-        return config.osThreadInterruptedOffset;
-    }
 
     @Fold
     public static JavaKind getWordKind() {
@@ -353,13 +327,13 @@ public class HotSpotReplacementsUtil {
     }
 
     @Fold
-    public static int jvmAccWrittenFlags(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.jvmAccWrittenFlags;
+    public static int jvmAccHasFinalizer(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.jvmAccHasFinalizer;
     }
 
     public static final LocationIdentity KLASS_LAYOUT_HELPER_LOCATION = new HotSpotOptimizingLocationIdentity("Klass::_layout_helper") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             ValueNode javaObject = findReadHub(object);
             if (javaObject != null) {
                 if (javaObject.stamp(NodeView.DEFAULT) instanceof ObjectStamp) {
@@ -448,17 +422,7 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity ARRAY_KLASS_COMPONENT_MIRROR = NamedLocationIdentity.immutable("ArrayKlass::_component_mirror");
 
-    @Fold
-    public static int arrayKlassComponentMirrorOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.getFieldOffset("ArrayKlass::_component_mirror", Integer.class, "oop");
-    }
-
     public static final LocationIdentity KLASS_SUPER_KLASS_LOCATION = NamedLocationIdentity.immutable("Klass::_super");
-
-    @Fold
-    public static int klassSuperKlassOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.klassSuperKlassOffset;
-    }
 
     public static final LocationIdentity MARK_WORD_LOCATION = NamedLocationIdentity.mutable("MarkWord");
 
@@ -471,7 +435,7 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity HUB_LOCATION = new HotSpotOptimizingLocationIdentity("Hub") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             TypeReference constantType = StampTool.typeReferenceOrNull(object);
             if (constantType != null && constantType.isExact()) {
                 return ConstantNode.forConstant(read.stamp(NodeView.DEFAULT), tool.getConstantReflection().asObjectHub(constantType.getType()), tool.getMetaAccess());
@@ -482,7 +446,7 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity COMPRESSED_HUB_LOCATION = new HotSpotOptimizingLocationIdentity("CompressedHub") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             TypeReference constantType = StampTool.typeReferenceOrNull(object);
             if (constantType != null && constantType.isExact()) {
                 return ConstantNode.forConstant(read.stamp(NodeView.DEFAULT), ((HotSpotMetaspaceConstant) tool.getConstantReflection().asObjectHub(constantType.getType())).compress(),
@@ -596,6 +560,11 @@ public class HotSpotReplacementsUtil {
         return WordFactory.unsigned(ComputeObjectAddressNode.get(a, ReplacementsUtil.getArrayBaseOffset(INJECTED_METAACCESS, JavaKind.Int)));
     }
 
+    @Fold
+    public static boolean verifyBeforeOrAfterGC(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.verifyBeforeGC || config.verifyAfterGC;
+    }
+
     /**
      * Idiom for making {@link GraalHotSpotVMConfig} a constant.
      */
@@ -625,6 +594,11 @@ public class HotSpotReplacementsUtil {
     }
 
     @Fold
+    public static long cardTableStart(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.cardtableStartAddress;
+    }
+
+    @Fold
     public static int g1CardQueueIndexOffset(@InjectedParameter GraalHotSpotVMConfig config) {
         return config.g1CardQueueIndexOffset;
     }
@@ -635,8 +609,13 @@ public class HotSpotReplacementsUtil {
     }
 
     @Fold
-    public static int g1SATBQueueMarkingOffset(@InjectedParameter GraalHotSpotVMConfig config) {
-        return config.g1SATBQueueMarkingOffset;
+    public static int logOfHeapRegionGrainBytes(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.logOfHRGrainBytes;
+    }
+
+    @Fold
+    public static int g1SATBQueueMarkingActiveOffset(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.g1SATBQueueMarkingActiveOffset;
     }
 
     @Fold
@@ -693,6 +672,21 @@ public class HotSpotReplacementsUtil {
     }
 
     @Fold
+    public static boolean diagnoseSyncOnValueBasedClasses(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.diagnoseSyncOnValueBasedClasses != 0 && config.jvmAccIsValueBasedClass != 0;
+    }
+
+    @Fold
+    public static int jvmAccIsValueBasedClass(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.jvmAccIsValueBasedClass;
+    }
+
+    @Fold
+    public static long defaultPrototypeMarkWord(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.defaultPrototypeMarkWord();
+    }
+
+    @Fold
     static int uninitializedIdentityHashCodeValue(@InjectedParameter GraalHotSpotVMConfig config) {
         return config.uninitializedIdentityHashCodeValue;
     }
@@ -709,11 +703,31 @@ public class HotSpotReplacementsUtil {
         return loadHubIntrinsic(object);
     }
 
+    @Fold
+    public static boolean verifyOops(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.verifyOops;
+    }
+
     public static Object verifyOop(Object object) {
         if (verifyOops(INJECTED_VMCONFIG)) {
             verifyOopStub(VERIFY_OOP, object);
         }
         return object;
+    }
+
+    @Fold
+    public static long verifyOopBits(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.verifyOopBits;
+    }
+
+    @Fold
+    public static long verifyOopMask(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.verifyOopMask;
+    }
+
+    @Fold
+    public static long verifyOopCounterAddress(@InjectedParameter GraalHotSpotVMConfig config) {
+        return config.verifyOopCounterAddress;
     }
 
     @NodeIntrinsic(ForeignCallNode.class)
@@ -746,9 +760,6 @@ public class HotSpotReplacementsUtil {
 
     @NodeIntrinsic(value = ReadRegisterNode.class)
     public static native Word registerAsWord(@ConstantNodeParameter Register register, @ConstantNodeParameter boolean directUse, @ConstantNodeParameter boolean incoming);
-
-    @NodeIntrinsic(value = WriteRegisterNode.class)
-    public static native void writeRegisterAsWord(@ConstantNodeParameter Register register, Word value);
 
     @NodeIntrinsic(value = RawLoadNode.class)
     private static native Word loadWordFromObjectIntrinsic(Object object, long offset, @ConstantNodeParameter LocationIdentity locationIdentity, @ConstantNodeParameter JavaKind wordKind);
@@ -814,14 +825,14 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity CLASS_KLASS_LOCATION = new HotSpotOptimizingLocationIdentity("Class._klass") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             return foldIndirection(read, object, CLASS_MIRROR_LOCATION);
         }
     };
 
     public static final LocationIdentity CLASS_ARRAY_KLASS_LOCATION = new HotSpotOptimizingLocationIdentity("Class._array_klass") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             return foldIndirection(read, object, ARRAY_KLASS_COMPONENT_MIRROR);
         }
     };
@@ -833,7 +844,10 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity CLASS_MIRROR_LOCATION = NamedLocationIdentity.immutable("Klass::_java_mirror");
 
-    public static final LocationIdentity CLASS_MIRROR_HANDLE_LOCATION = NamedLocationIdentity.immutable("Klass::_java_mirror handle");
+    /**
+     * This represents the contents of OopHandles used for some internal fields.
+     */
+    public static final LocationIdentity HOTSPOT_OOP_HANDLE_LOCATION = NamedLocationIdentity.immutable("OopHandle contents");
 
     @Fold
     public static int layoutHelperHeaderSizeShift(@InjectedParameter GraalHotSpotVMConfig config) {
@@ -863,9 +877,18 @@ public class HotSpotReplacementsUtil {
         return config.gcTotalCollectionsAddress();
     }
 
+    public static String referentFieldName() {
+        return "referent";
+    }
+
     @Fold
     public static long referentOffset(@InjectedParameter MetaAccessProvider metaAccessProvider) {
-        return getFieldOffset(metaAccessProvider.lookupJavaType(Reference.class), "referent");
+        return referentField(metaAccessProvider).getOffset();
+    }
+
+    @Fold
+    public static ResolvedJavaField referentField(@InjectedParameter MetaAccessProvider metaAccessProvider) {
+        return getField(referenceType(metaAccessProvider), referentFieldName());
     }
 
     @Fold
@@ -875,7 +898,7 @@ public class HotSpotReplacementsUtil {
 
     public static final LocationIdentity OBJ_ARRAY_KLASS_ELEMENT_KLASS_LOCATION = new HotSpotOptimizingLocationIdentity("ObjArrayKlass::_element_klass") {
         @Override
-        public ValueNode canonicalizeRead(ValueNode read, AddressNode location, ValueNode object, CanonicalizerTool tool) {
+        public ValueNode canonicalizeRead(ValueNode read, ValueNode object, ValueNode location, CoreProviders tool) {
             ValueNode javaObject = findReadHub(object);
             if (javaObject != null) {
                 ResolvedJavaType type = StampTool.typeOrNull(javaObject);

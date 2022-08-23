@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,22 +32,23 @@ import static org.graalvm.word.LocationIdentity.any;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.graph.NodeInputList;
+import org.graalvm.compiler.nodeinfo.InputType;
 import org.graalvm.compiler.nodeinfo.NodeCycles;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.ConstantNode;
+import org.graalvm.compiler.nodes.DeoptBciSupplier;
 import org.graalvm.compiler.nodes.DeoptimizingNode;
 import org.graalvm.compiler.nodes.FrameState;
 import org.graalvm.compiler.nodes.NamedLocationIdentity;
 import org.graalvm.compiler.nodes.NodeView;
+import org.graalvm.compiler.nodes.StateSplit;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.WithExceptionNode;
 import org.graalvm.compiler.nodes.java.LoadIndexedNode;
-import org.graalvm.compiler.nodes.memory.AbstractMemoryCheckpoint;
 import org.graalvm.compiler.nodes.memory.MemoryAccess;
 import org.graalvm.compiler.nodes.memory.MemoryKill;
 import org.graalvm.compiler.nodes.memory.SingleMemoryKill;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.compiler.nodes.spi.Virtualizable;
 import org.graalvm.compiler.nodes.spi.VirtualizerTool;
 import org.graalvm.compiler.nodes.type.StampTool;
@@ -59,60 +60,54 @@ import jdk.vm.ci.code.BytecodeFrame;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
+/**
+ * Base class for nodes that intrinsify {@link System#arraycopy}.
+ */
 @NodeInfo(cycles = NodeCycles.CYCLES_UNKNOWN, size = SIZE_64)
-public class BasicArrayCopyNode extends AbstractMemoryCheckpoint implements Virtualizable, SingleMemoryKill, MemoryAccess, Lowerable, DeoptimizingNode.DeoptDuring {
+public abstract class BasicArrayCopyNode extends WithExceptionNode
+                implements DeoptBciSupplier, StateSplit, Virtualizable, SingleMemoryKill, MemoryAccess, Lowerable, DeoptimizingNode.DeoptDuring {
 
     public static final NodeClass<BasicArrayCopyNode> TYPE = NodeClass.create(BasicArrayCopyNode.class);
 
-    static final int SRC_ARG = 0;
-    static final int SRC_POS_ARG = 1;
-    static final int DEST_ARG = 2;
-    static final int DEST_POS_ARG = 3;
-    static final int LENGTH_ARG = 4;
-
-    @Input NodeInputList<ValueNode> args;
+    @Input ValueNode src;
+    @Input ValueNode srcPos;
+    @Input ValueNode dest;
+    @Input ValueNode destPos;
+    @Input ValueNode length;
 
     @OptionalInput(State) FrameState stateDuring;
 
     @OptionalInput(Memory) protected MemoryKill lastLocationAccess;
 
+    @OptionalInput(InputType.State) protected FrameState stateAfter;
+
     protected JavaKind elementKind;
 
     protected int bci;
 
-    public BasicArrayCopyNode(NodeClass<? extends AbstractMemoryCheckpoint> type, ValueNode src, ValueNode srcPos, ValueNode dest, ValueNode destPos, ValueNode length, JavaKind elementKind, int bci) {
+    public BasicArrayCopyNode(NodeClass<? extends BasicArrayCopyNode> type, ValueNode src, ValueNode srcPos, ValueNode dest, ValueNode destPos, ValueNode length, JavaKind elementKind, int bci) {
         super(type, StampFactory.forKind(JavaKind.Void));
         this.bci = bci;
-        this.args = new NodeInputList<>(this, new ValueNode[]{src, srcPos, dest, destPos, length});
+        this.src = src;
+        this.srcPos = srcPos;
+        this.dest = dest;
+        this.destPos = destPos;
+        this.length = length;
         this.elementKind = elementKind != JavaKind.Illegal ? elementKind : null;
     }
 
-    public BasicArrayCopyNode(NodeClass<? extends AbstractMemoryCheckpoint> type, ValueNode src, ValueNode srcPos, ValueNode dest, ValueNode destPos, ValueNode length, JavaKind elementKind) {
+    public BasicArrayCopyNode(NodeClass<? extends BasicArrayCopyNode> type, ValueNode src, ValueNode srcPos, ValueNode dest, ValueNode destPos, ValueNode length, JavaKind elementKind) {
         this(type, src, srcPos, dest, destPos, length, elementKind, BytecodeFrame.INVALID_FRAMESTATE_BCI);
     }
 
-    public ValueNode getSource() {
-        return args.get(SRC_ARG);
-    }
-
-    public ValueNode getSourcePosition() {
-        return args.get(SRC_POS_ARG);
-    }
-
-    public ValueNode getDestination() {
-        return args.get(DEST_ARG);
-    }
-
-    public ValueNode getDestinationPosition() {
-        return args.get(DEST_POS_ARG);
-    }
-
-    public ValueNode getLength() {
-        return args.get(LENGTH_ARG);
-    }
-
-    public int getBci() {
+    @Override
+    public int bci() {
         return bci;
+    }
+
+    @Override
+    public void setBci(int bci) {
+        this.bci = bci;
     }
 
     public JavaKind getElementKind() {
@@ -144,16 +139,88 @@ public class BasicArrayCopyNode extends AbstractMemoryCheckpoint implements Virt
     }
 
     @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
+    public FrameState stateDuring() {
+        return stateDuring;
     }
 
-    private static boolean checkBounds(int position, int length, VirtualObjectNode virtualObject) {
+    @Override
+    public void setStateDuring(FrameState stateDuring) {
+        updateUsages(this.stateDuring, stateDuring);
+        this.stateDuring = stateDuring;
+    }
+
+    @Override
+    public FrameState stateAfter() {
+        return stateAfter;
+    }
+
+    @Override
+    public void setStateAfter(FrameState x) {
+        assert x == null || x.isAlive() : "frame state must be in a graph";
+        updateUsages(stateAfter, x);
+        stateAfter = x;
+    }
+
+    @Override
+    public boolean hasSideEffect() {
+        return true;
+    }
+
+    public static JavaKind selectComponentKind(BasicArrayCopyNode arraycopy) {
+        if (arraycopy.getSource() == null || arraycopy.getDestination() == null) {
+            return null;
+        }
+        ResolvedJavaType srcType = StampTool.typeOrNull(arraycopy.getSource().stamp(NodeView.DEFAULT));
+        ResolvedJavaType destType = StampTool.typeOrNull(arraycopy.getDestination().stamp(NodeView.DEFAULT));
+
+        if (srcType == null || !srcType.isArray() || destType == null || !destType.isArray()) {
+            return null;
+        }
+        if (!destType.getComponentType().isAssignableFrom(srcType.getComponentType())) {
+            return null;
+        }
+        if (!arraycopy.isExact()) {
+            return null;
+        }
+        return srcType.getComponentType().getJavaKind();
+    }
+
+    public ValueNode getSource() {
+        return src;
+    }
+
+    public ValueNode getSourcePosition() {
+        return srcPos;
+    }
+
+    public ValueNode getDestination() {
+        return dest;
+    }
+
+    public ValueNode getDestinationPosition() {
+        return destPos;
+    }
+
+    public ValueNode getLength() {
+        return length;
+    }
+
+    public void setSource(ValueNode value) {
+        updateUsages(this.src, value);
+        this.src = value;
+    }
+
+    public void setSourcePosition(ValueNode value) {
+        updateUsages(this.srcPos, value);
+        this.srcPos = value;
+    }
+
+    public static boolean checkBounds(int position, int length, VirtualObjectNode virtualObject) {
         assert length >= 0;
         return position >= 0 && position <= virtualObject.entryCount() - length;
     }
 
-    private static boolean checkEntryTypes(int srcPos, int length, VirtualObjectNode src, ResolvedJavaType destComponentType, VirtualizerTool tool) {
+    public static boolean checkEntryTypes(int srcPos, int length, VirtualObjectNode src, ResolvedJavaType destComponentType, VirtualizerTool tool) {
         if (destComponentType.getJavaKind() == JavaKind.Object && !destComponentType.isJavaLangObject()) {
             for (int i = 0; i < length; i++) {
                 ValueNode entry = tool.getEntry(src, srcPos + i);
@@ -220,11 +287,18 @@ public class BasicArrayCopyNode extends AbstractMemoryCheckpoint implements Virt
                     if (!checkEntryTypes(srcPosInt, len, srcVirtual, destVirtual.type().getComponentType(), tool)) {
                         return;
                     }
-                    for (int i = 0; i < len; i++) {
-                        tool.setVirtualEntry(destVirtual, destPosInt + i, tool.getEntry(srcVirtual, srcPosInt + i));
+                    if (srcVirtual == destVirtual && srcPosInt < destPosInt) {
+                        // must copy backwards to avoid losing elements
+                        for (int i = len - 1; i >= 0; i--) {
+                            tool.setVirtualEntry(destVirtual, destPosInt + i, tool.getEntry(srcVirtual, srcPosInt + i));
+                        }
+                    } else {
+                        for (int i = 0; i < len; i++) {
+                            tool.setVirtualEntry(destVirtual, destPosInt + i, tool.getEntry(srcVirtual, srcPosInt + i));
+                        }
                     }
                     tool.delete();
-                    DebugContext debug = getDebug();
+                    DebugContext debug = this.asNode().getDebug();
                     if (debug.isLogEnabled()) {
                         debug.log("virtualized arraycopy(%s, %d, %s, %d, %d)", getSource(), srcPosInt, getDestination(), destPosInt, len);
                     }
@@ -239,8 +313,9 @@ public class BasicArrayCopyNode extends AbstractMemoryCheckpoint implements Virt
                         return;
                     }
                     for (int i = 0; i < len; i++) {
-                        LoadIndexedNode load = new LoadIndexedNode(graph().getAssumptions(), srcAlias, ConstantNode.forInt(i + srcPosInt, graph()), null, destComponentType.getJavaKind());
-                        load.setNodeSourcePosition(getNodeSourcePosition());
+                        LoadIndexedNode load = new LoadIndexedNode(this.asNode().graph().getAssumptions(), srcAlias, ConstantNode.forInt(i + srcPosInt, this.asNode().graph()), null,
+                                        destComponentType.getJavaKind());
+                        load.setNodeSourcePosition(this.asNode().getNodeSourcePosition());
                         tool.addNode(load);
                         tool.setVirtualEntry(destVirtual, destPosInt + i, load);
                     }
@@ -256,20 +331,8 @@ public class BasicArrayCopyNode extends AbstractMemoryCheckpoint implements Virt
     }
 
     @Override
-    public FrameState stateDuring() {
-        return stateDuring;
-    }
-
-    @Override
-    public void setStateDuring(FrameState stateDuring) {
-        updateUsages(this.stateDuring, stateDuring);
-        this.stateDuring = stateDuring;
-    }
-
-    @Override
     public void computeStateDuring(FrameState currentStateAfter) {
-        FrameState newStateDuring = currentStateAfter.duplicateModifiedDuringCall(getBci(), asNode().getStackKind());
+        FrameState newStateDuring = currentStateAfter.duplicateModifiedDuringCall(bci(), asNode().getStackKind());
         setStateDuring(newStateDuring);
     }
-
 }

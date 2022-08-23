@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -49,27 +49,21 @@ public abstract class JavaConstantFieldProvider implements ConstantFieldProvider
     protected JavaConstantFieldProvider(MetaAccessProvider metaAccess) {
         try {
             ResolvedJavaType stringType = metaAccess.lookupJavaType(String.class);
-            ResolvedJavaField[] stringFields = stringType.getInstanceFields(false);
-            ResolvedJavaField valueField = null;
-            ResolvedJavaField hashField = null;
-            for (ResolvedJavaField field : stringFields) {
-                if (field.getName().equals("value")) {
-                    valueField = field;
-                } else if (field.getName().equals("hash")) {
-                    hashField = field;
-                }
-            }
-            if (valueField == null) {
-                throw new GraalError("missing field value " + Arrays.toString(stringFields));
-            }
-            if (hashField == null) {
-                throw new GraalError("missing field hash " + Arrays.toString(stringFields));
-            }
-            stringValueField = valueField;
-            stringHashField = hashField;
+            stringValueField = findField(stringType, "value");
+            stringHashField = findField(stringType, "hash");
         } catch (SecurityException e) {
             throw new GraalError(e);
         }
+    }
+
+    private static ResolvedJavaField findField(ResolvedJavaType type, String fieldName) {
+        ResolvedJavaField[] stringFields = type.getInstanceFields(false);
+        for (ResolvedJavaField field : stringFields) {
+            if (field.getName().equals(fieldName)) {
+                return field;
+            }
+        }
+        throw new GraalError("missing field \"" + fieldName + "\" " + Arrays.toString(stringFields));
     }
 
     @Override
@@ -119,6 +113,9 @@ public abstract class JavaConstantFieldProvider implements ConstantFieldProvider
 
     @SuppressWarnings("unused")
     protected boolean isStableField(ResolvedJavaField field, ConstantFieldTool<?> tool) {
+        if (isPrimitiveBoxingCacheField(field)) {
+            return true;
+        }
         if (isSyntheticEnumSwitchMap(field)) {
             return true;
         }
@@ -127,6 +124,18 @@ public abstract class JavaConstantFieldProvider implements ConstantFieldProvider
         }
         if (field.equals(stringHashField)) {
             return true;
+        }
+        return false;
+    }
+
+    protected boolean isPrimitiveBoxingCacheField(ResolvedJavaField field) {
+        if (isArray(field) && field.isFinal() && field.getName().equals("cache")) {
+            ResolvedJavaType type = field.getDeclaringClass();
+            String typeName = type.getName();
+            if (typeName.equals("Ljava/lang/Character$CharacterCache;") || typeName.equals("Ljava/lang/Byte$ByteCache;") || typeName.equals("Ljava/lang/Short$ShortCache;") ||
+                            typeName.equals("Ljava/lang/Integer$IntegerCache;") || typeName.equals("Ljava/lang/Long$LongCache;")) {
+                return true;
+            }
         }
         return false;
     }

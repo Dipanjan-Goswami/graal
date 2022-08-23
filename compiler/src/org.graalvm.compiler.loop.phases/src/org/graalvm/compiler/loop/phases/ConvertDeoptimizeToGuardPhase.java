@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,15 +27,13 @@ package org.graalvm.compiler.loop.phases;
 import static org.graalvm.compiler.phases.common.DeadCodeEliminationPhase.Optionality.Optional;
 
 import java.util.List;
+import java.util.Optional;
 
 import org.graalvm.compiler.core.common.GraalOptions;
 import org.graalvm.compiler.core.common.cfg.Loop;
 import org.graalvm.compiler.debug.DebugCloseable;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeSourcePosition;
-import org.graalvm.compiler.graph.spi.SimplifierTool;
-import org.graalvm.compiler.loop.LoopEx;
-import org.graalvm.compiler.loop.LoopsData;
 import org.graalvm.compiler.nodeinfo.InputType;
 import org.graalvm.compiler.nodes.AbstractBeginNode;
 import org.graalvm.compiler.nodes.AbstractEndNode;
@@ -47,6 +45,8 @@ import org.graalvm.compiler.nodes.EndNode;
 import org.graalvm.compiler.nodes.FixedGuardNode;
 import org.graalvm.compiler.nodes.FixedNode;
 import org.graalvm.compiler.nodes.FixedWithNextNode;
+import org.graalvm.compiler.nodes.GraphState;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.GuardNode;
 import org.graalvm.compiler.nodes.IfNode;
 import org.graalvm.compiler.nodes.LogicNode;
@@ -58,13 +58,19 @@ import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.ValuePhiNode;
 import org.graalvm.compiler.nodes.calc.CompareNode;
+import org.graalvm.compiler.nodes.calc.IntegerEqualsNode;
 import org.graalvm.compiler.nodes.cfg.Block;
+import org.graalvm.compiler.nodes.extended.BranchProbabilityNode;
+import org.graalvm.compiler.nodes.loop.LoopEx;
+import org.graalvm.compiler.nodes.loop.LoopsData;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
-import org.graalvm.compiler.nodes.spi.LoweringProvider;
+import org.graalvm.compiler.nodes.spi.Simplifiable;
+import org.graalvm.compiler.nodes.spi.SimplifierTool;
 import org.graalvm.compiler.nodes.util.GraphUtil;
-import org.graalvm.compiler.phases.BasePhase;
+import org.graalvm.compiler.phases.common.CanonicalizerPhase;
 import org.graalvm.compiler.phases.common.DeadCodeEliminationPhase;
 import org.graalvm.compiler.phases.common.LazyValue;
+import org.graalvm.compiler.phases.common.PostRunCanonicalizationPhase;
 
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.DeoptimizationAction;
@@ -79,15 +85,26 @@ import jdk.vm.ci.meta.DeoptimizationAction;
  * This is currently only done for branches that start from a {@link IfNode}. If it encounters a
  * branch starting at an other kind of {@link ControlSplitNode}, it will only bring the
  * {@link DeoptimizeNode} as close to the {@link ControlSplitNode} as possible.
- *
  */
-public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
+public class ConvertDeoptimizeToGuardPhase extends PostRunCanonicalizationPhase<CoreProviders> {
+
+    public ConvertDeoptimizeToGuardPhase(CanonicalizerPhase canonicalizer) {
+        super(canonicalizer);
+    }
+
+    @Override
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return NotApplicable.combineConstraints(
+                        super.canApply(graphState),
+                        NotApplicable.mustRunBefore(this, StageFlag.VALUE_PROXY_REMOVAL, graphState),
+                        NotApplicable.notApplicableIf(graphState.getGuardsStage().areFrameStatesAtDeopts(),
+                                        java.util.Optional.of(new NotApplicable("This phase creates guard nodes, i.e., the graph must allow guard insertion."))));
+    }
+
     @Override
     @SuppressWarnings("try")
-    protected void run(final StructuredGraph graph, CoreProviders context) {
-        assert graph.hasValueProxies() : "ConvertDeoptimizeToGuardPhase always creates proxies";
-        assert !graph.getGuardsStage().areFrameStatesAtDeopts() : graph.getGuardsStage();
-        LazyValue<LoopsData> lazyLoops = new LazyValue<>(() -> new LoopsData(graph));
+    protected void run(final StructuredGraph graph, final CoreProviders context) {
+        LazyValue<LoopsData> lazyLoops = new LazyValue<>(() -> context.getLoopsDataProvider().getLoopsData(graph));
 
         for (DeoptimizeNode d : graph.getNodes(DeoptimizeNode.TYPE)) {
             assert d.isAlive();
@@ -95,10 +112,9 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
                 continue;
             }
             try (DebugCloseable closable = d.withNodeSourcePosition()) {
-                propagateFixed(d, d, context != null ? context.getLowerer() : null, lazyLoops);
+                propagateFixed(d, d, context, lazyLoops);
             }
         }
-
         if (context != null) {
             for (FixedGuardNode fixedGuard : graph.getNodes(FixedGuardNode.TYPE)) {
                 try (DebugCloseable closable = fixedGuard.withNodeSourcePosition()) {
@@ -106,7 +122,6 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
                 }
             }
         }
-
         new DeadCodeEliminationPhase(Optional).apply(graph);
     }
 
@@ -164,14 +179,14 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
             }
             if (xs != null && ys != null && compare.condition().foldCondition(xs, ys, context.getConstantReflection(), compare.unorderedIsTrue()) == fixedGuard.isNegated()) {
                 try (DebugCloseable position = fixedGuard.withNodeSourcePosition()) {
-                    propagateFixed(mergePredecessor, fixedGuard, context.getLowerer(), lazyLoops);
+                    propagateFixed(mergePredecessor, fixedGuard, context, lazyLoops);
                 }
             }
         }
     }
 
     @SuppressWarnings("try")
-    private static void propagateFixed(FixedNode from, StaticDeoptimizingNode deopt, LoweringProvider loweringProvider, LazyValue<LoopsData> lazyLoops) {
+    private static void propagateFixed(FixedNode from, StaticDeoptimizingNode deopt, CoreProviders providers, LazyValue<LoopsData> lazyLoops) {
         Node current = from;
         while (current != null) {
             if (GraalOptions.GuardPriorities.getValue(from.getOptions()) && current instanceof FixedGuardNode) {
@@ -186,10 +201,10 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
                     FixedNode next = mergeNode.next();
                     while (mergeNode.isAlive()) {
                         AbstractEndNode end = mergeNode.forwardEnds().first();
-                        propagateFixed(end, deopt, loweringProvider, lazyLoops);
+                        propagateFixed(end, deopt, providers, lazyLoops);
                     }
                     if (next.isAlive()) {
-                        propagateFixed(next, deopt, loweringProvider, lazyLoops);
+                        propagateFixed(next, deopt, providers, lazyLoops);
                     }
                     return;
                 } else if (current.predecessor() instanceof IfNode) {
@@ -198,6 +213,19 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
                     if (isOsrLoopExit(begin) || isCountedLoopExit(ifNode, lazyLoops)) {
                         moveAsDeoptAfter(begin, deopt);
                     } else {
+                        if (begin instanceof LoopExitNode && ifNode.condition() instanceof IntegerEqualsNode) {
+                            StructuredGraph graph = ifNode.graph();
+                            IntegerEqualsNode integerEqualsNode = (IntegerEqualsNode) ifNode.condition();
+                            // If this loop exit is associated with an injected profile, propagate
+                            // before converting to guard.
+                            if (integerEqualsNode.getX() instanceof BranchProbabilityNode) {
+                                SimplifierTool simplifierTool = GraphUtil.getDefaultSimplifier(providers, false, graph.getAssumptions(), graph.getOptions());
+                                ((BranchProbabilityNode) integerEqualsNode.getX()).simplify(simplifierTool);
+                            } else if (integerEqualsNode.getY() instanceof BranchProbabilityNode) {
+                                SimplifierTool simplifierTool = GraphUtil.getDefaultSimplifier(providers, false, graph.getAssumptions(), graph.getOptions());
+                                ((BranchProbabilityNode) integerEqualsNode.getY()).simplify(simplifierTool);
+                            }
+                        }
                         // Prioritize the source position of the IfNode
                         try (DebugCloseable closable = ifNode.withNodeSourcePosition()) {
                             StructuredGraph graph = ifNode.graph();
@@ -219,14 +247,15 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
                             if (survivingSuccessor instanceof LoopExitNode) {
                                 newGuard = ProxyNode.forGuard(guard, (LoopExitNode) survivingSuccessor);
                             }
-                            survivingSuccessor.replaceAtUsages(InputType.Guard, newGuard);
+                            survivingSuccessor.replaceAtUsages(newGuard, InputType.Guard);
 
                             graph.getDebug().log("Converting deopt on %-5s branch of %s to guard for remaining branch %s.", negateGuardCondition, ifNode, survivingSuccessor);
                             FixedNode next = pred.next();
                             pred.setNext(guard);
                             guard.setNext(next);
-                            SimplifierTool simplifierTool = GraphUtil.getDefaultSimplifier(null, null, null, false, graph.getAssumptions(), graph.getOptions(), loweringProvider);
-                            survivingSuccessor.simplify(simplifierTool);
+                            assert providers != null;
+                            SimplifierTool simplifierTool = GraphUtil.getDefaultSimplifier(providers, false, graph.getAssumptions(), graph.getOptions());
+                            ((Simplifiable) survivingSuccessor).simplify(simplifierTool);
                         }
                     }
                     return;
@@ -265,6 +294,9 @@ public class ConvertDeoptimizeToGuardPhase extends BasePhase<CoreProviders> {
             LoopEx loopEx = loopsData.loop(loop);
             if (loopEx.detectCounted()) {
                 return ifNode == loopEx.counted().getLimitTest();
+            }
+            if (loopEx.canBecomeLimitTestAfterFloatingReads(ifNode)) {
+                return true;
             }
         }
         return false;

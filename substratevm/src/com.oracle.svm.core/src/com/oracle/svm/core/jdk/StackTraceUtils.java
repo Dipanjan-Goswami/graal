@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,30 +24,84 @@
  */
 package com.oracle.svm.core.jdk;
 
+import static com.oracle.svm.core.snippets.KnownIntrinsics.readCallerStackPointer;
+
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.ProtectionDomain;
 import java.util.ArrayList;
 
 import org.graalvm.nativeimage.IsolateThread;
-import org.graalvm.util.DirectAnnotationAccess;
+import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.annotate.NeverInline;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
+import com.oracle.svm.core.heap.VMOperationInfos;
+import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaStackFrameVisitor;
 import com.oracle.svm.core.stack.JavaStackWalker;
+import com.oracle.svm.core.thread.JavaThreads;
+import com.oracle.svm.core.thread.JavaVMOperation;
+import com.oracle.svm.core.thread.LoomSupport;
+import com.oracle.svm.core.thread.PlatformThreads;
+import com.oracle.svm.core.thread.Target_java_lang_Thread;
+import com.oracle.svm.core.thread.Target_jdk_internal_vm_Continuation;
+import com.oracle.svm.core.thread.VMOperation;
+import com.oracle.svm.core.thread.VirtualThreads;
+import com.oracle.svm.util.DirectAnnotationAccess;
+
+import jdk.vm.ci.meta.MetaAccessProvider;
+import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jdk.vm.ci.meta.ResolvedJavaType;
 
 public class StackTraceUtils {
 
     private static final Class<?>[] NO_CLASSES = new Class<?>[0];
     private static final StackTraceElement[] NO_ELEMENTS = new StackTraceElement[0];
 
-    public static StackTraceElement[] getStackTrace(boolean filterExceptions, Pointer startSP) {
-        BuildStackTraceVisitor visitor = new BuildStackTraceVisitor(filterExceptions);
-        JavaStackWalker.walkCurrentThread(startSP, visitor);
+    /**
+     * Captures the stack trace of the current thread. In almost any context, calling
+     * {@link JavaThreads#getStackTrace} for {@link Thread#currentThread()} is preferable.
+     *
+     * Captures at most {@link SubstrateOptions#MaxJavaStackTraceDepth} stack trace elements if max
+     * depth > 0, or all if max depth <= 0.
+     */
+    public static StackTraceElement[] getStackTrace(boolean filterExceptions, Pointer startSP, Pointer endSP) {
+        BuildStackTraceVisitor visitor = new BuildStackTraceVisitor(filterExceptions, SubstrateOptions.MaxJavaStackTraceDepth.getValue());
+        JavaStackWalker.walkCurrentThread(startSP, endSP, visitor);
         return visitor.trace.toArray(NO_ELEMENTS);
     }
 
-    public static StackTraceElement[] getStackTrace(boolean filterExceptions, IsolateThread thread) {
-        BuildStackTraceVisitor visitor = new BuildStackTraceVisitor(filterExceptions);
-        JavaStackWalker.walkThread(thread, visitor);
+    /**
+     * Captures the stack trace of a thread (potentially the current thread) while stopped at a
+     * safepoint. Used by {@link Thread#getStackTrace()} and {@link Thread#getAllStackTraces()}.
+     *
+     * Captures at most {@link SubstrateOptions#MaxJavaStackTraceDepth} stack trace elements if max
+     * depth > 0, or all if max depth <= 0.
+     */
+    @NeverInline("Potentially starting a stack walk in the caller frame")
+    public static StackTraceElement[] getStackTraceAtSafepoint(Thread thread) {
+        assert VMOperation.isInProgressAtSafepoint();
+        if (VirtualThreads.isSupported()) { // NOTE: also for platform threads!
+            return VirtualThreads.singleton().getVirtualOrPlatformThreadStackTraceAtSafepoint(thread, readCallerStackPointer());
+        }
+        return PlatformThreads.getStackTraceAtSafepoint(thread, readCallerStackPointer());
+    }
+
+    public static StackTraceElement[] getThreadStackTraceAtSafepoint(IsolateThread isolateThread, Pointer endSP) {
+        assert VMOperation.isInProgressAtSafepoint();
+        BuildStackTraceVisitor visitor = new BuildStackTraceVisitor(false, SubstrateOptions.MaxJavaStackTraceDepth.getValue());
+        JavaStackWalker.walkThread(isolateThread, endSP, visitor, null);
+        return visitor.trace.toArray(NO_ELEMENTS);
+    }
+
+    public static StackTraceElement[] getThreadStackTraceAtSafepoint(Pointer startSP, Pointer endSP, CodePointer startIP) {
+        assert VMOperation.isInProgressAtSafepoint();
+        BuildStackTraceVisitor visitor = new BuildStackTraceVisitor(false, SubstrateOptions.MaxJavaStackTraceDepth.getValue());
+        JavaStackWalker.walkThreadAtSafepoint(startSP, endSP, startIP, visitor);
         return visitor.trace.toArray(NO_ELEMENTS);
     }
 
@@ -60,17 +114,22 @@ public class StackTraceUtils {
     /**
      * Implements the shared semantic of Reflection.getCallerClass and StackWalker.getCallerClass.
      */
-    public static Class<?> getCallerClass(Pointer startSP) {
-        return getCallerClass(startSP, 0);
+    public static Class<?> getCallerClass(Pointer startSP, boolean showLambdaFrames) {
+        return getCallerClass(startSP, showLambdaFrames, 0, true);
     }
 
-    public static Class<?> getCallerClass(Pointer startSP, int depth) {
-        GetCallerClassVisitor visitor = new GetCallerClassVisitor(depth);
+    public static Class<?> getCallerClass(Pointer startSP, boolean showLambdaFrames, int depth, boolean ignoreFirst) {
+        GetCallerClassVisitor visitor = new GetCallerClassVisitor(showLambdaFrames, depth, ignoreFirst);
         JavaStackWalker.walkCurrentThread(startSP, visitor);
         return visitor.result;
     }
 
-    public static boolean shouldShowFrame(FrameInfoQueryResult frameInfo, boolean showReflectFrames, boolean showHiddenFrames) {
+    /*
+     * Note that this method is duplicated below to work on compiler metadata. Make sure to always
+     * keep both versions in sync, otherwise intrinsifications by the compiler will return different
+     * results than stack walking at run time.
+     */
+    public static boolean shouldShowFrame(FrameInfoQueryResult frameInfo, boolean showLambdaFrames, boolean showReflectFrames, boolean showHiddenFrames) {
         if (showHiddenFrames) {
             /* No filtering, all frames including internal frames are shown. */
             return true;
@@ -90,6 +149,10 @@ public class StackTraceUtils {
             return false;
         }
 
+        if (!showLambdaFrames && DirectAnnotationAccess.isAnnotationPresent(clazz, LambdaFormHiddenMethod.class)) {
+            return false;
+        }
+
         if (!showReflectFrames && ((clazz == java.lang.reflect.Method.class && "invoke".equals(frameInfo.getSourceMethodName())) ||
                         (clazz == java.lang.reflect.Constructor.class && "newInstance".equals(frameInfo.getSourceMethodName())) ||
                         (clazz == java.lang.Class.class && "newInstance".equals(frameInfo.getSourceMethodName())))) {
@@ -101,22 +164,93 @@ public class StackTraceUtils {
             return false;
         }
 
+        if (LoomSupport.isEnabled() && clazz == Target_jdk_internal_vm_Continuation.class) {
+            String name = frameInfo.getSourceMethodName();
+            if ("enter0".equals(name) || "enterSpecial".equals(name)) {
+                return false;
+            }
+        }
+
         return true;
+    }
+
+    /*
+     * Note that this method is duplicated (and commented) above for stack walking at run time. Make
+     * sure to always keep both versions in sync.
+     */
+    public static boolean shouldShowFrame(MetaAccessProvider metaAccess, ResolvedJavaMethod method, boolean showLambdaFrames, boolean showReflectFrames, boolean showHiddenFrames) {
+        if (showHiddenFrames) {
+            return true;
+        }
+
+        ResolvedJavaType clazz = method.getDeclaringClass();
+        if (DirectAnnotationAccess.isAnnotationPresent(clazz, InternalVMMethod.class)) {
+            return false;
+        }
+
+        if (!showLambdaFrames && DirectAnnotationAccess.isAnnotationPresent(clazz, LambdaFormHiddenMethod.class)) {
+            return false;
+        }
+
+        if (!showReflectFrames && ((clazz.equals(metaAccess.lookupJavaType(java.lang.reflect.Method.class)) && "invoke".equals(method.getName())) ||
+                        (clazz.equals(metaAccess.lookupJavaType(java.lang.reflect.Constructor.class)) && "newInstance".equals(method.getName())) ||
+                        (clazz.equals(metaAccess.lookupJavaType(java.lang.Class.class)) && "newInstance".equals(method.getName())))) {
+            return false;
+        }
+
+        return true;
+    }
+
+    public static boolean ignoredBySecurityStackWalk(MetaAccessProvider metaAccess, ResolvedJavaMethod method) {
+        return !shouldShowFrame(metaAccess, method, true, false, false);
+    }
+
+    public static ClassLoader latestUserDefinedClassLoader(Pointer startSP) {
+        GetLatestUserDefinedClassLoaderVisitor visitor = new GetLatestUserDefinedClassLoaderVisitor();
+        JavaStackWalker.walkCurrentThread(startSP, visitor);
+        return visitor.result;
+    }
+
+    public static StackTraceElement[] asyncGetStackTrace(Thread thread) {
+        GetStackTraceOperation vmOp = new GetStackTraceOperation(thread);
+        vmOp.enqueue();
+        return vmOp.result;
+    }
+
+    private static class GetStackTraceOperation extends JavaVMOperation {
+        private final Thread thread;
+        StackTraceElement[] result;
+
+        GetStackTraceOperation(Thread thread) {
+            super(VMOperationInfos.get(GetStackTraceOperation.class, "Get stack trace", SystemEffect.SAFEPOINT));
+            this.thread = thread;
+        }
+
+        @Override
+        protected void operate() {
+            if (thread.isAlive()) {
+                result = getStackTraceAtSafepoint(thread);
+            } else {
+                result = Target_java_lang_Thread.EMPTY_STACK_TRACE;
+            }
+        }
     }
 }
 
 class BuildStackTraceVisitor extends JavaStackFrameVisitor {
     private final boolean filterExceptions;
     final ArrayList<StackTraceElement> trace;
+    final int limit;
 
-    BuildStackTraceVisitor(boolean filterExceptions) {
+    BuildStackTraceVisitor(boolean filterExceptions, int limit) {
         this.filterExceptions = filterExceptions;
         this.trace = new ArrayList<>();
+        this.limit = limit;
     }
 
     @Override
     public boolean visitFrame(FrameInfoQueryResult frameInfo) {
-        if (!StackTraceUtils.shouldShowFrame(frameInfo, true, false)) {
+        if (!StackTraceUtils.shouldShowFrame(frameInfo, false, true, false)) {
             /* Always ignore the frame. It is an internal frame of the VM. */
             return true;
 
@@ -130,22 +264,31 @@ class BuildStackTraceVisitor extends JavaStackFrameVisitor {
 
         StackTraceElement sourceReference = frameInfo.getSourceReference();
         trace.add(sourceReference);
+        if (trace.size() == limit) {
+            return false;
+        }
         return true;
     }
 }
 
 class GetCallerClassVisitor extends JavaStackFrameVisitor {
+    private final boolean showLambdaFrames;
     private int depth;
-    private boolean foundCallee;
+    private boolean ignoreFirst;
     Class<?> result;
 
-    GetCallerClassVisitor(final int depth) {
+    GetCallerClassVisitor(boolean showLambdaFrames, int depth, boolean ignoreFirst) {
+        this.showLambdaFrames = showLambdaFrames;
+        this.ignoreFirst = ignoreFirst;
         this.depth = depth;
+        assert depth >= 0;
     }
 
     @Override
     public boolean visitFrame(FrameInfoQueryResult frameInfo) {
-        if (!foundCallee) {
+        assert depth >= 0;
+
+        if (ignoreFirst) {
             /*
              * Skip the frame that contained the invocation of getCallerFrame() and continue the
              * stack walk. Note that this could be a frame related to reflection, but we still must
@@ -155,10 +298,10 @@ class GetCallerClassVisitor extends JavaStackFrameVisitor {
              * does not count as as frame (handled by the shouldShowFrame check below because this
              * path was already taken for the constructor frame).
              */
-            foundCallee = true;
+            ignoreFirst = false;
             return true;
 
-        } else if (!StackTraceUtils.shouldShowFrame(frameInfo, false, false)) {
+        } else if (!StackTraceUtils.shouldShowFrame(frameInfo, showLambdaFrames, false, false)) {
             /*
              * Always ignore the frame. It is an internal frame of the VM or a frame related to
              * reflection.
@@ -191,9 +334,99 @@ class GetClassContextVisitor extends JavaStackFrameVisitor {
     public boolean visitFrame(final FrameInfoQueryResult frameInfo) {
         if (skip > 0) {
             skip--;
-        } else if (StackTraceUtils.shouldShowFrame(frameInfo, false, false)) {
+        } else if (StackTraceUtils.shouldShowFrame(frameInfo, true, false, false)) {
             trace.add(frameInfo.getSourceClass());
         }
         return true;
+    }
+}
+
+class GetLatestUserDefinedClassLoaderVisitor extends JavaStackFrameVisitor {
+    ClassLoader result;
+
+    GetLatestUserDefinedClassLoaderVisitor() {
+    }
+
+    @Override
+    public boolean visitFrame(FrameInfoQueryResult frameInfo) {
+        if (!StackTraceUtils.shouldShowFrame(frameInfo, true, true, false)) {
+            // Skip internal frames.
+            return true;
+        }
+
+        ClassLoader classLoader = frameInfo.getSourceClass().getClassLoader();
+        if (classLoader == null || isExtensionOrPlatformLoader(classLoader)) {
+            // Skip bootstrap and platform/extension class loader.
+            return true;
+        }
+
+        result = classLoader;
+        return false;
+    }
+
+    private static boolean isExtensionOrPlatformLoader(ClassLoader classLoader) {
+        return classLoader == Target_jdk_internal_loader_ClassLoaders.platformClassLoader();
+    }
+}
+
+/* Reimplementation of JVM_GetStackAccessControlContext from JDK15 */
+class StackAccessControlContextVisitor extends JavaStackFrameVisitor {
+    final ArrayList<ProtectionDomain> localArray;
+    boolean isPrivileged;
+    ProtectionDomain previousProtectionDomain;
+    AccessControlContext privilegedContext;
+
+    StackAccessControlContextVisitor() {
+        localArray = new ArrayList<>();
+        isPrivileged = false;
+        privilegedContext = null;
+    }
+
+    @Override
+    public boolean visitFrame(final FrameInfoQueryResult frameInfo) {
+        if (!StackTraceUtils.shouldShowFrame(frameInfo, true, false, false)) {
+            return true;
+        }
+
+        Class<?> clazz = frameInfo.getSourceClass();
+        String method = frameInfo.getSourceMethodName();
+
+        ProtectionDomain protectionDomain;
+        if (PrivilegedStack.length() > 0 && clazz.equals(AccessController.class) && method.equals("doPrivileged")) {
+            isPrivileged = true;
+            privilegedContext = PrivilegedStack.peekContext();
+            protectionDomain = PrivilegedStack.peekCaller().getProtectionDomain();
+        } else {
+            protectionDomain = clazz.getProtectionDomain();
+        }
+
+        if ((protectionDomain != null) && (previousProtectionDomain == null || !previousProtectionDomain.equals(protectionDomain))) {
+            localArray.add(protectionDomain);
+            previousProtectionDomain = protectionDomain;
+        }
+
+        return !isPrivileged;
+    }
+
+    @NeverInline("Starting a stack walk in the caller frame")
+    @SuppressWarnings({"deprecation"}) // deprecated starting JDK 17
+    public static AccessControlContext getFromStack() {
+        StackAccessControlContextVisitor visitor = new StackAccessControlContextVisitor();
+        JavaStackWalker.walkCurrentThread(KnownIntrinsics.readCallerStackPointer(), visitor);
+        Target_java_security_AccessControlContext wrapper;
+
+        if (visitor.localArray.isEmpty()) {
+            if (visitor.isPrivileged && visitor.privilegedContext == null) {
+                return null;
+            }
+            wrapper = new Target_java_security_AccessControlContext(null, visitor.privilegedContext);
+        } else {
+            ProtectionDomain[] context = visitor.localArray.toArray(new ProtectionDomain[visitor.localArray.size()]);
+            wrapper = new Target_java_security_AccessControlContext(context, visitor.privilegedContext);
+        }
+
+        wrapper.isPrivileged = visitor.isPrivileged;
+        wrapper.isAuthorized = true;
+        return SubstrateUtil.cast(wrapper, AccessControlContext.class);
     }
 }

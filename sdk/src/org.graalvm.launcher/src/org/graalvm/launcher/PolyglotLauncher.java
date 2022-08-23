@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -181,8 +181,21 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
 
     private void launch(String[] args) {
         List<String> argumentsList = new ArrayList<>(Arrays.asList(args));
+        for (;;) {
+            try {
+                launchImpl(argumentsList);
+            } catch (RestartInJVMException ex) {
+                argumentsList.add(0, "--jvm");
+                continue;
+            }
+            return;
+        }
+    }
+
+    private void launchImpl(List<String> argumentsList) {
         if (isAOT()) {
-            maybeNativeExec(argumentsList, true, Collections.emptyMap());
+            List<String> originalArgs = Collections.unmodifiableList(new ArrayList<>(argumentsList));
+            maybeNativeExec(originalArgs, argumentsList, true);
         }
 
         final Deque<String> arguments = new ArrayDeque<>(argumentsList);
@@ -291,7 +304,7 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
     private static Class<AbstractLanguageLauncher> getLauncherClass(String launcherName, ClassLoader loader) {
         try {
             Class<?> launcherClass = Class.forName(launcherName, false, loader);
-            if (launcherClass != null && !AbstractLanguageLauncher.class.isAssignableFrom(launcherClass)) {
+            if (!AbstractLanguageLauncher.class.isAssignableFrom(launcherClass)) {
                 throw new RuntimeException("Launcher class " + launcherName + " does not extend AbstractLanguageLauncher");
             }
             return (Class<AbstractLanguageLauncher>) launcherClass;
@@ -325,9 +338,6 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
             });
             URLClassLoader loader = new URLClassLoader(classpath.toArray(new URL[0]), PolyglotLauncher.class.getClassLoader());
             launcherClass = getLauncherClass(launcherName, loader);
-            if (launcherClass == null) {
-                throw abort("Could not find class '" + launcherName + "'.");
-            }
         }
         AbstractLanguageLauncher launcher;
         try {
@@ -413,9 +423,9 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
     }
 
     private void runShell(Context.Builder contextBuilder) {
-        try (Context context = contextBuilder.build()) {
-            MultiLanguageShell polyglotShell = new MultiLanguageShell(context, System.in, System.out, mainLanguage);
-            throw exit(polyglotShell.readEvalPrint());
+        try (Context context = contextBuilder.build();
+                        MultiLanguageShell polyglotShell = new MultiLanguageShell(context, mainLanguage, createSystemTerminal())) {
+            throw exit(polyglotShell.runRepl());
         } catch (IOException e) {
             throw abort(e);
         }
@@ -438,6 +448,13 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
         }
     }
 
+    private static final class RestartInJVMException extends RuntimeException {
+        static final long serialVersionUID = 1;
+
+        RestartInJVMException() {
+        }
+    }
+
     private abstract class Script {
         final String languageId;
 
@@ -456,7 +473,12 @@ public final class PolyglotLauncher extends LanguageLauncherBase {
                 }
             }
             if (language == null) {
-                throw abort(String.format("Can not determine language for '%s' %s", this, this.getLanguageSpecifierHelp()));
+                final String msg = "Cannot determine language for '%s' %s";
+                if (isAOT()) {
+                    getError().println(String.format(msg, this, "Trying with --jvm mode..."));
+                    throw new RestartInJVMException();
+                }
+                throw abort(String.format(msg, this, this.getLanguageSpecifierHelp()));
             }
             return language;
         }

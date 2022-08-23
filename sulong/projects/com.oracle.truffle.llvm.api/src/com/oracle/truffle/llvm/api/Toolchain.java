@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -34,6 +34,8 @@ import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.nodes.LanguageInfo;
 
+import java.util.List;
+
 /**
  * A toolchain provides access to a set of tools which are used to translate an input file into a
  * source format that can be executed. Its purpose is to support build systems that are executed by
@@ -48,9 +50,12 @@ public interface Toolchain {
      * own set of supported tools. The command line interface of the executable is specific to the
      * tool. If a tool is not supported or not known, {@code null} must be returned.
      *
+     * Known tools are:
      * <dl>
      * <dt><code>CC</code></dt>
      * <dd>A C compiler with a <code>clang</code>-like command line interface.</dd>
+     * <dt><code>CL</code></dt>
+     * <dd>A C/C++ compiler with a <code>cl</code>-like command line interface.</dd>
      * <dt><code>CXX</code></dt>
      * <dd>A C++ compiler with a <code>clang++</code>-like command line interface.</dd>
      * <dt><code>LD</code></dt>
@@ -78,6 +83,22 @@ public interface Toolchain {
     TruffleFile getToolPath(String tool);
 
     /**
+     * Returns a list of directories for a given path name. Every implementation is free to choose
+     * its own set of supported path names. If a path name is not supported or not known,
+     * {@code null} must be returned. Note that the directories returned by this method do not need
+     * to exist.
+     * <p>
+     * Known path names are:
+     * <dl>
+     * <dt><code>PATH</code></dt>
+     * <dd>Directories where the toolchain executables are located.</dd>
+     * <dt><code>LD_LIBRARY_PATH</code></dt>
+     * <dd>(Additional) directories to look up shared libraries.</dd>
+     * </dl>
+     */
+    List<TruffleFile> getPaths(String pathName);
+
+    /**
      * Returns an identifier for the toolchain. It can be used to distinguish results produced by
      * different toolchains. Since the identifier may be used as a path suffix to place results in
      * distinct locations, it should not contain special characters like slashes {@code /} or
@@ -100,10 +121,11 @@ abstract class ToolchainExampleSnippet {
         Toolchain toolchain = env.lookup(llvmInfo, Toolchain.class);
         String id = toolchain.getIdentifier();
         TruffleFile cc = toolchain.getToolPath("CC");
+        TruffleFile cl = toolchain.getToolPath("CL");
         TruffleFile cxx = toolchain.getToolPath("CXX");
         TruffleFile ld = toolchain.getToolPath("LD");
 
-        String[] args = {"make", "CC=" + cc, "CXX=" + cxx, "LD=" + ld, "OUTPUT_DIR=" + id};
+        String[] args = {"make", "CC=" + cc, "CL=" + cl, "CXX=" + cxx, "LD=" + ld, "OUTPUT_DIR=" + id};
         Process p = env.newProcessBuilder(args).start();
         p.waitFor();
         // END: toolchain-example

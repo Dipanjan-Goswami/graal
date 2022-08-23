@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,14 +28,14 @@ import org.graalvm.compiler.hotspot.GraalHotSpotVMConfig;
 import org.graalvm.compiler.hotspot.meta.HotSpotRegistersProvider;
 import org.graalvm.compiler.lir.asm.CompilationResultBuilder;
 import org.graalvm.compiler.lir.asm.CompilationResultBuilderFactory;
-import org.graalvm.compiler.truffle.common.hotspot.HotSpotTruffleCompilerRuntime;
 
 import jdk.vm.ci.meta.MetaAccessProvider;
 
 /**
  * A service for creating a specialized {@link CompilationResultBuilder} used to inject code into
- * the beginning of a {@linkplain HotSpotTruffleCompilerRuntime#getTruffleCallBoundaryMethods() call
- * boundary method}. The injected code tests the {@code entryPoint} field of the
+ * the beginning of a
+ * {@linkplain HotSpotTruffleCompilerImpl#installTruffleCallBoundaryMethod(jdk.vm.ci.meta.ResolvedJavaMethod)
+ * call boundary method}. The injected code tests the {@code entryPoint} field of the
  * {@code installedCode} field of the receiver and tail calls it if it is non-zero:
  *
  * <pre>
@@ -47,18 +47,21 @@ import jdk.vm.ci.meta.MetaAccessProvider;
  * // normal compiled code
  * </pre>
  */
-public abstract class TruffleCallBoundaryInstrumentationFactory implements CompilationResultBuilderFactory {
+public abstract class TruffleCallBoundaryInstrumentationFactory {
 
-    protected MetaAccessProvider metaAccess;
-    protected GraalHotSpotVMConfig config;
-    protected HotSpotRegistersProvider registers;
+    public abstract static class TruffleCompilationResultBuilderFactory implements CompilationResultBuilderFactory {
+        protected MetaAccessProvider metaAccess;
+        protected GraalHotSpotVMConfig config;
+        protected HotSpotRegistersProvider registers;
 
-    @SuppressWarnings("hiding")
-    public final void init(MetaAccessProvider metaAccess, GraalHotSpotVMConfig config, HotSpotRegistersProvider registers) {
-        this.metaAccess = metaAccess;
-        this.config = config;
-        this.registers = registers;
+        public TruffleCompilationResultBuilderFactory(MetaAccessProvider metaAccess, GraalHotSpotVMConfig config, HotSpotRegistersProvider registers) {
+            this.metaAccess = metaAccess;
+            this.config = config;
+            this.registers = registers;
+        }
     }
+
+    public abstract CompilationResultBuilderFactory create(MetaAccessProvider metaAccess, GraalHotSpotVMConfig config, HotSpotRegistersProvider registers);
 
     /**
      * Gets the architecture supported by this factory.

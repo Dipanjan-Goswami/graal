@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,64 +24,36 @@
  */
 package com.oracle.svm.hosted.jdk;
 
-import com.oracle.svm.hosted.FeatureImpl;
-import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration.Plugins;
-import org.graalvm.compiler.phases.util.Providers;
-import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.impl.InternalPlatform;
-
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.graal.GraalFeature;
-import com.oracle.svm.core.jdk.JNIRegistrationUtil;
-import com.oracle.svm.core.jdk.PlatformNativeLibrarySupport;
-import com.oracle.svm.core.jni.JNIRuntimeAccess;
-import com.oracle.svm.hosted.FeatureImpl.BeforeAnalysisAccessImpl;
-import com.oracle.svm.hosted.c.NativeLibraries;
-
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
 
+import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.hosted.Feature;
+import org.graalvm.nativeimage.impl.InternalPlatform;
+
+import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.jdk.JNIRegistrationUtil;
+import com.oracle.svm.core.jdk.PlatformNativeLibrarySupport;
+import com.oracle.svm.core.jni.JNIRuntimeAccess;
+import com.oracle.svm.hosted.FeatureImpl;
+
 /**
  * Registration of classes, methods, and fields accessed via JNI by C code of the JDK.
  */
-@Platforms({InternalPlatform.PLATFORM_JNI.class})
+@Platforms(InternalPlatform.PLATFORM_JNI.class)
 @AutomaticFeature
-class JNIRegistrationJava extends JNIRegistrationUtil implements GraalFeature {
+class JNIRegistrationJava extends JNIRegistrationUtil implements Feature {
 
     private static final Consumer<DuringAnalysisAccess> CORESERVICES_LINKER = (duringAnalysisAccess -> {
         FeatureImpl.DuringAnalysisAccessImpl accessImpl = (FeatureImpl.DuringAnalysisAccessImpl) duringAnalysisAccess;
-        accessImpl.getNativeLibraries().addLibrary("-framework CoreServices", false);
+        accessImpl.getNativeLibraries().addDynamicNonJniLibrary("-framework CoreServices");
     });
 
     @Override
-    public void registerGraphBuilderPlugins(Providers providers, Plugins plugins, boolean analysis, boolean hosted) {
-        JNIRegistrationSupport.singleton().registerNativeLibrary(providers, plugins, System.class, "loadLibrary");
-    }
-
-    @Override
-    public void duringSetup(DuringSetupAccess a) {
-        ImageSingletons.add(JNIRegistrationSupport.class, new JNIRegistrationSupport());
-
-        rerunClassInit(a, "java.io.RandomAccessFile", "java.lang.ProcessEnvironment", "java.io.File$TempDirectory");
-        if (JavaVersionUtil.JAVA_SPEC <= 8) {
-            if (isPosix()) {
-                rerunClassInit(a, "java.lang.UNIXProcess");
-            }
-        } else {
-            rerunClassInit(a, "java.lang.ProcessImpl", "java.lang.ProcessHandleImpl", "java.lang.ProcessHandleImpl$Info", "java.io.FilePermission");
-        }
-    }
-
-    @Override
     public void beforeAnalysis(BeforeAnalysisAccess a) {
-        NativeLibraries nativeLibraries = ((BeforeAnalysisAccessImpl) a).getNativeLibraries();
-        JNIRegistrationSupport.singleton().setNativeLibraries(nativeLibraries);
-
         /*
          * It is difficult to track down all the places where exceptions are thrown via JNI. And
          * unconditional registration is cheap. Therefore, we register them unconditionally.
@@ -93,7 +65,7 @@ class JNIRegistrationJava extends JNIRegistrationUtil implements GraalFeature {
                         "java.lang.NoSuchFieldError", "java.lang.NoSuchMethodError", "java.lang.UnsatisfiedLinkError", "java.lang.StringIndexOutOfBoundsException",
                         "java.lang.InstantiationException", "java.lang.UnsupportedOperationException",
                         "java.io.IOException", "java.io.FileNotFoundException", "java.io.SyncFailedException", "java.io.InterruptedIOException",
-                        "java.util.zip.DataFormatException");
+                        "java.util.zip.DataFormatException", "java.lang.IndexOutOfBoundsException");
         JNIRuntimeAccess.register(constructor(a, "java.io.FileNotFoundException", String.class, String.class));
 
         /* Unconditional Integer and Boolean JNI registration (cheap) */
@@ -115,9 +87,7 @@ class JNIRegistrationJava extends JNIRegistrationUtil implements GraalFeature {
         if (isWindows()) {
             JNIRuntimeAccess.register(fields(a, "java.io.FileDescriptor", "handle"));
         }
-        if (JavaVersionUtil.JAVA_SPEC >= 11) {
-            JNIRuntimeAccess.register(fields(a, "java.io.FileDescriptor", "append"));
-        }
+        JNIRuntimeAccess.register(fields(a, "java.io.FileDescriptor", "append"));
 
         /* Used by FileOutputStream.initIDs, which is called unconditionally during startup. */
         JNIRuntimeAccess.register(fields(a, "java.io.FileOutputStream", "fd"));
@@ -136,12 +106,12 @@ class JNIRegistrationJava extends JNIRegistrationUtil implements GraalFeature {
         JNIRuntimeAccess.register(method(a, "java.lang.System", "getProperty", String.class));
         JNIRuntimeAccess.register(java.nio.charset.Charset.class);
         JNIRuntimeAccess.register(method(a, "java.nio.charset.Charset", "isSupported", String.class));
+        JNIRuntimeAccess.register(constructor(a, "java.lang.String", byte[].class));
         JNIRuntimeAccess.register(constructor(a, "java.lang.String", byte[].class, String.class));
         JNIRuntimeAccess.register(method(a, "java.lang.String", "getBytes", String.class));
+        JNIRuntimeAccess.register(method(a, "java.lang.String", "getBytes"));
         JNIRuntimeAccess.register(method(a, "java.lang.String", "concat", String.class));
-        if (JavaVersionUtil.JAVA_SPEC >= 11) {
-            JNIRuntimeAccess.register(fields(a, "java.lang.String", "coder", "value"));
-        }
+        JNIRuntimeAccess.register(fields(a, "java.lang.String", "coder", "value"));
 
         a.registerReachabilityHandler(JNIRegistrationJava::registerRandomAccessFileInitIDs, method(a, "java.io.RandomAccessFile", "initIDs"));
         if (isWindows()) {
@@ -155,26 +125,20 @@ class JNIRegistrationJava extends JNIRegistrationUtil implements GraalFeature {
                             method(a, "apple.security.KeychainStore", "_addItemToKeychain", String.class, boolean.class, byte[].class, char[].class),
                             method(a, "apple.security.KeychainStore", "_removeItemFromKeychain", long.class),
                             method(a, "apple.security.KeychainStore", "_getEncodedKeyData", long.class, char[].class));
-            if (JavaVersionUtil.JAVA_SPEC >= 11) {
-                /*
-                 * JNI method implementations depending on CoreService are present in the following
-                 * jdk classes sun.nio.fs.MacOXFileSystemProvider (9+),
-                 * sun.net.spi.DefaultProxySelector (9+)
-                 */
-                ArrayList<Method> methods = new ArrayList<>(darwinMethods);
-                methods.addAll(Arrays.asList(method(a, "sun.nio.fs.MacOSXFileSystemProvider", "getFileTypeDetector"),
-                                method(a, "sun.net.spi.DefaultProxySelector", "getSystemProxies", String.class, String.class),
-                                method(a, "sun.net.spi.DefaultProxySelector", "init")));
+            /*
+             * JNI method implementations depending on CoreService are present in the following jdk
+             * classes sun.nio.fs.MacOXFileSystemProvider (9+), sun.net.spi.DefaultProxySelector
+             * (9+)
+             */
+            ArrayList<Method> methods = new ArrayList<>(darwinMethods);
+            methods.addAll(Arrays.asList(method(a, "sun.nio.fs.MacOSXFileSystemProvider", "getFileTypeDetector"),
+                            method(a, "sun.net.spi.DefaultProxySelector", "getSystemProxies", String.class, String.class),
+                            method(a, "sun.net.spi.DefaultProxySelector", "init")));
 
-                a.registerReachabilityHandler(CORESERVICES_LINKER, methods.toArray(new Object[]{}));
-            } else {
-                a.registerReachabilityHandler(CORESERVICES_LINKER, darwinMethods.toArray(new Object[]{}));
-            }
+            a.registerReachabilityHandler(CORESERVICES_LINKER, methods.toArray(new Object[]{}));
         }
 
-        if (JavaVersionUtil.JAVA_SPEC >= 11) {
-            a.registerReachabilityHandler(JNIRegistrationJava::registerProcessHandleImplInfoInitIDs, method(a, "java.lang.ProcessHandleImpl$Info", "initIDs"));
-        }
+        a.registerReachabilityHandler(JNIRegistrationJava::registerProcessHandleImplInfoInitIDs, method(a, "java.lang.ProcessHandleImpl$Info", "initIDs"));
     }
 
     private static void registerProcessHandleImplInfoInitIDs(DuringAnalysisAccess a) {

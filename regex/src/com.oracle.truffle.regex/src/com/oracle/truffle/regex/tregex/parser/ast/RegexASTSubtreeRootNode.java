@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,14 +41,15 @@
 package com.oracle.truffle.regex.tregex.parser.ast;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
 import com.oracle.truffle.regex.tregex.parser.ast.visitors.RegexASTVisitorIterable;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
 
 /**
- * A common supertype to the root node and look-ahead and look-behind assertions. Every AST subtree
- * contains a {@link Group} which contains the syntactic subtree, as well as a {@link MatchFound}
- * node, which is needed for NFA-like traversal of the AST, see
+ * A common supertype to the root node, lookahead and lookbehind assertions and atomic groups. Every
+ * AST subtree contains a {@link Group} which contains the syntactic subtree, as well as a
+ * {@link MatchFound} node, which is needed for NFA-like traversal of the AST, see
  * {@link com.oracle.truffle.regex.tregex.parser.ast.visitors.NFATraversalRegexASTVisitor}.
  */
 public abstract class RegexASTSubtreeRootNode extends Term implements RegexASTVisitorIterable {
@@ -64,12 +65,20 @@ public abstract class RegexASTSubtreeRootNode extends Term implements RegexASTVi
     RegexASTSubtreeRootNode() {
     }
 
-    RegexASTSubtreeRootNode(RegexASTSubtreeRootNode copy, RegexAST ast, boolean recursive) {
+    /**
+     * Shallow copy constructor.
+     */
+    RegexASTSubtreeRootNode(RegexASTSubtreeRootNode copy, RegexAST ast) {
         super(copy);
-        if (recursive) {
-            setGroup(copy.group.copy(ast, true));
-        }
         ast.createNFAHelperNodes(this);
+    }
+
+    /**
+     * Recursive copy constructor.
+     */
+    RegexASTSubtreeRootNode(RegexASTSubtreeRootNode copy, RegexAST ast, CompilationBuffer compilationBuffer) {
+        this(copy, ast);
+        setGroup(copy.group.copyRecursive(ast, compilationBuffer));
     }
 
     public boolean subTreeIdInitialized() {
@@ -85,7 +94,7 @@ public abstract class RegexASTSubtreeRootNode extends Term implements RegexASTVi
     }
 
     @Override
-    public abstract RegexASTSubtreeRootNode copy(RegexAST ast, boolean recursive);
+    public abstract RegexASTSubtreeRootNode copy(RegexAST ast);
 
     /**
      * Returns the {@link Group} that represents the contents of this subtree.

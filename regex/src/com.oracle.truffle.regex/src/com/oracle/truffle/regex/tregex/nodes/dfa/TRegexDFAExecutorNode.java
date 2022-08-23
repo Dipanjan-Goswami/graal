@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,38 +46,73 @@ import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.regex.RegexRootNode;
+import com.oracle.truffle.regex.RegexSource;
+import com.oracle.truffle.regex.tregex.matchers.CharMatcher;
 import com.oracle.truffle.regex.tregex.nodes.TRegexExecutorLocals;
 import com.oracle.truffle.regex.tregex.nodes.TRegexExecutorNode;
+import com.oracle.truffle.regex.tregex.nodes.dfa.SequentialMatchers.SimpleSequentialMatchers;
+import com.oracle.truffle.regex.tregex.nodes.dfa.SequentialMatchers.UTF16Or32SequentialMatchers;
+import com.oracle.truffle.regex.tregex.nodes.dfa.SequentialMatchers.UTF16RawSequentialMatchers;
+import com.oracle.truffle.regex.tregex.nodes.dfa.SequentialMatchers.UTF8SequentialMatchers;
+import com.oracle.truffle.regex.tregex.nodes.input.InputIndexOfNode;
+import com.oracle.truffle.regex.tregex.nodes.input.InputIndexOfStringNode;
 
 public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
 
+    private static final int IP_TRANSITION_MARKER = 0x8000;
     public static final int NO_MATCH = -2;
     private final TRegexDFAExecutorProperties props;
     private final int maxNumberOfNFAStates;
-    @Children private final DFAAbstractStateNode[] states;
-    @CompilationFinal(dimensions = 1) private final DFACaptureGroupLazyTransition[] cgTransitions;
+    @CompilationFinal(dimensions = 1) private final DFAAbstractStateNode[] states;
+    @CompilationFinal(dimensions = 1) private final int[] cgResultOrder;
     private final TRegexDFAExecutorDebugRecorder debugRecorder;
 
+    @Child private InputIndexOfNode indexOfNode;
+    @Child private InputIndexOfStringNode indexOfStringNode;
+    @Child private TRegexDFAExecutorNode innerLiteralPrefixMatcher;
+
     public TRegexDFAExecutorNode(
+                    RegexSource source,
                     TRegexDFAExecutorProperties props,
+                    int numberOfCaptureGroups,
                     int maxNumberOfNFAStates,
                     DFAAbstractStateNode[] states,
-                    DFACaptureGroupLazyTransition[] cgTransitions,
-                    TRegexDFAExecutorDebugRecorder debugRecorder) {
-        this.props = props;
-        this.maxNumberOfNFAStates = maxNumberOfNFAStates;
-        this.states = states;
-        this.cgTransitions = cgTransitions;
-        this.debugRecorder = debugRecorder;
+                    TRegexDFAExecutorDebugRecorder debugRecorder,
+                    TRegexDFAExecutorNode innerLiteralPrefixMatcher) {
+        this(source, props, numberOfCaptureGroups, calcNumberOfTransitions(states), maxNumberOfNFAStates, states,
+                        props.isGenericCG() && maxNumberOfNFAStates > 1 ? initResultOrder(maxNumberOfNFAStates, numberOfCaptureGroups, props) : null, debugRecorder,
+                        innerLiteralPrefixMatcher);
     }
 
     public TRegexDFAExecutorNode(
+                    RegexSource source,
                     TRegexDFAExecutorProperties props,
+                    int numberOfCaptureGroups,
+                    int numberOfTransitions,
                     int maxNumberOfNFAStates,
                     DFAAbstractStateNode[] states,
-                    DFACaptureGroupLazyTransition[] cgTransitions) {
-        this(props, maxNumberOfNFAStates, states, cgTransitions, null);
+                    int[] cgResultOrder,
+                    TRegexDFAExecutorDebugRecorder debugRecorder,
+                    TRegexDFAExecutorNode innerLiteralPrefixMatcher) {
+        super(source, numberOfCaptureGroups, numberOfTransitions);
+        this.props = props;
+        this.maxNumberOfNFAStates = maxNumberOfNFAStates;
+        this.states = states;
+        this.cgResultOrder = cgResultOrder;
+        this.debugRecorder = debugRecorder;
+        this.innerLiteralPrefixMatcher = innerLiteralPrefixMatcher;
+    }
+
+    private TRegexDFAExecutorNode(TRegexDFAExecutorNode copy, TRegexDFAExecutorNode innerLiteralPrefixMatcher) {
+        this(copy.getSource(), copy.props, copy.getNumberOfCaptureGroups(), copy.getNumberOfTransitions(), copy.maxNumberOfNFAStates, copy.states, copy.cgResultOrder, copy.debugRecorder,
+                        innerLiteralPrefixMatcher);
+    }
+
+    @Override
+    public TRegexDFAExecutorNode shallowCopy() {
+        return new TRegexDFAExecutorNode(this, innerLiteralPrefixMatcher == null ? null : innerLiteralPrefixMatcher.shallowCopy());
     }
 
     private DFAInitialStateNode getInitialState() {
@@ -92,6 +127,12 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
         return !getInitialState().hasUnAnchoredEntry();
     }
 
+    @Override
+    public String getName() {
+        return "dfa";
+    }
+
+    @Override
     public boolean isForward() {
         return props.isForward();
     }
@@ -116,12 +157,20 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
         return props.isRegressionTestMode();
     }
 
-    public DFACaptureGroupLazyTransition[] getCGTransitions() {
-        return cgTransitions;
-    }
-
     public int getNumberOfStates() {
         return states.length;
+    }
+
+    private static int calcNumberOfTransitions(DFAAbstractStateNode[] states) {
+        int sum = 0;
+        for (DFAAbstractStateNode state : states) {
+            sum += state.getSuccessors().length;
+            if (state instanceof DFAStateNode && !((DFAStateNode) state).treeTransitionMatching() &&
+                            ((DFAStateNode) state).getSequentialMatchers().getNoMatchSuccessor() >= 0) {
+                sum++;
+            }
+        }
+        return sum;
     }
 
     public boolean recordExecution() {
@@ -130,6 +179,22 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
 
     public TRegexDFAExecutorDebugRecorder getDebugRecorder() {
         return debugRecorder;
+    }
+
+    InputIndexOfNode getIndexOfNode() {
+        if (indexOfNode == null) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            indexOfNode = insert(InputIndexOfNode.create());
+        }
+        return indexOfNode;
+    }
+
+    InputIndexOfStringNode getIndexOfStringNode() {
+        if (indexOfStringNode == null) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            indexOfStringNode = insert(InputIndexOfStringNode.create());
+        }
+        return indexOfStringNode;
     }
 
     @Override
@@ -143,11 +208,28 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
     }
 
     private DFACaptureGroupTrackingData createCGData() {
-        if (isGenericCG() || isSimpleCG()) {
-            return new DFACaptureGroupTrackingData(getMaxNumberOfNFAStates(), getNumberOfCaptureGroups(), props);
+        if (isSimpleCG()) {
+            return new DFACaptureGroupTrackingData(null,
+                            createResultsArray(resultLength()),
+                            props.isSimpleCGMustCopy() ? new int[resultLength()] : null);
+        } else if (isGenericCG()) {
+            return new DFACaptureGroupTrackingData(
+                            maxNumberOfNFAStates == 1 ? null : Arrays.copyOf(cgResultOrder, cgResultOrder.length),
+                            createResultsArray(maxNumberOfNFAStates * resultLength()),
+                            new int[resultLength()]);
         } else {
             return null;
         }
+    }
+
+    private int resultLength() {
+        return getNumberOfCaptureGroups() * 2 + (props.tracksLastGroup() ? 1 : 0);
+    }
+
+    private static int[] createResultsArray(int length) {
+        int[] results = new int[length];
+        Arrays.fill(results, -1);
+        return results;
     }
 
     /**
@@ -155,35 +237,31 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
      */
     @Override
     @ExplodeLoop(kind = ExplodeLoop.LoopExplosionKind.MERGE_EXPLODE)
-    public Object execute(final TRegexExecutorLocals abstractLocals, final boolean compactString) {
+    public Object execute(final TRegexExecutorLocals abstractLocals, final TruffleString.CodeRange codeRange, boolean tString) {
         TRegexDFAExecutorLocals locals = (TRegexDFAExecutorLocals) abstractLocals;
         CompilerDirectives.ensureVirtualized(locals);
-        CompilerAsserts.compilationConstant(states);
-        CompilerAsserts.compilationConstant(states.length);
+        CompilerAsserts.partialEvaluationConstant(states);
+        CompilerAsserts.partialEvaluationConstant(states.length);
+        CompilerAsserts.partialEvaluationConstant(codeRange);
         if (!validArgs(locals)) {
-            CompilerDirectives.transferToInterpreter();
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             throw new IllegalArgumentException(String.format("Got illegal args! (fromIndex %d, initialIndex %d, maxIndex %d)",
                             locals.getFromIndex(), locals.getIndex(), locals.getMaxIndex()));
         }
-        if (isGenericCG()) {
-            initResultOrder(locals);
-            locals.setLastTransition((short) -1);
-        } else if (isSimpleCG()) {
+        if (isGenericCG() || isSimpleCG()) {
             CompilerDirectives.ensureVirtualized(locals.getCGData());
-            Arrays.fill(locals.getCGData().results, -1);
         }
         // check if input is long enough for a match
-        if (props.getMinResultLength() > 0 && (isForward() ? locals.getMaxIndex() - locals.getIndex() : locals.getIndex() - locals.getMaxIndex()) < props.getMinResultLength()) {
+        if (props.getMinResultLength() > 0 &&
+                        (isForward() ? locals.getMaxIndex() - locals.getIndex() : locals.getIndex() - Math.max(0, locals.getFromIndex() - getPrefixLength())) < props.getMinResultLength()) {
             // no match possible, break immediately
             return isGenericCG() || isSimpleCG() ? null : TRegexDFAExecutorNode.NO_MATCH;
         }
         if (recordExecution()) {
             debugRecorder.startRecording(locals);
         }
-        if (isBackward() && locals.getFromIndex() - 1 > locals.getMaxIndex()) {
-            locals.setCurMaxIndex(locals.getFromIndex() - 1);
-        } else {
-            locals.setCurMaxIndex(locals.getMaxIndex());
+        if (isBackward()) {
+            locals.setCurMinIndex(locals.getFromIndex());
         }
         int ip = 0;
         outer: while (true) {
@@ -191,30 +269,362 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
                 RegexRootNode.checkThreadInterrupted();
             }
             CompilerAsserts.partialEvaluationConstant(ip);
-            if (ip == -1) {
+            if (ip < 0) {
                 break;
             }
-            final DFAAbstractStateNode curState = states[ip];
+            final DFAAbstractStateNode curState = states[ip & 0x7fff];
             CompilerAsserts.partialEvaluationConstant(curState);
             final short[] successors = curState.getSuccessors();
             CompilerAsserts.partialEvaluationConstant(successors);
             CompilerAsserts.partialEvaluationConstant(successors.length);
-            int prevIndex = locals.getIndex();
-            curState.executeFindSuccessor(locals, this, compactString);
-            if (recordExecution() && ip != 0) {
-                debugRecordTransition(locals, (DFAStateNode) curState, prevIndex);
-            }
-            for (int i = 0; i < successors.length; i++) {
-                if (i == locals.getSuccessorIndex()) {
-                    if (successors[i] != -1 && states[successors[i]] instanceof DFAStateNode) {
-                        ((DFAStateNode) states[successors[i]]).getStateReachedProfile().enter();
+            if (curState instanceof DFAInitialStateNode) {
+                /*
+                 * initial state selection
+                 */
+                final boolean atBegin;
+                if (isSearching()) {
+                    assert isForward();
+                    /*
+                     * We are in search mode - rewind up to prefixLength code points and select
+                     * successors[n], where n is the number of skipped code points.
+                     */
+                    for (int i = 0; i < getPrefixLength(); i++) {
+                        if (locals.getIndex() > 0) {
+                            inputSkipIntl(locals, false);
+                        } else {
+                            initNextIndex(locals);
+                            ip = initialStateSuccessor(locals, curState, successors, i);
+                            continue outer;
+                        }
                     }
-                    ip = successors[i];
+                    initNextIndex(locals);
+                    atBegin = inputAtBegin(locals);
+                } else {
+                    /*
+                     * We are in non-searching mode - if we start behind fromIndex, select
+                     * successors[n], where n is the number of code points between the current index
+                     * and fromIndex.
+                     */
+                    initNextIndex(locals);
+                    atBegin = inputAtBegin(locals);
+                    for (int i = 0; i < getPrefixLength(); i++) {
+                        assert isForward();
+                        if (locals.getIndex() < locals.getFromIndex()) {
+                            inputSkipIntl(locals, true);
+                        } else {
+                            if (atBegin) {
+                                ip = initialStateSuccessor(locals, curState, successors, i);
+                                continue outer;
+                            } else {
+                                ip = initialStateSuccessor(locals, curState, successors, i + (successors.length / 2));
+                                continue outer;
+                            }
+                        }
+                    }
+                }
+                if (atBegin) {
+                    ip = initialStateSuccessor(locals, curState, successors, getPrefixLength());
+                    continue outer;
+                } else {
+                    ip = initialStateSuccessor(locals, curState, successors, getPrefixLength() + (successors.length / 2));
                     continue outer;
                 }
+            } else if (curState instanceof DFAStateNode) {
+                DFAStateNode state = (DFAStateNode) curState;
+                if (ip > IP_TRANSITION_MARKER) {
+                    /*
+                     * execute DFA state transition
+                     */
+                    int i = ip >> 16;
+                    ip = execTransition(locals, state, i);
+                    continue outer;
+                } else {
+                    if (CompilerDirectives.hasNextTier()) {
+                        locals.incLoopCount(this);
+                    }
+                    /*
+                     * find matching DFA state transition
+                     */
+                    inputAdvance(locals);
+                    state.beforeFindSuccessor(locals, this);
+                    if (isForward() && state.canDoIndexOf() && inputHasNext(locals)) {
+                        int indexOfResult = state.indexOfCall.execute(this, locals.getInput(), locals.getIndex(), getMaxIndex(locals), getEncoding(), tString);
+                        int postLoopIndex = indexOfResult < 0 ? getMaxIndex(locals) : indexOfResult;
+                        state.afterIndexOf(locals, this, locals.getIndex(), postLoopIndex);
+                        assert locals.getIndex() == postLoopIndex;
+                        if (successors.length == 2 && indexOfResult >= 0) {
+                            int successor = (state.getLoopToSelf() + 1) & 1;
+                            CompilerAsserts.partialEvaluationConstant(successor);
+                            inputIncNextIndexRaw(locals, state.indexOfCall.encodedLength());
+                            ip = execTransition(locals, state, successor);
+                            continue outer;
+                        }
+                    }
+                    if (!inputHasNext(locals)) {
+                        state.atEnd(locals, this);
+                        if (isBackward() && state.hasBackwardPrefixState() && locals.getIndex() > 0) {
+                            assert locals.getIndex() == locals.getFromIndex();
+                            /*
+                             * We have reached the starting index of the forward matcher, so we have
+                             * to switch to backward-prefix-states. These states will match
+                             * look-behind assertions only.
+                             */
+                            locals.setCurMinIndex(0);
+                            ip = transitionMatch(state, ((BackwardDFAStateNode) state).getBackwardPrefixStateIndex());
+                            continue outer;
+                        }
+                        break;
+                    }
+                    if (state.treeTransitionMatching()) {
+                        int c = inputReadAndDecode(locals);
+                        int treeSuccessor = state.getTreeMatcher().checkMatchTree(c);
+                        // TODO: this switch loop should be replaced with a PE intrinsic
+                        for (int i = 0; i < successors.length; i++) {
+                            if (i == treeSuccessor) {
+                                ip = transitionMatch(state, i);
+                                continue outer;
+                            }
+                        }
+                        break;
+                    }
+                    Matchers matchers = state.getSequentialMatchers();
+                    CompilerAsserts.partialEvaluationConstant(matchers);
+                    if (matchers instanceof SimpleSequentialMatchers) {
+                        final int c = inputReadAndDecode(locals);
+                        CharMatcher[] cMatchers = ((SimpleSequentialMatchers) matchers).getMatchers();
+                        if (cMatchers != null) {
+                            for (int i = 0; i < cMatchers.length; i++) {
+                                if (match(cMatchers, i, c)) {
+                                    ip = transitionMatch(state, i);
+                                    continue outer;
+                                }
+                            }
+                        }
+                    } else if (matchers instanceof UTF8SequentialMatchers) {
+                        /*
+                         * UTF-8 on-the fly decoding
+                         */
+                        final UTF8SequentialMatchers utf8Matchers = (UTF8SequentialMatchers) matchers;
+                        final CharMatcher[] ascii = utf8Matchers.getAscii();
+                        final CharMatcher[] enc2 = utf8Matchers.getEnc2();
+                        final CharMatcher[] enc3 = utf8Matchers.getEnc3();
+                        final CharMatcher[] enc4 = utf8Matchers.getEnc4();
+                        final int maxBytes = utf8Matchers.getMaxBytes();
+                        CompilerAsserts.partialEvaluationConstant(maxBytes);
+                        int c = inputReadRaw(locals);
+                        if (codeRange == TruffleString.CodeRange.ASCII || c < 128) {
+                            inputIncNextIndexRaw(locals);
+                            if (ascii != null) {
+                                for (int i = 0; i < ascii.length; i++) {
+                                    if (match(ascii, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            }
+                        } else {
+                            getBMPProfile().enter();
+                            int codepoint = 0;
+                            if (isBackward()) {
+                                codepoint = c & 0x3f;
+                                assert c >> 6 == 2;
+                                for (int i = 1; i < 4; i++) {
+                                    c = inputReadRaw(locals, locals.getIndex() - i);
+                                    if (i < 3 && c >> 6 == 2) {
+                                        codepoint |= (c & 0x3f) << (6 * i);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            int nBytes = Integer.numberOfLeadingZeros(~(c << 24));
+                            assert 1 < nBytes && nBytes < 5 : nBytes;
+                            inputIncNextIndexRaw(locals, nBytes);
+                            if (maxBytes > 1 && nBytes <= maxBytes) {
+                                if (isBackward()) {
+                                    codepoint |= (c & (0xff >>> nBytes)) << (6 * (nBytes - 1));
+                                }
+                                if (isForward()) {
+                                    int index = locals.getIndex();
+                                    codepoint = (c & (0xff >>> nBytes)) << 6 | (inputReadRaw(locals, ++index) & 0x3f);
+                                    if (maxBytes > 2 && nBytes > 2) {
+                                        codepoint = codepoint << 6 | (inputReadRaw(locals, ++index) & 0x3f);
+                                    }
+                                    if (maxBytes > 3 && nBytes > 3) {
+                                        getAstralProfile().enter();
+                                        codepoint = codepoint << 6 | (inputReadRaw(locals, ++index) & 0x3f);
+                                    }
+                                }
+                                switch (nBytes - 2) {
+                                    case 0:
+                                        if (enc2 != null) {
+                                            for (int i = 0; i < enc2.length; i++) {
+                                                if (match(enc2, i, codepoint)) {
+                                                    ip = transitionMatch(state, i);
+                                                    continue outer;
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    case 1:
+                                        if (enc3 != null) {
+                                            for (int i = 0; i < enc3.length; i++) {
+                                                if (match(enc3, i, codepoint)) {
+                                                    ip = transitionMatch(state, i);
+                                                    continue outer;
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    case 2:
+                                        if (enc4 != null) {
+                                            getAstralProfile().enter();
+                                            for (int i = 0; i < enc4.length; i++) {
+                                                if (match(enc4, i, codepoint)) {
+                                                    ip = transitionMatch(state, i);
+                                                    continue outer;
+                                                }
+                                            }
+                                        }
+                                        break;
+                                }
+                            }
+                        }
+                    } else if (matchers instanceof UTF16RawSequentialMatchers) {
+                        /*
+                         * UTF-16 interpreted as raw 16-bit values, no decoding
+                         */
+                        final int c = inputReadAndDecode(locals);
+                        CharMatcher[] ascii = ((UTF16RawSequentialMatchers) matchers).getAscii();
+                        CharMatcher[] latin1 = ((UTF16RawSequentialMatchers) matchers).getLatin1();
+                        CharMatcher[] bmp = ((UTF16RawSequentialMatchers) matchers).getBmp();
+                        if (latin1 != null && (bmp == null || codeRange.isSubsetOf(TruffleString.CodeRange.LATIN_1) || c < 256)) {
+                            CharMatcher[] byteMatchers = asciiOrLatin1Matchers(codeRange, ascii, latin1);
+                            for (int i = 0; i < byteMatchers.length; i++) {
+                                if (match(byteMatchers, i, c)) {
+                                    ip = transitionMatch(state, i);
+                                    continue outer;
+                                }
+                            }
+                        } else if (bmp != null) {
+                            getBMPProfile().enter();
+                            for (int i = 0; i < bmp.length; i++) {
+                                if (match(bmp, i, c)) {
+                                    ip = transitionMatch(state, i);
+                                    continue outer;
+                                }
+                            }
+                        }
+                    } else {
+                        /*
+                         * UTF-32 or UTF-16 on-the fly decoding
+                         */
+                        assert matchers instanceof UTF16Or32SequentialMatchers;
+                        UTF16Or32SequentialMatchers utf16Or32Matchers = (UTF16Or32SequentialMatchers) matchers;
+                        CharMatcher[] ascii = utf16Or32Matchers.getAscii();
+                        CharMatcher[] latin1 = utf16Or32Matchers.getLatin1();
+                        CharMatcher[] bmp = utf16Or32Matchers.getBmp();
+                        CharMatcher[] astral = utf16Or32Matchers.getAstral();
+
+                        int c = inputReadRaw(locals);
+                        inputIncNextIndexRaw(locals);
+
+                        if (isUTF16()) {
+                            if (codeRange.isSupersetOf(TruffleString.CodeRange.VALID) && state.utf16MustDecode() && inputUTF16IsHighSurrogate(c) &&
+                                            (codeRange == TruffleString.CodeRange.VALID || inputHasNext(locals, locals.getNextIndex()))) {
+                                getAstralProfile().enter();
+                                int c2 = inputReadRaw(locals, locals.getNextIndex());
+                                if (codeRange == TruffleString.CodeRange.VALID || inputUTF16IsLowSurrogate(c2)) {
+                                    assert inputUTF16IsLowSurrogate(c2);
+                                    locals.setNextIndex(inputIncRaw(locals.getNextIndex()));
+                                    if (astral != null) {
+                                        c = inputUTF16ToCodePoint(c, c2);
+                                    }
+                                }
+                                if (astral != null) {
+                                    for (int i = 0; i < astral.length; i++) {
+                                        if (match(astral, i, c)) {
+                                            ip = transitionMatch(state, i);
+                                            continue outer;
+                                        }
+                                    }
+                                }
+                            } else if (latin1 != null && (bmp == null || codeRange.isSubsetOf(TruffleString.CodeRange.LATIN_1) || c < 256)) {
+                                CharMatcher[] byteMatchers = asciiOrLatin1Matchers(codeRange, ascii, latin1);
+                                for (int i = 0; i < byteMatchers.length; i++) {
+                                    if (match(byteMatchers, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            } else if (bmp != null && codeRange.isSupersetOf(TruffleString.CodeRange.BMP)) {
+                                getBMPProfile().enter();
+                                for (int i = 0; i < bmp.length; i++) {
+                                    if (match(bmp, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            }
+                        } else {
+                            assert isUTF32();
+                            if (latin1 != null && (codeRange.isSubsetOf(TruffleString.CodeRange.LATIN_1) || c < 256)) {
+                                CharMatcher[] byteMatchers = asciiOrLatin1Matchers(codeRange, ascii, latin1);
+                                for (int i = 0; i < byteMatchers.length; i++) {
+                                    if (match(byteMatchers, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            } else if (bmp != null && (codeRange == TruffleString.CodeRange.BMP || (c <= 0xffff && (codeRange == TruffleString.CodeRange.VALID || !Character.isSurrogate((char) c))))) {
+                                getBMPProfile().enter();
+                                for (int i = 0; i < bmp.length; i++) {
+                                    if (match(bmp, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            } else if (astral != null && codeRange.isSupersetOf(TruffleString.CodeRange.VALID)) {
+                                getAstralProfile().enter();
+                                for (int i = 0; i < astral.length; i++) {
+                                    if (match(astral, i, c)) {
+                                        ip = transitionMatch(state, i);
+                                        continue outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    /*
+                     * no matching transition found, go to the default transition
+                     */
+                    ip = transitionNoMatch(state);
+                    continue outer;
+                }
+            } else {
+                assert curState instanceof DFAFindInnerLiteralStateNode;
+                assert isForward();
+                DFAFindInnerLiteralStateNode state = (DFAFindInnerLiteralStateNode) curState;
+                while (true) {
+                    if (!inputHasNext(locals)) {
+                        break outer;
+                    }
+                    locals.setIndex(state.executeInnerLiteralSearch(locals, this, tString));
+                    if (locals.getIndex() < 0) {
+                        break outer;
+                    }
+                    if (innerLiteralPrefixMatcher == null || prefixMatcherMatches(innerLiteralPrefixMatcher, locals, codeRange, tString)) {
+                        if (innerLiteralPrefixMatcher == null && isSimpleCG()) {
+                            locals.getCGData().results[0] = locals.getIndex();
+                        }
+                        inputIncRaw(locals, state.getInnerLiteral().getLiteral().encodedLength());
+                        locals.setNextIndex(locals.getIndex());
+                        ip = successors[0];
+                        continue outer;
+                    }
+                    inputIncRaw(locals);
+                }
             }
-            assert locals.getSuccessorIndex() == -1 : "successorIndex: " + locals.getSuccessorIndex() + ", successors: " + Arrays.toString(successors);
-            break;
         }
         if (recordExecution()) {
             debugRecorder.finishRecording();
@@ -229,57 +639,67 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
         return locals.getResultInt();
     }
 
-    private void debugRecordTransition(TRegexDFAExecutorLocals locals, DFAStateNode curState, int prevIndex) {
-        short ip = curState.getId();
-        boolean hasSuccessor = locals.getSuccessorIndex() != -1;
-        if (isForward()) {
-            for (int i = prevIndex; i < locals.getIndex() - (hasSuccessor ? 1 : 0); i++) {
-                if (curState.hasLoopToSelf()) {
-                    debugRecorder.recordTransition(i, ip, curState.getLoopToSelf());
-                }
+    private static boolean prefixMatcherMatches(TRegexDFAExecutorNode prefixMatcher, TRegexDFAExecutorLocals locals, TruffleString.CodeRange codeRange, boolean tString) {
+        Object result = prefixMatcher.execute(locals.toInnerLiteralBackwardLocals(), codeRange, tString);
+        return prefixMatcher.isSimpleCG() ? result != null : (int) result != NO_MATCH;
+    }
+
+    private static CharMatcher[] asciiOrLatin1Matchers(TruffleString.CodeRange codeRange, CharMatcher[] ascii, CharMatcher[] latin1) {
+        return codeRange == TruffleString.CodeRange.ASCII && ascii != null ? ascii : latin1;
+    }
+
+    private short initialStateSuccessor(TRegexDFAExecutorLocals locals, DFAAbstractStateNode curState, short[] successors, int i) {
+        if (isGenericCG()) {
+            locals.setLastIndex();
+            short lastTransition = ((DFAInitialStateNode) curState).getCgLastTransition()[i];
+            if (lastTransition >= 0) {
+                locals.setLastTransition(lastTransition);
             }
-        } else {
-            for (int i = prevIndex; i > locals.getIndex() + (hasSuccessor ? 1 : 0); i--) {
-                if (curState.hasLoopToSelf()) {
-                    debugRecorder.recordTransition(i, ip, curState.getLoopToSelf());
-                }
-            }
         }
-        if (hasSuccessor) {
-            debugRecorder.recordTransition(locals.getIndex() + (isForward() ? -1 : 1), ip, locals.getSuccessorIndex());
-        }
+        return successors[i];
     }
 
-    public void advance(TRegexDFAExecutorLocals locals) {
-        locals.setIndex(props.isForward() ? locals.getIndex() + 1 : locals.getIndex() - 1);
-    }
-
-    public boolean hasNext(TRegexDFAExecutorLocals locals) {
-        return props.isForward() ? Integer.compareUnsigned(locals.getIndex(), locals.getCurMaxIndex()) < 0 : locals.getIndex() > locals.getCurMaxIndex();
-    }
-
-    public boolean atBegin(TRegexDFAExecutorLocals locals) {
-        return locals.getIndex() == (props.isForward() ? 0 : getInputLength(locals) - 1);
-    }
-
-    public boolean atEnd(TRegexDFAExecutorLocals locals) {
-        final int i = locals.getIndex();
-        if (props.isForward()) {
-            return i == getInputLength(locals);
-        } else {
-            return i < 0;
+    private void initNextIndex(TRegexDFAExecutorLocals locals) {
+        locals.setNextIndex(locals.getIndex());
+        if (recordExecution()) {
+            getDebugRecorder().setInitialIndex(locals.getIndex());
         }
     }
 
-    public int rewindUpTo(TRegexDFAExecutorLocals locals, int length) {
-        if (props.isForward()) {
-            final int offset = Math.min(locals.getIndex(), length);
-            locals.setIndex(locals.getIndex() - offset);
-            return offset;
-        } else {
-            assert length == 0;
-            return 0;
+    private static boolean match(CharMatcher[] matchers, int i, final int c) {
+        return matchers[i] != null && matchers[i].match(c);
+    }
+
+    /**
+     * Returns a new instruction pointer value that denotes transition {@code i} of {@code state}.
+     */
+    private static int transitionMatch(DFAStateNode state, int i) {
+        CompilerAsserts.partialEvaluationConstant(state);
+        return state.getId() | IP_TRANSITION_MARKER | (i << 16);
+    }
+
+    /**
+     * Returns a new instruction pointer value that denotes the
+     * {@link SequentialMatchers#getNoMatchSuccessor() no-match successor} of {@code state}.
+     */
+    private static int transitionNoMatch(DFAStateNode state) {
+        CompilerAsserts.partialEvaluationConstant(state);
+        return state.getId() | IP_TRANSITION_MARKER | (state.getSequentialMatchers().getNoMatchSuccessor() << 16);
+    }
+
+    private int execTransition(TRegexDFAExecutorLocals locals, DFAStateNode state, int i) {
+        CompilerAsserts.partialEvaluationConstant(state);
+        CompilerAsserts.partialEvaluationConstant(i);
+        if (recordExecution()) {
+            debugRecorder.recordTransition(locals.getIndex(), state.getId(), i);
         }
+        state.successorFound(locals, this, i);
+        return state.successors[i];
+    }
+
+    @Override
+    public int getMinIndex(TRegexExecutorLocals locals) {
+        return isForward() ? super.getMinIndex(locals) : ((TRegexDFAExecutorLocals) locals).getCurMinIndex();
     }
 
     private boolean validArgs(TRegexDFAExecutorLocals locals) {
@@ -287,27 +707,18 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
         final int inputLength = getInputLength(locals);
         final int fromIndex = locals.getFromIndex();
         final int maxIndex = locals.getMaxIndex();
-        if (props.isForward()) {
-            return inputLength >= 0 && inputLength < Integer.MAX_VALUE - 20 &&
-                            fromIndex >= 0 && fromIndex <= inputLength &&
-                            initialIndex >= 0 && initialIndex <= inputLength &&
-                            maxIndex >= 0 && maxIndex <= inputLength &&
-                            initialIndex <= maxIndex;
-        } else {
-            return inputLength >= 0 && inputLength < Integer.MAX_VALUE - 20 &&
-                            fromIndex >= 0 && fromIndex <= inputLength &&
-                            initialIndex >= -1 && initialIndex < inputLength &&
-                            maxIndex >= -1 && maxIndex < inputLength &&
-                            initialIndex >= maxIndex;
-        }
+        return inputLength >= 0 && inputLength < Integer.MAX_VALUE - 20 &&
+                        fromIndex >= 0 && fromIndex <= inputLength &&
+                        initialIndex >= 0 && initialIndex <= maxIndex &&
+                        maxIndex >= fromIndex && maxIndex <= inputLength;
     }
 
-    @ExplodeLoop
-    private void initResultOrder(TRegexDFAExecutorLocals locals) {
-        DFACaptureGroupTrackingData cgData = locals.getCGData();
+    private static int[] initResultOrder(int maxNumberOfNFAStates, int numberOfCaptureGroups, TRegexDFAExecutorProperties props) {
+        int[] resultOrder = new int[maxNumberOfNFAStates];
         for (int i = 0; i < maxNumberOfNFAStates; i++) {
-            cgData.currentResultOrder[i] = i * getNumberOfCaptureGroups() * 2;
+            resultOrder[i] = i * (numberOfCaptureGroups * 2 + (props.tracksLastGroup() ? 1 : 0));
         }
+        return resultOrder;
     }
 
     public TRegexDFAExecutorProperties getProperties() {
@@ -316,43 +727,5 @@ public final class TRegexDFAExecutorNode extends TRegexExecutorNode {
 
     public int getMaxNumberOfNFAStates() {
         return maxNumberOfNFAStates;
-    }
-
-    public double getCGReorderRatio() {
-        if (!isGenericCG()) {
-            return 0;
-        }
-        int nPT = 0;
-        int nReorder = 0;
-        for (DFACaptureGroupLazyTransition t : cgTransitions) {
-            nPT += t.getPartialTransitions().length;
-            for (DFACaptureGroupPartialTransition pt : t.getPartialTransitions()) {
-                if (pt.doesReorderResults()) {
-                    nReorder++;
-                }
-            }
-        }
-        if (nPT > 0) {
-            return (double) nReorder / nPT;
-        }
-        return 0;
-    }
-
-    public double getCGArrayCopyRatio() {
-        if (!isGenericCG()) {
-            return 0;
-        }
-        int nPT = 0;
-        int nArrayCopy = 0;
-        for (DFACaptureGroupLazyTransition t : cgTransitions) {
-            nPT += t.getPartialTransitions().length;
-            for (DFACaptureGroupPartialTransition pt : t.getPartialTransitions()) {
-                nArrayCopy += pt.getArrayCopies().length / 2;
-            }
-        }
-        if (nPT > 0) {
-            return (double) nArrayCopy / nPT;
-        }
-        return 0;
     }
 }

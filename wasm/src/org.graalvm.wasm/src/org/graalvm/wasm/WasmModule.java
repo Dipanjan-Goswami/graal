@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,45 +40,69 @@
  */
 package org.graalvm.wasm;
 
-import static com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import static com.oracle.truffle.api.CompilerDirectives.transferToInterpreter;
-
-import com.oracle.truffle.api.interop.InteropLibrary;
-import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.interop.UnknownIdentifierException;
-import com.oracle.truffle.api.interop.UnsupportedMessageException;
-import com.oracle.truffle.api.library.ExportLibrary;
-import com.oracle.truffle.api.library.ExportMessage;
-import org.graalvm.wasm.constants.GlobalModifier;
-import org.graalvm.wasm.collection.IntArrayList;
+import com.oracle.truffle.api.source.Source;
+import org.graalvm.polyglot.io.ByteSequence;
+import org.graalvm.wasm.parser.ir.CodeEntry;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
+import java.util.function.BiConsumer;
 
-@ExportLibrary(InteropLibrary.class)
-// TODO: We should make this class more Truffle-compliant.
-// In particular, one thing that's missing:
-// - access exported tables and read them
-// - access exported memories and modify them
+import static com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+
+/**
+ * Represents a parsed and validated WebAssembly module, which has not yet been instantiated.
+ */
 @SuppressWarnings("static-method")
-public final class WasmModule implements TruffleObject {
+public final class WasmModule extends SymbolTable implements TruffleObject {
     private final String name;
-    private final SymbolTable symbolTable;
-    @CompilationFinal(dimensions = 1) private final byte[] data;
-    private boolean isLinked;
+    private final ArrayList<BiConsumer<WasmContext, WasmInstance>> linkActions;
+    private final ModuleLimits limits;
+    private Source source;
 
-    public WasmModule(String name, byte[] data) {
+    @CompilationFinal(dimensions = 1) private CodeEntry[] codeEntries;
+
+    @CompilationFinal(dimensions = 1) private byte[] data;
+    @CompilationFinal private boolean isParsed;
+
+    private WasmModule(String name, byte[] data, ModuleLimits limits) {
+        super();
         this.name = name;
-        this.symbolTable = new SymbolTable(this);
+        this.limits = limits == null ? ModuleLimits.DEFAULTS : limits;
+        this.linkActions = new ArrayList<>();
         this.data = data;
-        this.isLinked = false;
+        this.isParsed = false;
+    }
+
+    public static WasmModule create(String name, byte[] data, ModuleLimits limits) {
+        return new WasmModule(name, data, limits);
+    }
+
+    public static WasmModule createBuiltin(String name) {
+        return new WasmModule(name, null, null);
+    }
+
+    public ModuleLimits limits() {
+        return limits;
+    }
+
+    @Override
+    protected WasmModule module() {
+        return this;
+    }
+
+    public void setParsed() {
+        isParsed = true;
+    }
+
+    public boolean isParsed() {
+        return isParsed;
     }
 
     public SymbolTable symbolTable() {
-        return symbolTable;
+        return this;
     }
 
     public String name() {
@@ -89,203 +113,51 @@ public final class WasmModule implements TruffleObject {
         return data;
     }
 
-    void setLinked() {
-        isLinked = true;
-    }
-
-    public boolean isLinked() {
-        return isLinked;
-    }
-
-    @ExportMessage
-    boolean hasMembers() {
-        return true;
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    public Object readMember(String member) throws UnknownIdentifierException {
-        final WasmFunction function = symbolTable.exportedFunctions().get(member);
-        if (function != null) {
-            return function;
-        }
-        final Integer globalIndex = symbolTable.exportedGlobals().get(member);
-        if (globalIndex != null) {
-            readGlobal(symbolTable, globalIndex);
-        }
-        if (member.equals(symbolTable.exportedMemory())) {
-            return symbolTable.memory();
-        }
-        throw UnknownIdentifierException.create(member);
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    public void writeMember(String member, Object value) throws UnknownIdentifierException, UnsupportedMessageException {
-        // This method works only for mutable globals.
-        final Integer index = symbolTable.exportedGlobals().get(member);
-        if (index == null) {
-            throw UnknownIdentifierException.create(member);
-        }
-        final int address = symbolTable.globalAddress(index);
-        if (!(value instanceof Number)) {
-            throw UnsupportedMessageException.create();
-        }
-        final boolean mutable = symbolTable.globalMutability(index) == GlobalModifier.MUTABLE;
-        if (isLinked && !mutable) {
-            // Constant variables cannot be modified after linking.
-            throw UnsupportedMessageException.create();
-        }
-        long longValue = ((Number) value).longValue();
-        WasmContext.getCurrent().globals().storeLong(address, longValue);
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    boolean isMemberReadable(String member) {
-        try {
-            return symbolTable.exportedFunctions().containsKey(member) || symbolTable.exportedGlobals().containsKey(member) ||
-                            member.equals(symbolTable.exportedMemory());
-        } catch (NumberFormatException exc) {
-            return false;
-        }
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    boolean isMemberModifiable(String member) {
-        final Integer index = symbolTable.exportedGlobals().get(member);
-        if (index == null) {
-            return false;
-        }
-        final boolean mutable = symbolTable.globalMutability(index) == GlobalModifier.MUTABLE;
-        if (!mutable) {
-            return false;
-        }
-        return true;
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    boolean isMemberInsertable(@SuppressWarnings("unused") String member) {
-        return false;
-    }
-
-    private static Object readGlobal(SymbolTable symbolTable, int globalIndex) {
-        final int address = symbolTable.globalAddress(globalIndex);
-        final GlobalRegistry globals = WasmContext.getCurrent().globals();
-        final byte type = symbolTable.globalValueType(globalIndex);
-        switch (type) {
-            case ValueTypes.I32_TYPE:
-                return globals.loadAsInt(address);
-            case ValueTypes.I64_TYPE:
-                return globals.loadAsLong(address);
-            case ValueTypes.F32_TYPE:
-                return globals.loadAsFloat(address);
-            case ValueTypes.F64_TYPE:
-                return globals.loadAsDouble(address);
-            default:
-                throw new RuntimeException("Unknown type: " + type);
-        }
-    }
-
-    @ExportMessage
-    @TruffleBoundary
-    Object getMembers(@SuppressWarnings("unused") boolean includeInternal) {
-        // TODO: Handle includeInternal.
-        return new ExportedMembers(symbolTable);
-    }
-
-    public Global global(String globalName) {
-        final Integer index = symbolTable.exportedGlobals().get(globalName);
-        if (index != null) {
-            return new Global(symbolTable, index);
-        }
-        for (Map.Entry<Integer, ImportDescriptor> entry : symbolTable.importedGlobals().entrySet()) {
-            if (entry.getValue().memberName.equals(globalName)) {
-                return new Global(symbolTable, entry.getKey());
-            }
-        }
-        return null;
+    public void setData(byte[] data) {
+        this.data = data;
     }
 
     public boolean isBuiltin() {
         return data == null;
     }
 
-    @ExportLibrary(InteropLibrary.class)
-    static final class ExportedMembers implements TruffleObject {
-        private final SymbolTable symbolTable;
-        private final List<WasmFunction> exportedFunctions;
-        private final IntArrayList exportedGlobals;
-
-        ExportedMembers(SymbolTable symbolTable) {
-            this.symbolTable = symbolTable;
-            this.exportedFunctions = new ArrayList<>(symbolTable.exportedFunctions().values());
-            this.exportedGlobals = new IntArrayList();
-            for (int globalIndex : symbolTable.exportedGlobals().values()) {
-                this.exportedGlobals.add(globalIndex);
+    public Source source() {
+        if (source == null) {
+            if (isBuiltin()) {
+                source = Source.newBuilder(WasmLanguage.ID, "", name).internal(true).build();
+            } else {
+                source = Source.newBuilder(WasmLanguage.ID, ByteSequence.create(data), name).build();
             }
         }
-
-        @ExportMessage
-        @TruffleBoundary
-        boolean hasArrayElements() {
-            return true;
-        }
-
-        @ExportMessage
-        @TruffleBoundary
-        boolean isArrayElementReadable(long index) {
-            return index >= 0 && index < getArraySize();
-        }
-
-        @ExportMessage
-        @TruffleBoundary
-        long getArraySize() {
-            return exportedFunctions.size() + exportedGlobals.size() + memoriesSize();
-        }
-
-        private int memoriesSize() {
-            return (symbolTable.exportedMemory() != null ? 1 : 0);
-        }
-
-        @ExportMessage
-        @TruffleBoundary
-        Object readArrayElement(long absoluteIndex) throws InvalidArrayIndexException {
-            long index = absoluteIndex;
-            if (!isArrayElementReadable(index)) {
-                transferToInterpreter();
-                throw InvalidArrayIndexException.create(index);
-            }
-            if (index < exportedFunctions.size()) {
-                return exportedFunctions.get((int) index);
-            }
-            index -= exportedFunctions.size();
-            if (index < exportedGlobals.size()) {
-                final int globalIndex = exportedGlobals.get((int) index);
-                return readGlobal(symbolTable, globalIndex);
-            }
-            return symbolTable.memory();
-        }
+        return source;
     }
 
-    public static final class Global {
-        private SymbolTable symbolTable;
-        private final int index;
+    public List<BiConsumer<WasmContext, WasmInstance>> linkActions() {
+        return Collections.unmodifiableList(linkActions);
+    }
 
-        Global(SymbolTable symbolTable, Integer index) {
-            this.symbolTable = symbolTable;
-            this.index = index;
-        }
-
-        public boolean isMutable() {
-            return symbolTable.globalMutability(index) == GlobalModifier.MUTABLE;
-        }
+    public void addLinkAction(BiConsumer<WasmContext, WasmInstance> action) {
+        linkActions.add(action);
     }
 
     @Override
     public String toString() {
         return "wasm-module(" + name + ")";
+    }
+
+    public void setCodeEntries(CodeEntry[] codeEntries) {
+        this.codeEntries = codeEntries;
+    }
+
+    public CodeEntry[] getCodeEntries() {
+        return codeEntries;
+    }
+
+    public void removeCodeEntries() {
+        codeEntries = null;
+    }
+
+    public boolean hasCodeEntries() {
+        return codeEntries != null;
     }
 }

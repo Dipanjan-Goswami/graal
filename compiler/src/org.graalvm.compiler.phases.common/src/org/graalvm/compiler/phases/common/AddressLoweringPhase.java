@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,20 +24,26 @@
  */
 package org.graalvm.compiler.phases.common;
 
+import java.util.Optional;
+
 import org.graalvm.compiler.graph.Node;
+import org.graalvm.compiler.nodes.GraphState;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.memory.address.AddressNode;
 import org.graalvm.compiler.nodes.memory.address.OffsetAddressNode;
+import org.graalvm.compiler.nodes.spi.CoreProviders;
+import org.graalvm.compiler.nodes.spi.LoopsDataProvider;
 import org.graalvm.compiler.nodes.util.GraphUtil;
-import org.graalvm.compiler.phases.Phase;
+import org.graalvm.compiler.phases.BasePhase;
 
-public class AddressLoweringPhase extends Phase {
+public class AddressLoweringPhase extends BasePhase<CoreProviders> {
 
     public abstract static class AddressLowering {
 
         @SuppressWarnings("unused")
-        public void preProcess(StructuredGraph graph) {
+        public void preProcess(StructuredGraph graph, LoopsDataProvider loopsDataProvider) {
         }
 
         @SuppressWarnings("unused")
@@ -51,12 +57,18 @@ public class AddressLoweringPhase extends Phase {
 
     public AddressLoweringPhase(AddressLowering lowering) {
         this.lowering = lowering;
-        assert lowering != null;
     }
 
     @Override
-    protected void run(StructuredGraph graph) {
-        lowering.preProcess(graph);
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return NotApplicable.combineConstraints(
+                        NotApplicable.canOnlyApplyOnce(this, StageFlag.ADDRESS_LOWERING, graphState),
+                        NotApplicable.mustRunAfter(this, StageFlag.LOW_TIER_LOWERING, graphState));
+    }
+
+    @Override
+    protected void run(StructuredGraph graph, CoreProviders providers) {
+        lowering.preProcess(graph, providers.getLoopsDataProvider());
         for (Node node : graph.getNodes()) {
             AddressNode lowered;
             if (node instanceof OffsetAddressNode) {
@@ -69,5 +81,11 @@ public class AddressLoweringPhase extends Phase {
             node.replaceAtUsages(lowered);
             GraphUtil.killWithUnusedFloatingInputs(node);
         }
+    }
+
+    @Override
+    public void updateGraphState(GraphState graphState) {
+        super.updateGraphState(graphState);
+        graphState.setAfterStage(StageFlag.ADDRESS_LOWERING);
     }
 }

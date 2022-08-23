@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,11 +24,17 @@
  */
 package org.graalvm.compiler.api.directives;
 
+import jdk.vm.ci.meta.DeoptimizationAction;
+import jdk.vm.ci.meta.DeoptimizationReason;
+import jdk.vm.ci.meta.SpeculationLog.SpeculationReason;
+
 // JaCoCo Exclude
 
 /**
  * Directives that influence the compilation of methods by Graal. They don't influence the semantics
  * of the code, but they are useful for unit testing and benchmarking.
+ *
+ * Any methods defined in this class should be intrinsified via invocation plugins.
  */
 public final class GraalDirectives {
 
@@ -39,23 +45,47 @@ public final class GraalDirectives {
     public static final double FASTPATH_PROBABILITY = 1.0 - SLOWPATH_PROBABILITY;
 
     /**
+     * Directive for the compiler to fall back to the bytecode interpreter at this point. All
+     * arguments to this method must be compile-time constant.
+     *
+     * @param action the action to take with respect to the code being deoptimized
+     * @param reason the reason to use for the deoptimization
+     * @param speculation a speculation to be attached to the deoptimization
+     */
+    public static void deoptimize(DeoptimizationAction action, DeoptimizationReason reason, SpeculationReason speculation) {
+    }
+
+    /**
+     * Directive for the compiler to fall back to the bytecode interpreter at this point. All
+     * arguments to this method must be compile-time constant.
+     *
+     * @param action the action to take with respect to the code being deoptimized
+     * @param reason the reason to use for the deoptimization
+     * @param withSpeculation if true, then a speculation will be attached to the deoptimization
+     */
+    public static void deoptimize(DeoptimizationAction action, DeoptimizationReason reason, boolean withSpeculation) {
+    }
+
+    /**
      * Directive for the compiler to fall back to the bytecode interpreter at this point.
+     *
+     * This is equivalent to calling
+     * {@link #deoptimize(DeoptimizationAction, DeoptimizationReason, boolean)} with
+     * {@link DeoptimizationAction#None}, {@link DeoptimizationReason#TransferToInterpreter} and
+     * {@code false} as arguments.
      */
     public static void deoptimize() {
     }
 
     /**
-     * Directive for the compiler to fall back to the bytecode interpreter at this point, invalidate
-     * the compiled code and reprofile the method.
+     * Directive for the compiler to fall back to the bytecode interpreter at this point.
+     *
+     * This is equivalent to calling
+     * {@link #deoptimize(DeoptimizationAction, DeoptimizationReason, boolean)} with
+     * {@link DeoptimizationAction#InvalidateReprofile},
+     * {@link DeoptimizationReason#TransferToInterpreter} and {@code false} as arguments.
      */
     public static void deoptimizeAndInvalidate() {
-    }
-
-    /**
-     * Directive for the compiler to fall back to the bytecode interpreter at this point, invalidate
-     * the compiled code, record a speculation and reprofile the method.
-     */
-    public static void deoptimizeAndInvalidateWithSpeculation() {
     }
 
     /**
@@ -66,9 +96,22 @@ public final class GraalDirectives {
     }
 
     /**
+     * Determines if the method is called within the scope of a Graal intrinsic.
+     */
+    public static boolean inIntrinsic() {
+        return false;
+    }
+
+    /**
      * A call to this method will never be duplicated by control flow optimizations in the compiler.
      */
     public static void controlFlowAnchor() {
+    }
+
+    /**
+     * A call to this method will disable strip mining of the enclosing loop in the compiler.
+     */
+    public static void neverStripMine() {
     }
 
     /**
@@ -84,15 +127,30 @@ public final class GraalDirectives {
      * effect killing all memory locations.
      */
     public static void sideEffect() {
+    }
 
+    /**
+     * Inject information into the compiler to assume that the input is an object created via a
+     * primitive boxing operation.
+     */
+    public static <P> P trustedBox(P o) {
+        return o;
     }
 
     /**
      * A call to this method will force the compiler to assume this instruction has a visible memory
      * effect killing all memory locations.
      */
-    public static int sideEffect(@SuppressWarnings("unused") int a) {
-        return 0;
+    public static int sideEffect(int a) {
+        return a;
+    }
+
+    /**
+     * A call to this method will force the compiler to assume this instruction has a visible memory
+     * effect killing all memory locations.
+     */
+    public static long sideEffect(long a) {
+        return a;
     }
 
     /**
@@ -397,5 +455,131 @@ public final class GraalDirectives {
      * Ensures that the given object will be virtual at the current position.
      */
     public static void ensureVirtualizedHere(@SuppressWarnings("unused") Object object) {
+    }
+
+    /**
+     * Raise a SIGTRAP that can be used as a breakpoint for a native debugger such as gdb.
+     */
+    public static void breakpoint() {
+    }
+
+    /**
+     * Returns a boolean indicating whether or not a given value is seen as constant in optimized
+     * code.
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(Object value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(boolean value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(byte value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(short value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(char value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(int value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(float value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(long value) {
+        return false;
+    }
+
+    /**
+     * @see #isCompilationConstant(Object)
+     */
+    @SuppressWarnings("unused")
+    public static boolean isCompilationConstant(double value) {
+        return false;
+    }
+
+    /**
+     * Prints a string to the log stream.
+     */
+    @SuppressWarnings("unused")
+    public static void log(String value) {
+        System.out.print(value);
+    }
+
+    /**
+     * Prints a formatted string to the log stream.
+     *
+     * @param format a C style printf format value that can contain at most one conversion specifier
+     *            (i.e., a sequence of characters starting with '%').
+     * @param value the value associated with the conversion specifier
+     */
+    @SuppressWarnings("unused")
+    public static void log(String format, long value) {
+        System.out.printf(format, value);
+    }
+
+    /**
+     * Prints a formatted string to the log stream.
+     *
+     * @param format a C style printf format value that can contain at most two conversion
+     *            specifiers (i.e., a sequence of characters starting with '%').
+     * @param v1 the value associated with the first conversion specifier
+     * @param v2 the value associated with the second conversion specifier
+     */
+    @SuppressWarnings("unused")
+    public static void log(String format, long v1, long v2) {
+        System.out.printf(format, v1, v2);
+    }
+
+    /**
+     * Prints a formatted string to the log stream.
+     *
+     * @param format a C style printf format value that can contain at most three conversion
+     *            specifiers (i.e., a sequence of characters starting with '%').
+     * @param v1 the value associated with the first conversion specifier
+     * @param v2 the value associated with the second conversion specifier
+     * @param v3 the value associated with the third conversion specifier
+     */
+    @SuppressWarnings("unused")
+    public static void log(String format, long v1, long v2, long v3) {
+        System.out.printf(format, v1, v2, v3);
     }
 }

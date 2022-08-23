@@ -33,11 +33,21 @@
 
 #define BitsPerByte 8
 
+#ifdef JNI_VERSION_9
+    #define JVM_INTERFACE_VERSION 6
+#else
+    #define JVM_INTERFACE_VERSION 4
+#endif
+
 static int _processor_count = 0;
 static jlong _performance_frequency = 0L;
 
 jlong jlong_from(DWORD high, DWORD low) {
     return ((((uint64_t)high) << 32) | low);
+}
+
+JNIEXPORT int JNICALL JVM_GetInterfaceVersion() {
+    return JVM_INTERFACE_VERSION;
 }
 
 jlong as_long(LARGE_INTEGER x) {
@@ -232,6 +242,15 @@ JNIEXPORT jobject JNICALL JVM_DoPrivileged(JNIEnv *env, jclass cls, jobject acti
     return NULL;
 }
 
+JNIEXPORT jstring JNICALL JVM_GetTemporaryDirectory(JNIEnv *env) {
+    // see os_windows.cpp line 1367
+    static char path_buf[MAX_PATH];
+    if (GetTempPath(MAX_PATH, path_buf) <= 0) {
+        path_buf[0] = '\0';
+    }
+    return (*env)->NewStringUTF(env, path_buf);
+}
+
 jboolean VerifyFixClassname(char *utf_name) {
     fprintf(stderr, "VerifyFixClassname(%s) called:  Unimplemented\n", utf_name);
     abort();
@@ -261,13 +280,31 @@ int jio_vsnprintf(char *str, size_t count, const char *fmt, va_list args) {
 }
 
 #ifdef JNI_VERSION_9
-int jio_snprintf(char *str, size_t count, const char *fmt, ...) {
-  va_list args;
-  int len;
-  va_start(args, fmt);
-  len = jio_vsnprintf(str, count, fmt, args);
-  va_end(args);
-  return len;
+/*
+ * Both `jio_snprintf` and `jio_fprintf` as defined in `src/java.base/share/native/libjava/jio.c`
+ * are no longer part of `STATIC_BUILD`, which is used to build static JDK libraries, so we redefine
+ * them here.
+ */
+JNIEXPORT int jio_snprintf(char *str, size_t count, const char *fmt, ...) {
+    int len;
+
+    va_list args;
+    va_start(args, fmt);
+    len = jio_vsnprintf(str, count, fmt, args);
+    va_end(args);
+
+    return len;
+}
+
+JNIEXPORT int jio_fprintf(FILE *fp, const char *fmt, ...) {
+    int len;
+
+    va_list args;
+    va_start(args, fmt);
+    len = jio_vfprintf(fp, fmt, args);
+    va_end(args);
+
+    return len;
 }
 #endif
 

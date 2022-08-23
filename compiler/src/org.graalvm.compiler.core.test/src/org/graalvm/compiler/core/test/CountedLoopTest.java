@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,8 +29,6 @@ import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_IGNORED;
 
 import org.graalvm.compiler.api.directives.GraalDirectives;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.loop.InductionVariable;
-import org.graalvm.compiler.loop.LoopsData;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.ConstantNode;
 import org.graalvm.compiler.nodes.NodeView;
@@ -41,6 +39,8 @@ import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderContext;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugin;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins.Registration;
+import org.graalvm.compiler.nodes.loop.InductionVariable;
+import org.graalvm.compiler.nodes.loop.LoopsData;
 import org.graalvm.compiler.nodes.spi.LIRLowerable;
 import org.graalvm.compiler.nodes.spi.NodeLIRBuilderTool;
 import org.graalvm.compiler.nodes.util.GraphUtil;
@@ -55,17 +55,17 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
 public class CountedLoopTest extends GraalCompilerTest {
 
     @FunctionalInterface
-    private interface IVProperty {
+    protected interface IVProperty {
         ValueNode get(InductionVariable iv);
     }
 
     @FunctionalInterface
-    private interface StaticIVProperty {
+    protected interface StaticIVProperty {
         long get(InductionVariable iv);
     }
 
     @FunctionalInterface
-    private interface IVPredicate {
+    protected interface IVPredicate {
         boolean test(InductionVariable iv);
     }
 
@@ -73,27 +73,27 @@ public class CountedLoopTest extends GraalCompilerTest {
      * Get a property of an induction variable.
      */
     @SuppressWarnings("unused")
-    private static int get(IVProperty property, StaticIVProperty staticProperty, IVPredicate constantCheck, int iv) {
+    protected static int get(IVProperty property, StaticIVProperty staticProperty, IVPredicate constantCheck, int iv) {
         return iv;
     }
 
     @SuppressWarnings("unused")
-    private static int get(IVProperty property, int iv) {
+    protected static int get(IVProperty property, int iv) {
         return iv;
     }
 
     @SuppressWarnings("unused")
-    private static long get(IVProperty property, StaticIVProperty staticProperty, IVPredicate constantCheck,
+    protected static long get(IVProperty property, StaticIVProperty staticProperty, IVPredicate constantCheck,
                     long iv) {
         return iv;
     }
 
     @SuppressWarnings("unused")
-    private static long get(IVProperty property, long iv) {
+    protected static long get(IVProperty property, long iv) {
         return iv;
     }
 
-    private static class Result {
+    public static class Result {
         public long extremum;
         public long exitValue;
 
@@ -597,7 +597,7 @@ public class CountedLoopTest extends GraalCompilerTest {
     }
 
     private void registerPlugins(Registration r, JavaKind ivKind) {
-        r.register2("get", IVProperty.class, ivKind.toJavaClass(), new InvocationPlugin() {
+        r.register(new InvocationPlugin("get", IVProperty.class, ivKind.toJavaClass()) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg1, ValueNode arg2) {
                 IVProperty property = null;
@@ -612,7 +612,7 @@ public class CountedLoopTest extends GraalCompilerTest {
                 }
             }
         });
-        r.register4("get", IVProperty.class, StaticIVProperty.class, IVPredicate.class, ivKind.toJavaClass(), new InvocationPlugin() {
+        r.register(new InvocationPlugin("get", IVProperty.class, StaticIVProperty.class, IVPredicate.class, ivKind.toJavaClass()) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode arg1, ValueNode arg2, ValueNode arg3, ValueNode arg4) {
                 IVProperty property = null;
@@ -639,8 +639,8 @@ public class CountedLoopTest extends GraalCompilerTest {
 
     @Override
     protected void checkHighTierGraph(StructuredGraph graph) {
-        LoopsData loops = new LoopsData(graph);
-        loops.detectedCountedLoops();
+        LoopsData loops = getDefaultMidTierContext().getLoopsDataProvider().getLoopsData(graph);
+        loops.detectCountedLoops();
         for (IVPropertyNode node : graph.getNodes().filter(IVPropertyNode.class)) {
             node.rewrite(loops);
         }

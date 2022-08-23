@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -78,12 +78,14 @@ import org.graalvm.polyglot.Value;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.TruffleContext;
 import com.oracle.truffle.api.TruffleLanguage.Env;
 import com.oracle.truffle.api.test.polyglot.MultiThreadedLanguage.LanguageContext;
 import com.oracle.truffle.api.test.polyglot.MultiThreadedLanguage.ThreadRequest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class MultiThreadedLanguageTest {
 
@@ -96,6 +98,11 @@ public class MultiThreadedLanguageTest {
         } finally {
             MultiThreadedLanguage.runinside.set(null);
         }
+    }
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
     }
 
     @Test
@@ -203,29 +210,47 @@ public class MultiThreadedLanguageTest {
         assertMultiThreadedError(value, Value::isNull);
         assertMultiThreadedError(value, Value::isNumber);
         assertMultiThreadedError(value, Value::isString);
+        assertMultiThreadedError(value, Value::isMetaObject);
+        assertMultiThreadedError(value, Value::isTime);
+        assertMultiThreadedError(value, Value::isTimeZone);
+        assertMultiThreadedError(value, Value::isDate);
+        assertMultiThreadedError(value, Value::isInstant);
+        assertMultiThreadedError(value, Value::isException);
         assertMultiThreadedError(value, Value::fitsInByte);
-        assertMultiThreadedError(value, Value::fitsInDouble);
-        assertMultiThreadedError(value, Value::fitsInFloat);
+        assertMultiThreadedError(value, Value::fitsInShort);
         assertMultiThreadedError(value, Value::fitsInInt);
         assertMultiThreadedError(value, Value::fitsInLong);
+        assertMultiThreadedError(value, Value::fitsInFloat);
+        assertMultiThreadedError(value, Value::fitsInDouble);
+        // assertMultiThreadedError(value, Value::asHostObject);
         assertMultiThreadedError(value, Value::asBoolean);
         assertMultiThreadedError(value, Value::asByte);
-        assertMultiThreadedError(value, Value::asDouble);
-        assertMultiThreadedError(value, Value::asFloat);
-        // assertMultiThreadedError(value, Value::asHostObject);
+        assertMultiThreadedError(value, Value::asShort);
         assertMultiThreadedError(value, Value::asInt);
         assertMultiThreadedError(value, Value::asLong);
+        assertMultiThreadedError(value, Value::asFloat);
+        assertMultiThreadedError(value, Value::asDouble);
         assertMultiThreadedError(value, Value::asNativePointer);
         assertMultiThreadedError(value, Value::asString);
         assertMultiThreadedError(value, Value::getArraySize);
         assertMultiThreadedError(value, Value::getMemberKeys);
         assertMultiThreadedError(value, Value::getMetaObject);
+        assertMultiThreadedError(value, Value::asInstant);
+        assertMultiThreadedError(value, Value::asDate);
+        assertMultiThreadedError(value, Value::asTimeZone);
+        assertMultiThreadedError(value, Value::asTime);
+        assertMultiThreadedError(value, Value::getMetaQualifiedName);
+        assertMultiThreadedError(value, Value::getMetaSimpleName);
+        assertMultiThreadedError(value, Value::throwException);
+        assertMultiThreadedError(value, (v) -> v.isMetaInstance(""));
         assertMultiThreadedError(value, (v) -> v.getMember(""));
         assertMultiThreadedError(value, (v) -> v.putMember("", null));
+        assertMultiThreadedError(value, (v) -> v.removeMember(""));
         assertMultiThreadedError(value, (v) -> v.hasMember(""));
         assertMultiThreadedError(value, (v) -> v.canExecute());
         assertMultiThreadedError(value, (v) -> v.getArraySize());
         assertMultiThreadedError(value, (v) -> v.getArrayElement(0));
+        assertMultiThreadedError(value, (v) -> v.removeArrayElement(0));
         assertMultiThreadedError(value, (v) -> v.setArrayElement(0, null));
 
         assertEquals(2, initializeCount.get());
@@ -377,11 +402,11 @@ public class MultiThreadedLanguageTest {
                 List<Future<LanguageContext>> innerContextFutures = new ArrayList<>();
                 for (int i = 0; i < 100; i++) {
                     innerContextFutures.add(service.submit(() -> {
-                        Object prev = innerContext.enter();
+                        Object prev = innerContext.enter(null);
                         try {
                             return MultiThreadedLanguage.getContext();
                         } finally {
-                            innerContext.leave(prev);
+                            innerContext.leave(null, prev);
                         }
                     }));
                 }
@@ -396,9 +421,9 @@ public class MultiThreadedLanguageTest {
                         assertSame(MultiThreadedLanguage.getContext(), future.get());
                     }
                     LanguageContext innerLanguageContext;
-                    Object prev = innerContext.enter();
+                    Object prev = innerContext.enter(null);
                     innerLanguageContext = MultiThreadedLanguage.getContext();
-                    innerContext.leave(prev);
+                    innerContext.leave(null, prev);
                     for (Future<LanguageContext> future : innerContextFutures) {
                         assertSame(innerLanguageContext, future.get());
                     }
@@ -637,6 +662,22 @@ public class MultiThreadedLanguageTest {
             throw seenError.get();
         }
         Assert.assertTrue(seenInterrupt.get());
+    }
+
+    @Test
+    public void testMultiThreadedAccessExceptionThrownToCreator() throws Throwable {
+        try (Context context = Context.newBuilder(MultiThreadedLanguage.ID).allowCreateThread(true).build()) {
+            MultiThreadedLanguage.isThreadAccessAllowed = (req) -> {
+                return req.singleThreaded;
+            };
+            eval(context, (env) -> {
+                AbstractPolyglotTest.assertFails(() -> env.createThread(() -> {
+                }), IllegalStateException.class, (ise) -> {
+                    assertTrue(ise.getMessage().contains("Multi threaded access requested by thread"));
+                });
+                return null;
+            });
+        }
     }
 
     /*

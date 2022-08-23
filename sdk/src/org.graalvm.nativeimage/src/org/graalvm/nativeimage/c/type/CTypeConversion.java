@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -168,6 +168,18 @@ public final class CTypeConversion {
     }
 
     /**
+     * Decodes a UTF-8 encoded, 0 terminated C {@code char*} to a Java string.
+     *
+     * @param utf8String the pointer to a UTF-8 encoded, 0 terminated C string
+     * @return a Java string
+     *
+     * @since 22.3
+     */
+    public static String utf8ToJavaString(CCharPointer utf8String) {
+        return ImageSingletons.lookup(CTypeConversionSupport.class).utf8ToJavaString(utf8String);
+    }
+
+    /**
      * Converts a Java boolean into a C int containing boolean values.
      *
      * @param value the Java boolean value
@@ -274,5 +286,14 @@ public final class CTypeConversion {
      */
     public static ByteBuffer asByteBuffer(PointerBase address, int size) {
         return ImageSingletons.lookup(CTypeConversionSupport.class).asByteBuffer(address, size);
+    }
+
+    /**
+     * Provides access to a C pointer for the provided Java byte array.
+     *
+     * @since 22.2
+     */
+    public static CCharPointerHolder toCBytes(byte[] bytes) {
+        return ImageSingletons.lookup(CTypeConversionSupport.class).toCBytes(bytes);
     }
 }

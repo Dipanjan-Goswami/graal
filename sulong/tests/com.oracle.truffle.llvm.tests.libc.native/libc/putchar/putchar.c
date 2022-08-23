@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,12 +29,17 @@
  */
 #include <stdio.h>
 
+#ifdef _WIN32
+inline int putchar_unlocked(int c) {
+    return _putchar_nolock(c);
+}
+#endif
+
 int main() {
-  char ch;
-  for (char ch = 'A'; ch <= 'Z'; ch++) {
-    putchar(ch);
-    putchar_unlocked(ch);
-  }
-  putchar('\n');
-  return 0;
+    for (char ch = 'A'; ch <= 'Z'; ch++) {
+        putchar(ch);
+        putchar_unlocked(ch);
+    }
+    putchar('\n');
+    return 0;
 }

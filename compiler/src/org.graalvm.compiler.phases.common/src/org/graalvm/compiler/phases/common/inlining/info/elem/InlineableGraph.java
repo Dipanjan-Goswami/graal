@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@ import static org.graalvm.compiler.phases.common.DeadCodeEliminationPhase.Option
 import java.util.ArrayList;
 import java.util.List;
 
+import org.graalvm.compiler.core.common.GraalOptions;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.graph.Node;
@@ -38,10 +39,10 @@ import org.graalvm.compiler.nodes.Invoke;
 import org.graalvm.compiler.nodes.NodeView;
 import org.graalvm.compiler.nodes.ParameterNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.StructuredGraph.AllowAssumptions;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.phases.common.CanonicalizerPhase;
 import org.graalvm.compiler.phases.common.DeadCodeEliminationPhase;
+import org.graalvm.compiler.phases.common.DominatorBasedGlobalValueNumberingPhase;
 import org.graalvm.compiler.phases.common.inlining.InliningUtil;
 import org.graalvm.compiler.phases.graph.FixedNodeRelativeFrequencyCache;
 import org.graalvm.compiler.phases.tiers.HighTierContext;
@@ -69,7 +70,8 @@ public class InlineableGraph implements Inlineable {
     private FixedNodeRelativeFrequencyCache probabilites = new FixedNodeRelativeFrequencyCache();
 
     public InlineableGraph(final ResolvedJavaMethod method, final Invoke invoke, final HighTierContext context, CanonicalizerPhase canonicalizer, boolean trackNodeSourcePosition) {
-        StructuredGraph original = context.getReplacements().getSubstitution(method, invoke.bci(), trackNodeSourcePosition, null, invoke.asNode().getOptions());
+        StructuredGraph original = context.getReplacements().getInlineSubstitution(method, invoke.bci(), invoke.getInlineControl(), trackNodeSourcePosition, null,
+                        invoke.asNode().graph().allowAssumptions(), invoke.asNode().getOptions());
         if (original == null) {
             original = parseBytecodes(method, context, canonicalizer, invoke.asNode().graph(), trackNodeSourcePosition);
         } else if (original.isFrozen()) {
@@ -191,8 +193,8 @@ public class InlineableGraph implements Inlineable {
     @SuppressWarnings("try")
     private static StructuredGraph parseBytecodes(ResolvedJavaMethod method, HighTierContext context, CanonicalizerPhase canonicalizer, StructuredGraph caller, boolean trackNodeSourcePosition) {
         DebugContext debug = caller.getDebug();
-        StructuredGraph newGraph = new StructuredGraph.Builder(caller.getOptions(), debug, AllowAssumptions.ifNonNull(caller.getAssumptions())).method(method).trackNodeSourcePosition(
-                        trackNodeSourcePosition).useProfilingInfo(caller.useProfilingInfo()).build();
+        StructuredGraph newGraph = new StructuredGraph.Builder(caller.getOptions(), debug, caller.allowAssumptions()).method(method).trackNodeSourcePosition(trackNodeSourcePosition).profileProvider(
+                        caller.getProfileProvider()).speculationLog(caller.getSpeculationLog()).build();
         try (DebugContext.Scope s = debug.scope("InlineGraph", newGraph)) {
             if (!caller.isUnsafeAccessTrackingEnabled()) {
                 newGraph.disableUnsafeAccessTracking();
@@ -206,6 +208,9 @@ public class InlineableGraph implements Inlineable {
 
             canonicalizer.apply(newGraph, context);
 
+            if (GraalOptions.EarlyGVN.getValue(newGraph.getOptions())) {
+                new DominatorBasedGlobalValueNumberingPhase().apply(newGraph, context);
+            }
             return newGraph;
         } catch (Throwable e) {
             throw debug.handle(e);
@@ -224,7 +229,7 @@ public class InlineableGraph implements Inlineable {
 
     @Override
     public double getProbability(Invoke invoke) {
-        return probabilites.applyAsDouble(invoke.asNode());
+        return probabilites.applyAsDouble(invoke.asFixedNode());
     }
 
     public StructuredGraph getGraph() {

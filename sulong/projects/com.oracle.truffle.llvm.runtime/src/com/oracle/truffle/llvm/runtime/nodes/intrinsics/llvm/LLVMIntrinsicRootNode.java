@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,11 +29,10 @@
  */
 package com.oracle.truffle.llvm.runtime.nodes.intrinsics.llvm;
 
-import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.dsl.NodeChild;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.llvm.runtime.LLVMLanguage;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 
 /**
@@ -43,8 +42,8 @@ public abstract class LLVMIntrinsicRootNode extends RootNode {
 
     private final String name;
 
-    LLVMIntrinsicRootNode(TruffleLanguage<?> language, String name) {
-        super(language, new FrameDescriptor());
+    LLVMIntrinsicRootNode(LLVMLanguage language, String name) {
+        super(language);
         this.name = name;
     }
 
@@ -63,7 +62,7 @@ public abstract class LLVMIntrinsicRootNode extends RootNode {
     @NodeChild(type = LLVMExpressionNode.class, value = "node")
     public abstract static class LLVMIntrinsicExpressionNode extends LLVMIntrinsicRootNode {
 
-        public LLVMIntrinsicExpressionNode(TruffleLanguage<?> language, String name) {
+        public LLVMIntrinsicExpressionNode(LLVMLanguage language, String name) {
             super(language, name);
         }
 

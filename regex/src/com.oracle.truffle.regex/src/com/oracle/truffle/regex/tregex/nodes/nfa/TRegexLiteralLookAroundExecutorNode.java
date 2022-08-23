@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,34 +41,69 @@
 
 package com.oracle.truffle.regex.tregex.nodes.nfa;
 
-import com.oracle.truffle.api.CompilerDirectives;
+import static com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
-import com.oracle.truffle.regex.charset.CP16BitMatchers;
+import com.oracle.truffle.api.strings.TruffleString;
+import com.oracle.truffle.regex.charset.CharMatchers;
 import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
 import com.oracle.truffle.regex.tregex.matchers.CharMatcher;
+import com.oracle.truffle.regex.tregex.nfa.PureNFAMap;
 import com.oracle.truffle.regex.tregex.nodes.TRegexExecutorLocals;
 import com.oracle.truffle.regex.tregex.nodes.TRegexExecutorNode;
 import com.oracle.truffle.regex.tregex.parser.ast.LookAroundAssertion;
+import com.oracle.truffle.regex.tregex.parser.ast.RegexAST;
 
 /**
  * Specialized {@link TRegexExecutorNode} for matching {@link LookAroundAssertion#isLiteral()
  * literal} {@link LookAroundAssertion}s.
  */
-public class TRegexLiteralLookAroundExecutorNode extends TRegexExecutorNode {
+public final class TRegexLiteralLookAroundExecutorNode extends TRegexExecutorNode {
 
     private final boolean forward;
     private final boolean negated;
-    @Children private CharMatcher[] matchers;
+    @CompilationFinal(dimensions = 1) private CharMatcher[] matchers;
 
-    public TRegexLiteralLookAroundExecutorNode(LookAroundAssertion lookAround, CompilationBuffer compilationBuffer) {
+    private TRegexLiteralLookAroundExecutorNode(RegexAST ast, int numberOfTransitions, boolean forward, boolean negated, CharMatcher[] matchers) {
+        super(ast, numberOfTransitions);
+        this.forward = forward;
+        this.negated = negated;
+        this.matchers = matchers;
+    }
+
+    private TRegexLiteralLookAroundExecutorNode(TRegexLiteralLookAroundExecutorNode copy) {
+        super(copy);
+        this.forward = copy.forward;
+        this.negated = copy.negated;
+        this.matchers = copy.matchers;
+    }
+
+    public static TRegexLiteralLookAroundExecutorNode create(PureNFAMap nfaMap, LookAroundAssertion lookAround, CompilationBuffer compilationBuffer) {
         assert lookAround.isLiteral();
-        forward = lookAround.isLookAheadAssertion();
-        negated = lookAround.isNegated();
-        matchers = new CharMatcher[lookAround.getLiteralLength()];
+        boolean forward = lookAround.isLookAheadAssertion();
+        boolean negated = lookAround.isNegated();
+        CharMatcher[] matchers = new CharMatcher[lookAround.getLiteralLength()];
         for (int i = 0; i < matchers.length; i++) {
-            CharMatcher matcher = CP16BitMatchers.createMatcher(lookAround.getGroup().getFirstAlternative().get(i).asCharacterClass().getCharSet(), compilationBuffer);
-            matchers[forward ? i : matchers.length - (i + 1)] = insert(matcher);
+            CharMatcher matcher = CharMatchers.createMatcher(lookAround.getGroup().getFirstAlternative().get(i).asCharacterClass().getCharSet(), compilationBuffer);
+            matchers[forward ? i : matchers.length - (i + 1)] = matcher;
         }
+        return new TRegexLiteralLookAroundExecutorNode(nfaMap.getAst(), matchers.length, forward, negated, matchers);
+    }
+
+    @Override
+    public TRegexLiteralLookAroundExecutorNode shallowCopy() {
+        return new TRegexLiteralLookAroundExecutorNode(this);
+    }
+
+    @Override
+    public String getName() {
+        return "la";
+    }
+
+    @Override
+    public boolean isForward() {
+        return forward;
     }
 
     @Override
@@ -76,31 +111,22 @@ public class TRegexLiteralLookAroundExecutorNode extends TRegexExecutorNode {
         return false;
     }
 
+    @TruffleBoundary
     @Override
     public TRegexExecutorLocals createLocals(Object input, int fromIndex, int index, int maxIndex) {
-        CompilerDirectives.transferToInterpreter();
         throw new UnsupportedOperationException();
     }
 
     @ExplodeLoop
     @Override
-    public Object execute(TRegexExecutorLocals abstractLocals, boolean compactString) {
+    public Object execute(TRegexExecutorLocals abstractLocals, TruffleString.CodeRange codeRange, boolean tString) {
         TRegexBacktrackingNFAExecutorLocals locals = (TRegexBacktrackingNFAExecutorLocals) abstractLocals;
-        int index = locals.getIndex();
         for (int i = 0; i < matchers.length; i++) {
-            int iChar = forward ? index + i : index - i;
-            if (!inputBoundsCheck(iChar, 0, locals.getMaxIndex()) || !matchers[i].execute(inputGetChar(locals, iChar), compactString)) {
+            if (!inputHasNext(locals) || !matchers[i].match(inputReadAndDecode(locals))) {
                 return negated;
             }
+            inputAdvance(locals);
         }
         return !negated;
-    }
-
-    private char inputGetChar(TRegexBacktrackingNFAExecutorLocals locals, int index) {
-        return forward ? getCharAt(locals, index) : getCharAt(locals, index - 1);
-    }
-
-    private boolean inputBoundsCheck(int i, int min, int max) {
-        return forward ? i < max : i > min;
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,8 +37,6 @@ import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.BSF;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.BSR;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.LZCNT;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOV;
-import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOVSD;
-import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOVSS;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOVSX;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOVSXB;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp.MOVSXD;
@@ -53,6 +51,8 @@ import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64Shift.ROR;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64Shift.SAR;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64Shift.SHL;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64Shift.SHR;
+import static org.graalvm.compiler.asm.amd64.AMD64Assembler.SSEOp.MOVSD;
+import static org.graalvm.compiler.asm.amd64.AMD64Assembler.SSEOp.MOVSS;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VADDSD;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VADDSS;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VDIVSD;
@@ -67,6 +67,9 @@ import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VSUBSD;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VSUBSS;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VXORPD;
 import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp.VXORPS;
+import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMROp.VBLENDVPD;
+import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMROp.VBLENDVPS;
+import static org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMROp.VPBLENDVB;
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.BYTE;
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.DWORD;
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.PD;
@@ -75,7 +78,6 @@ import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.QWOR
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.SD;
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.SS;
 import static org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.WORD;
-import static org.graalvm.compiler.core.common.GraalOptions.GeneratePIC;
 import static org.graalvm.compiler.lir.LIRValueUtil.asConstantValue;
 import static org.graalvm.compiler.lir.LIRValueUtil.asJavaConstant;
 import static org.graalvm.compiler.lir.LIRValueUtil.isConstantValue;
@@ -90,16 +92,21 @@ import org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64MROp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMIOp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64RMOp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.AMD64Shift;
+import org.graalvm.compiler.asm.amd64.AMD64Assembler.SSEMROp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.SSEOp;
+import org.graalvm.compiler.asm.amd64.AMD64Assembler.VexFloatCompareOp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.VexGeneralPurposeRMOp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.VexGeneralPurposeRVMOp;
 import org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMOp;
+import org.graalvm.compiler.asm.amd64.AMD64Assembler.VexRVMROp;
 import org.graalvm.compiler.asm.amd64.AMD64BaseAssembler.OperandSize;
 import org.graalvm.compiler.asm.amd64.AVXKind;
 import org.graalvm.compiler.asm.amd64.AVXKind.AVXSize;
 import org.graalvm.compiler.core.common.LIRKind;
 import org.graalvm.compiler.core.common.NumUtil;
 import org.graalvm.compiler.core.common.calc.FloatConvert;
+import org.graalvm.compiler.core.common.memory.MemoryExtendKind;
+import org.graalvm.compiler.core.common.memory.MemoryOrderMode;
 import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.lir.ConstantValue;
 import org.graalvm.compiler.lir.LIRFrameState;
@@ -111,15 +118,18 @@ import org.graalvm.compiler.lir.amd64.AMD64ArithmeticLIRGeneratorTool;
 import org.graalvm.compiler.lir.amd64.AMD64Binary;
 import org.graalvm.compiler.lir.amd64.AMD64BinaryConsumer;
 import org.graalvm.compiler.lir.amd64.AMD64ClearRegisterOp;
+import org.graalvm.compiler.lir.amd64.AMD64MathCopySignOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathCosOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathExpOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathLog10Op;
 import org.graalvm.compiler.lir.amd64.AMD64MathLogOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathPowOp;
+import org.graalvm.compiler.lir.amd64.AMD64MathSignumOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathSinOp;
 import org.graalvm.compiler.lir.amd64.AMD64MathTanOp;
 import org.graalvm.compiler.lir.amd64.AMD64Move;
 import org.graalvm.compiler.lir.amd64.AMD64MulDivOp;
+import org.graalvm.compiler.lir.amd64.AMD64RoundFloatToIntegerOp;
 import org.graalvm.compiler.lir.amd64.AMD64ShiftOp;
 import org.graalvm.compiler.lir.amd64.AMD64SignExtendOp;
 import org.graalvm.compiler.lir.amd64.AMD64Ternary;
@@ -127,13 +137,17 @@ import org.graalvm.compiler.lir.amd64.AMD64Unary;
 import org.graalvm.compiler.lir.amd64.vector.AMD64VectorBinary;
 import org.graalvm.compiler.lir.amd64.vector.AMD64VectorBinary.AVXBinaryConstFloatOp;
 import org.graalvm.compiler.lir.amd64.vector.AMD64VectorBinary.AVXBinaryOp;
+import org.graalvm.compiler.lir.amd64.vector.AMD64VectorBlend;
+import org.graalvm.compiler.lir.amd64.vector.AMD64VectorFloatCompareOp;
 import org.graalvm.compiler.lir.amd64.vector.AMD64VectorUnary;
 import org.graalvm.compiler.lir.gen.ArithmeticLIRGenerator;
+import org.graalvm.compiler.lir.gen.ArithmeticLIRGeneratorTool;
 
 import jdk.vm.ci.amd64.AMD64;
 import jdk.vm.ci.amd64.AMD64.CPUFeature;
 import jdk.vm.ci.amd64.AMD64Kind;
 import jdk.vm.ci.code.CodeUtil;
+import jdk.vm.ci.code.MemoryBarriers;
 import jdk.vm.ci.code.Register;
 import jdk.vm.ci.code.RegisterValue;
 import jdk.vm.ci.code.TargetDescription;
@@ -160,7 +174,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
     private final AllocatableValue nullRegisterValue;
 
     @Override
-    public Variable emitNegate(Value inputVal) {
+    public Variable emitNegate(Value inputVal, boolean setFlags) {
         AllocatableValue input = asAllocatable(inputVal);
         Variable result = getLIRGen().newVariable(LIRKind.combine(input));
         boolean isAvx = supportAVX();
@@ -176,7 +190,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
                 if (isAvx) {
                     getLIRGen().append(new AVXBinaryOp(VXORPS, getRegisterSize(result), result, asAllocatable(input), asAllocatable(getLIRGen().emitJavaConstant(floatMask))));
                 } else {
-                    getLIRGen().append(new AMD64Binary.DataTwoOp(SSEOp.XOR, PS, result, input, floatMask, 16));
+                    getLIRGen().append(new AMD64Binary.DataTwoOp(SSEOp.XOR, PS, result, input, floatMask, PS.getBytes()));
                 }
                 break;
             case DOUBLE:
@@ -184,7 +198,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
                 if (isAvx) {
                     getLIRGen().append(new AVXBinaryOp(VXORPD, getRegisterSize(result), result, asAllocatable(input), asAllocatable(getLIRGen().emitJavaConstant(doubleMask))));
                 } else {
-                    getLIRGen().append(new AMD64Binary.DataTwoOp(SSEOp.XOR, PD, result, input, doubleMask, 16));
+                    getLIRGen().append(new AMD64Binary.DataTwoOp(SSEOp.XOR, PD, result, input, doubleMask, PD.getBytes()));
                 }
                 break;
             default:
@@ -251,7 +265,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         }
     }
 
-    private static AMD64MOp getMOp(AMD64BinaryArithmetic op, int constant) {
+    public static AMD64MOp getMOp(AMD64BinaryArithmetic op, int constant) {
         if (constant == 1) {
             if (op.equals(AMD64BinaryArithmetic.ADD)) {
                 return AMD64MOp.INC;
@@ -272,7 +286,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
 
     private Variable emitBinaryConst(LIRKind resultKind, AMD64RMOp op, OperandSize size, AllocatableValue a, JavaConstant b) {
         Variable result = getLIRGen().newVariable(resultKind);
-        getLIRGen().append(new AMD64Binary.DataTwoOp(op, size, result, a, b));
+        getLIRGen().append(new AMD64Binary.DataTwoOp(op, size, result, a, b, size.getBytes()));
         return result;
     }
 
@@ -577,12 +591,12 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
                 return getLIRGen().emitMove(lop.getRemainder());
             case SINGLE: {
                 Variable result = getLIRGen().newVariable(LIRKind.combine(a, b));
-                getLIRGen().append(new FPDivRemOp(FREM, result, getLIRGen().load(a), getLIRGen().load(b)));
+                getLIRGen().append(new FPDivRemOp(FREM, result, getLIRGen().asAllocatable(a), getLIRGen().asAllocatable(b)));
                 return result;
             }
             case DOUBLE: {
                 Variable result = getLIRGen().newVariable(LIRKind.combine(a, b));
-                getLIRGen().append(new FPDivRemOp(DREM, result, getLIRGen().load(a), getLIRGen().load(b)));
+                getLIRGen().append(new FPDivRemOp(DREM, result, getLIRGen().asAllocatable(a), getLIRGen().asAllocatable(b)));
                 return result;
             }
             default:
@@ -691,22 +705,32 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         }
     }
 
+    @Override
+    public Value emitXorFP(Value a, Value b) {
+        return emitXor(a, b);
+    }
+
     private Variable emitShift(AMD64Shift op, OperandSize size, Value a, Value b) {
+        if (isJavaConstant(b)) {
+            return emitShiftConst(op, size, a, asJavaConstant(b));
+        }
         Variable result = getLIRGen().newVariable(LIRKind.combine(a, b).changeType(a.getPlatformKind()));
         AllocatableValue input = asAllocatable(a);
-        if (isJavaConstant(b)) {
-            JavaConstant c = asJavaConstant(b);
-            if (c.asLong() == 1) {
-                getLIRGen().append(new AMD64Unary.MOp(op.m1Op, size, result, input));
-            } else {
-                /*
-                 * c needs to be masked here, because shifts with immediate expect a byte.
-                 */
-                getLIRGen().append(new AMD64Binary.ConstOp(op.miOp, size, result, input, (byte) c.asLong()));
-            }
+        getLIRGen().emitMove(RCX_I, b);
+        getLIRGen().append(new AMD64ShiftOp(op.mcOp, size, result, input, RCX_I));
+        return result;
+    }
+
+    public Variable emitShiftConst(AMD64Shift op, OperandSize size, Value a, JavaConstant b) {
+        Variable result = getLIRGen().newVariable(LIRKind.combine(a).changeType(a.getPlatformKind()));
+        AllocatableValue input = asAllocatable(a);
+        if (b.asLong() == 1) {
+            getLIRGen().append(new AMD64Unary.MOp(op.m1Op, size, result, input));
         } else {
-            getLIRGen().emitMove(RCX_I, b);
-            getLIRGen().append(new AMD64ShiftOp(op.mcOp, size, result, input, RCX_I));
+            /*
+             * c needs to be masked here, because shifts with immediate expect a byte.
+             */
+            getLIRGen().append(new AMD64Binary.ConstOp(op.miOp, size, result, input, (byte) b.asLong()));
         }
         return result;
     }
@@ -800,25 +824,25 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
             case DWORD:
                 switch (fromKind) {
                     case SINGLE:
-                        return emitConvertOp(to, AMD64MROp.MOVD, DWORD, input);
+                        return emitConvertOp(to, SSEMROp.MOVD, DWORD, input);
                 }
                 break;
             case QWORD:
                 switch (fromKind) {
                     case DOUBLE:
-                        return emitConvertOp(to, AMD64MROp.MOVQ, QWORD, input);
+                        return emitConvertOp(to, SSEMROp.MOVQ, QWORD, input);
                 }
                 break;
             case SINGLE:
                 switch (fromKind) {
                     case DWORD:
-                        return emitConvertOp(to, AMD64RMOp.MOVD, DWORD, input);
+                        return emitConvertOp(to, SSEOp.MOVD, DWORD, input);
                 }
                 break;
             case DOUBLE:
                 switch (fromKind) {
                     case QWORD:
-                        return emitConvertOp(to, AMD64RMOp.MOVQ, QWORD, input);
+                        return emitConvertOp(to, SSEOp.MOVQ, QWORD, input);
                 }
                 break;
         }
@@ -1078,10 +1102,21 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         return result;
     }
 
+    private Value emitMathAbsForInteger(AllocatableValue tmp, Value input, OperandSize size) {
+        Variable sign = getLIRGen().newVariable(LIRKind.combine(input));
+        getLIRGen().append(new AMD64Binary.ConstOp(SAR.miOp, size, sign, asAllocatable(input), size.getBytes() * Byte.SIZE - 1));
+        getLIRGen().emitMove(tmp, input);
+        return emitSub(emitXor(tmp, sign), sign, false);
+    }
+
     @Override
     public Value emitMathAbs(Value input) {
         Variable result = getLIRGen().newVariable(LIRKind.combine(input));
         switch ((AMD64Kind) input.getPlatformKind()) {
+            case DWORD:
+                return emitMathAbsForInteger(result, input, DWORD);
+            case QWORD:
+                return emitMathAbsForInteger(result, input, QWORD);
             case SINGLE:
                 getLIRGen().append(new AMD64Binary.DataTwoOp(SSEOp.AND, PS, result, asAllocatable(input), JavaConstant.forFloat(Float.intBitsToFloat(0x7FFFFFFF)), 16));
                 break;
@@ -1144,12 +1179,31 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         return new AMD64MathPowOp().emitLIRWrapper(getLIRGen(), x, y);
     }
 
+    @Override
+    public Value emitMathSignum(Value input) {
+        Variable result = getLIRGen().newVariable(input.getValueKind());
+        getLIRGen().append(new AMD64MathSignumOp(getLIRGen(), result, asAllocatable(input)));
+        return result;
+    }
+
+    @Override
+    public Value emitMathCopySign(Value magnitude, Value sign) {
+        Variable result = getLIRGen().newVariable(magnitude.getValueKind());
+        getLIRGen().append(new AMD64MathCopySignOp(getLIRGen(), result, asAllocatable(magnitude), asAllocatable(sign)));
+        return result;
+    }
+
     protected AMD64LIRGenerator getAMD64LIRGen() {
         return (AMD64LIRGenerator) getLIRGen();
     }
 
     @Override
-    public Variable emitLoad(LIRKind kind, Value address, LIRFrameState state) {
+    public Variable emitLoad(LIRKind kind, Value address, LIRFrameState state, MemoryOrderMode memoryOrder, MemoryExtendKind extendKind) {
+        assert extendKind.isNotExtended();
+        /*
+         * AMD64's consistency model does not require any fences for loads. Volatile store->load
+         * ordering requirements are enforced at the stores.
+         */
         AMD64AddressValue loadAddress = getAMD64LIRGen().asAddressValue(address);
         Variable result = getLIRGen().newVariable(getLIRGen().toRegisterKind(kind));
         switch ((AMD64Kind) kind.getPlatformKind()) {
@@ -1257,10 +1311,10 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
                 getLIRGen().append(new AMD64BinaryConsumer.MemoryMROp(AMD64MROp.MOV, QWORD, address, value, state));
                 break;
             case SINGLE:
-                getLIRGen().append(new AMD64BinaryConsumer.MemoryMROp(AMD64MROp.MOVSS, SS, address, value, state));
+                getLIRGen().append(new AMD64BinaryConsumer.MemoryMROp(SSEMROp.MOVSS, SS, address, value, state));
                 break;
             case DOUBLE:
-                getLIRGen().append(new AMD64BinaryConsumer.MemoryMROp(AMD64MROp.MOVSD, SD, address, value, state));
+                getLIRGen().append(new AMD64BinaryConsumer.MemoryMROp(SSEMROp.MOVSD, SD, address, value, state));
                 break;
             default:
                 throw GraalError.shouldNotReachHere();
@@ -1268,13 +1322,20 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
     }
 
     @Override
-    public void emitStore(ValueKind<?> lirKind, Value address, Value input, LIRFrameState state) {
+    public void emitStore(ValueKind<?> lirKind, Value address, Value input, LIRFrameState state, MemoryOrderMode memoryOrder) {
         AMD64AddressValue storeAddress = getAMD64LIRGen().asAddressValue(address);
         AMD64Kind kind = (AMD64Kind) lirKind.getPlatformKind();
         if (isConstantValue(input)) {
             emitStoreConst(kind, storeAddress, asConstantValue(input), state);
         } else {
             emitStore(kind, storeAddress, asAllocatable(input), state);
+        }
+        /*
+         * Need a fence after volatile stores to ensure a volatile load cannot execute before this
+         * operation.
+         */
+        if (memoryOrder == MemoryOrderMode.VOLATILE) {
+            getLIRGen().emitMembar(MemoryBarriers.STORE_LOAD);
         }
     }
 
@@ -1288,7 +1349,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
     }
 
     @Override
-    public void emitCompareOp(AMD64Kind cmpKind, Variable left, Value right) {
+    public void emitCompareOp(AMD64Kind cmpKind, AllocatableValue left, Value right) {
         OperandSize size;
         switch (cmpKind) {
             case BYTE:
@@ -1324,7 +1385,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
                 return;
             } else if (c instanceof VMConstant) {
                 VMConstant vc = (VMConstant) c;
-                if (size == DWORD && !GeneratePIC.getValue(getOptions()) && getLIRGen().target().inlineObjects) {
+                if (size == DWORD && getLIRGen().target().inlineObjects) {
                     getLIRGen().append(new AMD64BinaryConsumer.VMConstOp(CMP.getMIOpcode(DWORD, false), left, vc));
                 } else {
                     getLIRGen().append(new AMD64BinaryConsumer.DataOp(CMP.getRMOpcode(size), size, left, vc));
@@ -1348,7 +1409,7 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
     }
 
     @Override
-    public Value emitRound(Value value, RoundingMode mode) {
+    public Value emitRound(Value value, ArithmeticLIRGeneratorTool.RoundingMode mode) {
         Variable result = getLIRGen().newVariable(LIRKind.combine(value));
         assert ((AMD64Kind) value.getPlatformKind()).isXMM();
         if (value.getPlatformKind() == AMD64Kind.SINGLE) {
@@ -1356,6 +1417,15 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         } else {
             getLIRGen().append(new AMD64Binary.RMIOp(AMD64RMIOp.ROUNDSD, OperandSize.PD, result, asAllocatable(value), mode.encoding));
         }
+        return result;
+    }
+
+    @Override
+    public Value emitRoundFloatToInteger(Value value) {
+        PlatformKind valuePlatformKind = value.getPlatformKind();
+        assert valuePlatformKind == AMD64Kind.SINGLE || valuePlatformKind == AMD64Kind.DOUBLE;
+        Variable result = getLIRGen().newVariable(LIRKind.value(value.getPlatformKind() == AMD64Kind.SINGLE ? AMD64Kind.DWORD : AMD64Kind.QWORD));
+        getLIRGen().append(new AMD64RoundFloatToIntegerOp(getLIRGen(), result, asAllocatable(value)));
         return result;
     }
 
@@ -1380,6 +1450,184 @@ public class AMD64ArithmeticLIRGenerator extends ArithmeticLIRGenerator implemen
         } else {
             getLIRGen().append(new AVXBinaryOp(op, getRegisterSize(result), result, asAllocatable(a), asAllocatable(b)));
         }
+        return result;
+    }
+
+    protected Variable emitVectorBlend(Value zeroValue, Value oneValue, Value mask) {
+        AVXSize size = getRegisterSize(zeroValue);
+        assert size == AVXSize.XMM || size == AVXSize.YMM : size;
+        AMD64Kind inputKind = ((AMD64Kind) zeroValue.getPlatformKind()).getScalar();
+        Variable result = getLIRGen().newVariable(zeroValue.getValueKind());
+        // AVX/AVX2 blend
+        VexRVMROp blend;
+        switch (inputKind) {
+            case SINGLE:
+                blend = VBLENDVPS;
+                break;
+            case DOUBLE:
+                blend = VBLENDVPD;
+                break;
+            default:
+                blend = VPBLENDVB;
+                break;
+        }
+
+        getLIRGen().append(new AMD64VectorBlend.VexBlendOp(blend, size, getLIRGen().asAllocatable(result), getLIRGen().asAllocatable(zeroValue), getLIRGen().asAllocatable(oneValue),
+                        getLIRGen().asAllocatable(mask), (AMD64) getAMD64LIRGen().target().arch));
+        return result;
+    }
+
+    @Override
+    public Value emitMathMax(Value x, Value y) {
+        return emitMathMinMax(x, y, AMD64MathMinMaxFloatOp.Max);
+    }
+
+    @Override
+    public Value emitMathMin(Value x, Value y) {
+        return emitMathMinMax(x, y, AMD64MathMinMaxFloatOp.Min);
+    }
+
+    protected enum AMD64MathMinMaxFloatOp {
+        Min(VexRVMOp.VMINSS, VexRVMOp.VMINSD, VexRVMOp.VMINPS, VexRVMOp.VMINPD),
+        Max(VexRVMOp.VMAXSS, VexRVMOp.VMAXSD, VexRVMOp.VMAXPS, VexRVMOp.VMAXPD);
+
+        private final VexRVMOp scalarSingleOp;
+        private final VexRVMOp scalarDoubleOp;
+        private final VexRVMOp vectorSingleOp;
+        private final VexRVMOp vectorDoubleOp;
+
+        AMD64MathMinMaxFloatOp(VexRVMOp scalarSingleOp, VexRVMOp scalarDoubleOp, VexRVMOp vectorSingleOp, VexRVMOp vectorDoubleOp) {
+            this.scalarSingleOp = scalarSingleOp;
+            this.scalarDoubleOp = scalarDoubleOp;
+            this.vectorSingleOp = vectorSingleOp;
+            this.vectorDoubleOp = vectorDoubleOp;
+        }
+
+        public VexRVMOp getAVXOp(AMD64Kind kind) {
+            switch (kind.getScalar()) {
+                case SINGLE:
+                    return kind.getVectorLength() > 1 ? vectorSingleOp : scalarSingleOp;
+                case DOUBLE:
+                    return kind.getVectorLength() > 1 ? vectorDoubleOp : scalarDoubleOp;
+                default:
+                    throw GraalError.shouldNotReachHere();
+            }
+        }
+
+        /**
+         * Returns true if the constant is 0.0 of the sign that is preferred in case of ambiguity
+         * (i.e., if one of the inputs is -0.0 and the other is +0.0).
+         */
+        public boolean isPreferredZeroConst(JavaConstant constant) {
+            JavaKind kind = constant.getJavaKind();
+            assert kind == JavaKind.Double || kind == JavaKind.Float : kind;
+            switch (this) {
+                case Max:
+                    if ((kind == JavaKind.Double && Double.doubleToRawLongBits(constant.asDouble()) == Double.doubleToRawLongBits(0.0)) ||
+                                    (kind == JavaKind.Float && Float.floatToRawIntBits(constant.asFloat()) == Float.floatToRawIntBits(0.0f))) {
+                        return true;
+                    }
+                    break;
+                case Min:
+                    if ((kind == JavaKind.Double && Double.doubleToRawLongBits(constant.asDouble()) == Double.doubleToRawLongBits(-0.0)) ||
+                                    (kind == JavaKind.Float && Float.floatToRawIntBits(constant.asFloat()) == Float.floatToRawIntBits(-0.0f))) {
+                        return true;
+                    }
+                    break;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Emits code for a branchless floating-point Math.min/Math.max operation. Requires AVX.
+     *
+     * Supports (scalarReg, scalarReg) and (scalarReg, scalarConst) operands.
+     *
+     * @see Math#max(double, double)
+     * @see Math#max(float, float)
+     * @see Math#min(double, double)
+     * @see Math#min(float, float)
+     */
+    protected Value emitMathMinMax(Value a, Value b, AMD64MathMinMaxFloatOp minmaxop) {
+        assert supportAVX();
+        AMD64Kind kind = (AMD64Kind) a.getPlatformKind();
+
+        // vmin*/vmax*: if the values being compared are both 0.0 (of either sign), dst = src2.
+        // hence, if one argument is +0.0 and the other is -0.0, to get the correct result, we
+        // have to reorder the source registers such that -0.0 (min) / +0.0 (max) is in src2.
+        // Therefore, if a (min) / b (max) is negative (most significant bit is 1), swap a and b,
+        // so that if one is -0.0 and the other is +0.0, the correct result is in b', i.e.:
+        // min: a' = +0.0, b' = -0.0 (negative values in a are moved to b').
+        // max: a' = -0.0, b' = +0.0 (negative values in b are moved to a').
+        AllocatableValue atmp;
+        AllocatableValue btmp;
+        boolean checkAndMergeNaN = true;
+        if (kind.getVectorLength() == 1 && isJavaConstant(b)) {
+            // Optimized case for scalar constants (only).
+            JavaConstant bConst = asJavaConstant(b);
+            if (kind == AMD64Kind.DOUBLE && Double.isNaN(bConst.asDouble()) ||
+                            kind == AMD64Kind.SINGLE && Float.isNaN(bConst.asFloat())) {
+                // The result is always NaN.
+                return b;
+            }
+
+            // Order registers so that if bConst is -0.0 (min) / +0.0 (max) and a is +/-0.0,
+            // the correct result is always in src2.
+            if (minmaxop.isPreferredZeroConst(bConst)) {
+                atmp = asAllocatable(a);
+                btmp = asAllocatable(b);
+            } else {
+                atmp = asAllocatable(b);
+                btmp = asAllocatable(a);
+                // Because a is in src2, and src1 (b) is known to not be NaN, the result is already
+                // correct (NaN) if a is NaN, so we can skip the NaN check.
+                checkAndMergeNaN = false;
+            }
+        } else {
+            AllocatableValue signMask = asAllocatable(minmaxop == AMD64MathMinMaxFloatOp.Min ? a : b);
+            atmp = emitVectorBlend(a, b, signMask);
+            btmp = emitVectorBlend(b, a, signMask);
+        }
+
+        // vmaxps/vmaxpd/vminps/vminpd result, a', b'
+        LIRKind resultKind = LIRKind.combine(atmp, btmp);
+        AllocatableValue result = emitBinary(resultKind, minmaxop.getAVXOp(kind), atmp, btmp);
+
+        if (checkAndMergeNaN) {
+            // move NaN elements in a to result (result' = isNaN(a) ? a : result)
+            // maskNaN = vcmpunordps/vcmpunordpd a', a'
+            AllocatableValue maskNaN = emitVectorFloatCompare(atmp, atmp, VexFloatCompareOp.Predicate.UNORD_Q);
+            // vblendvps/vblendvpd result', result, atmp, maskNaN
+            result = emitVectorBlend(result, atmp, maskNaN);
+        }
+        return result;
+    }
+
+    protected AllocatableValue emitVectorFloatCompare(AllocatableValue a, AllocatableValue b, VexFloatCompareOp.Predicate predicate) {
+        AMD64Kind kind = (AMD64Kind) a.getPlatformKind();
+        AVXSize size = AVXKind.getRegisterSize(kind);
+        VexFloatCompareOp vcmpp;
+        switch (kind.getScalar()) {
+            case SINGLE:
+                if (kind.getVectorLength() > 1) {
+                    vcmpp = VexFloatCompareOp.VCMPPS;
+                } else {
+                    vcmpp = VexFloatCompareOp.VCMPSS;
+                }
+                break;
+            case DOUBLE:
+                if (kind.getVectorLength() > 1) {
+                    vcmpp = VexFloatCompareOp.VCMPPD;
+                } else {
+                    vcmpp = VexFloatCompareOp.VCMPSD;
+                }
+                break;
+            default:
+                throw GraalError.shouldNotReachHere();
+        }
+        AllocatableValue result = getLIRGen().newVariable(LIRKind.combine(a, b));
+        getLIRGen().append(new AMD64VectorFloatCompareOp(vcmpp, size, result, a, b, predicate, (AMD64) getLIRGen().target().arch));
         return result;
     }
 

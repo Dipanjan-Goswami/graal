@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -59,7 +59,7 @@ public class UnsafeSubstitutionsTest extends MethodSubstitutionTest {
 
     static long off(Object o, String name) {
         try {
-            return UNSAFE.objectFieldOffset(o.getClass().getDeclaredField(name));
+            return getObjectFieldOffset(o.getClass().getDeclaredField(name));
         } catch (Exception e) {
             Assert.fail(e.toString());
             return 0L;
@@ -136,7 +136,7 @@ public class UnsafeSubstitutionsTest extends MethodSubstitutionTest {
             test("unsafePutLong", unsafeArg, supply(() -> new Foo()), fooOffset("l"), 4711L);
             test("unsafePutFloat", unsafeArg, supply(() -> new Foo()), fooOffset("f"), 58.0F);
             test("unsafePutDouble", unsafeArg, supply(() -> new Foo()), fooOffset("d"), -28736.243465D);
-            test("unsafePutObject", unsafeArg, supply(() -> new Foo()), fooOffset("i"), "value1", "value2", "value3");
+            test("unsafePutObject", unsafeArg, supply(() -> new Foo()), fooOffset("o"), "value1", "value2", "value3");
 
             test("unsafeGetAddress", unsafeArg, address);
             test("unsafePutAddress", unsafeArg, address, 0xDEAD_BEEF_DEAD_BABEL);
@@ -149,7 +149,7 @@ public class UnsafeSubstitutionsTest extends MethodSubstitutionTest {
 
     private static long fooOffset(String name) {
         try {
-            return UNSAFE.objectFieldOffset(Foo.class.getDeclaredField(name));
+            return getObjectFieldOffset(Foo.class.getDeclaredField(name));
         } catch (NoSuchFieldException | SecurityException e) {
             throw new AssertionError(e);
         }

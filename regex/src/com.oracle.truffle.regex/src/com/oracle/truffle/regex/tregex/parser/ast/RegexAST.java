@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,6 +43,7 @@ package com.oracle.truffle.regex.tregex.parser.ast;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.StringJoiner;
 import java.util.stream.Stream;
 
 import org.graalvm.collections.EconomicMap;
@@ -51,6 +52,7 @@ import org.graalvm.collections.Equivalence;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.regex.RegexFlags;
+import com.oracle.truffle.regex.RegexLanguage;
 import com.oracle.truffle.regex.RegexOptions;
 import com.oracle.truffle.regex.RegexSource;
 import com.oracle.truffle.regex.UnsupportedRegexException;
@@ -58,32 +60,32 @@ import com.oracle.truffle.regex.charset.CodePointSet;
 import com.oracle.truffle.regex.tregex.TRegexOptions;
 import com.oracle.truffle.regex.tregex.automaton.StateIndex;
 import com.oracle.truffle.regex.tregex.automaton.StateSet;
-import com.oracle.truffle.regex.tregex.buffer.CharArrayBuffer;
-import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
 import com.oracle.truffle.regex.tregex.parser.Counter;
 import com.oracle.truffle.regex.tregex.parser.RegexProperties;
 import com.oracle.truffle.regex.tregex.parser.Token;
 import com.oracle.truffle.regex.tregex.parser.ast.visitors.ASTDebugDumpVisitor;
 import com.oracle.truffle.regex.tregex.parser.ast.visitors.CopyVisitor;
+import com.oracle.truffle.regex.tregex.string.AbstractStringBuffer;
+import com.oracle.truffle.regex.tregex.string.Encodings.Encoding;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonArray;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonValue;
-import com.oracle.truffle.regex.util.CompilationFinalBitSet;
+import com.oracle.truffle.regex.util.TBitSet;
 
-public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
+public final class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
 
     /**
      * Original pattern as seen by the parser.
      */
+    private final RegexLanguage language;
     private final RegexSource source;
-    private final RegexFlags flags;
-    private final RegexOptions options;
+    private RegexFlags flags;
     private final Counter.ThresholdCounter nodeCount = new Counter.ThresholdCounter(TRegexOptions.TRegexParserTreeMaxSize, "parse tree explosion");
     private final Counter.ThresholdCounter groupCount = new Counter.ThresholdCounter(TRegexOptions.TRegexMaxNumberOfCaptureGroups, "too many capture groups");
     private final Counter quantifierCount = new Counter();
-    private final Counter zeroWidthQuantifierCount = new Counter();
     private final RegexProperties properties = new RegexProperties();
+    private final TBitSet referencedGroups = new TBitSet(Long.SIZE);
     private RegexASTNode[] nodes;
     /**
      * AST as parsed from the expression.
@@ -94,23 +96,25 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
      */
     private Group wrappedRoot;
     private Group[] captureGroups;
-    private final LookAroundIndex lookArounds = new LookAroundIndex();
+    private final List<QuantifiableTerm> zeroWidthQuantifiables = new ArrayList<>();
+    private final SubTreeIndex subtrees = new SubTreeIndex();
     private final List<PositionAssertion> reachableCarets = new ArrayList<>();
     private final List<PositionAssertion> reachableDollars = new ArrayList<>();
-    private StateSet<PositionAssertion> nfaAnchoredInitialStates;
-    private StateSet<RegexASTNode> hardPrefixNodes;
+    private StateSet<RegexAST, PositionAssertion> nfaAnchoredInitialStates;
+    private StateSet<RegexAST, RegexASTNode> hardPrefixNodes;
     private final EconomicMap<GroupBoundaries, GroupBoundaries> groupBoundariesDeduplicationMap = EconomicMap.create();
-
-    private int negativeLookaheads = 0;
-    private int negativeLookbehinds = 0;
 
     private final EconomicMap<RegexASTNode, List<SourceSection>> sourceSections;
 
-    public RegexAST(RegexSource source, RegexFlags flags, RegexOptions options) {
+    public RegexAST(RegexLanguage language, RegexSource source, RegexFlags flags) {
+        this.language = language;
         this.source = source;
         this.flags = flags;
-        this.options = options;
-        sourceSections = options.isDumpAutomata() ? EconomicMap.create(Equivalence.IDENTITY_WITH_SYSTEM_HASHCODE) : null;
+        this.sourceSections = source.getOptions().isDumpAutomataWithSourceSections() ? EconomicMap.create(Equivalence.IDENTITY_WITH_SYSTEM_HASHCODE) : null;
+    }
+
+    public RegexLanguage getLanguage() {
+        return language;
     }
 
     public RegexSource getSource() {
@@ -121,8 +125,16 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return flags;
     }
 
+    public void setFlags(RegexFlags flags) {
+        this.flags = flags;
+    }
+
     public RegexOptions getOptions() {
-        return options;
+        return source.getOptions();
+    }
+
+    public Encoding getEncoding() {
+        return source.getEncoding();
     }
 
     public Group getRoot() {
@@ -164,8 +176,13 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return quantifierCount;
     }
 
-    public Counter getZeroWidthQuantifierCount() {
-        return zeroWidthQuantifierCount;
+    public void registerZeroWidthQuantifiable(QuantifiableTerm zeroWidthQuantifiable) {
+        zeroWidthQuantifiable.getQuantifier().setZeroWidthIndex(zeroWidthQuantifiables.size());
+        zeroWidthQuantifiables.add(zeroWidthQuantifiable);
+    }
+
+    public List<QuantifiableTerm> getZeroWidthQuantifiables() {
+        return zeroWidthQuantifiables;
     }
 
     public Group getGroupByBoundaryIndex(int index) {
@@ -187,7 +204,7 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
     public boolean isLiteralString() {
         Group r = getRoot();
         RegexProperties p = getProperties();
-        return !((p.hasBackReferences() || p.hasAlternations() || p.hasLookAroundAssertions() || r.hasLoops()) || ((r.startsWithCaret() || r.endsWithDollar()) && getFlags().isMultiline())) &&
+        return !((r.hasBackReferences() || p.hasAlternations() || p.hasLookAroundAssertions() || r.hasLoops()) || ((r.startsWithCaret() || r.endsWithDollar()) && getFlags().isMultiline())) &&
                         (!p.hasCharClasses() || p.charClassesCanBeMatchedWithMask());
     }
 
@@ -218,7 +235,7 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
             // The single alternative in the wrappedRoot is composed of N non-optional prefix
             // matchers, 1 group of optional matchers and the original root. By
             // taking size() - 2, we get the number of non-optional prefix matchers.
-            return wrappedRoot.getFirstAlternative().size() - 2;
+            return wrappedRoot.getFirstAlternative().size() - (flags.isSticky() ? 1 : 2);
         }
         return 0;
     }
@@ -234,8 +251,8 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return wrappedRoot;
     }
 
-    public LookAroundIndex getLookArounds() {
-        return lookArounds;
+    public SubTreeIndex getSubtrees() {
+        return subtrees;
     }
 
     public List<PositionAssertion> getReachableCarets() {
@@ -246,11 +263,11 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return reachableDollars;
     }
 
-    public StateSet<PositionAssertion> getNfaAnchoredInitialStates() {
+    public StateSet<RegexAST, PositionAssertion> getNfaAnchoredInitialStates() {
         return nfaAnchoredInitialStates;
     }
 
-    public StateSet<RegexASTNode> getHardPrefixNodes() {
+    public StateSet<RegexAST, RegexASTNode> getHardPrefixNodes() {
         return hardPrefixNodes;
     }
 
@@ -261,10 +278,16 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
     }
 
     public BackReference createBackReference(int groupNumber) {
+        referencedGroups.set(groupNumber);
         return register(new BackReference(groupNumber));
     }
 
+    public boolean isGroupReferenced(int groupNumber) {
+        return referencedGroups.get(groupNumber);
+    }
+
     public CharacterClass createCharacterClass(CodePointSet matcherBuilder) {
+        assert getEncoding().getFullSet().contains(matcherBuilder);
         return register(new CharacterClass(matcherBuilder));
     }
 
@@ -288,6 +311,12 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return register(assertion);
     }
 
+    public AtomicGroup createAtomicGroup() {
+        final AtomicGroup atomicGroup = new AtomicGroup();
+        createNFAHelperNodes(atomicGroup);
+        return register(atomicGroup);
+    }
+
     public void createNFAHelperNodes(RegexASTSubtreeRootNode rootNode) {
         nodeCount.inc(4);
         PositionAssertion anchored = new PositionAssertion(PositionAssertion.Type.CARET);
@@ -308,81 +337,53 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return register(new Sequence());
     }
 
+    public SubexpressionCall createSubexpressionCall(int groupNumber) {
+        return register(new SubexpressionCall(groupNumber));
+    }
+
     public BackReference register(BackReference backReference) {
         nodeCount.inc();
-        properties.setBackReferences();
         return backReference;
     }
 
     public CharacterClass register(CharacterClass characterClass) {
         nodeCount.inc();
-        if (!characterClass.getCharSet().matchesSingleChar()) {
-            if (!characterClass.getCharSet().matches2CharsWith1BitDifference()) {
-                properties.unsetCharClassesCanBeMatchedWithMask();
-            }
-            properties.setCharClasses();
-        }
         return characterClass;
     }
 
     public Group register(Group group) {
         nodeCount.inc();
-        if (group.isCapturing() && group.getGroupNumber() != 0) {
-            properties.setCaptureGroups();
-        }
         return group;
     }
 
     public LookAheadAssertion register(LookAheadAssertion lookAheadAssertion) {
         nodeCount.inc();
-        properties.setLookAheadAssertions();
-        if (lookAheadAssertion.isNegated()) {
-            negativeLookaheads++;
-            properties.setNegativeLookAheadAssertions();
-        }
         return lookAheadAssertion;
     }
 
     public LookBehindAssertion register(LookBehindAssertion lookBehindAssertion) {
         nodeCount.inc();
-        properties.setLookBehindAssertions();
-        if (lookBehindAssertion.isNegated()) {
-            negativeLookbehinds++;
-            properties.setNegativeLookBehindAssertions();
-        }
         return lookBehindAssertion;
     }
 
-    public void invertNegativeLookAround(LookAroundAssertion assertion) {
-        assert assertion.isNegated();
-        assertion.setNegated(false);
-        if (assertion instanceof LookAheadAssertion) {
-            assert negativeLookaheads > 0;
-            if (--negativeLookaheads == 0) {
-                properties.setNegativeLookAheadAssertions(false);
-            }
-        } else {
-            assert negativeLookbehinds > 0;
-            if (--negativeLookbehinds == 0) {
-                properties.setNegativeLookBehindAssertions(false);
-            }
-        }
+    public AtomicGroup register(AtomicGroup atomicGroup) {
+        nodeCount.inc();
+        return atomicGroup;
     }
 
     public PositionAssertion register(PositionAssertion positionAssertion) {
         nodeCount.inc();
-        switch (positionAssertion.type) {
-            case CARET:
-                break;
-            case DOLLAR:
-                break;
-        }
         return positionAssertion;
     }
 
     public Sequence register(Sequence sequence) {
         nodeCount.inc();
         return sequence;
+    }
+
+    public SubexpressionCall register(SubexpressionCall subexpressionCall) {
+        nodeCount.inc();
+        return subexpressionCall;
     }
 
     public boolean isNFAInitialState(RegexASTNode node) {
@@ -446,10 +447,11 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
             return;
         }
         int prefixLength = 0;
-        for (LookAroundAssertion lb : lookArounds) {
-            if (lb instanceof LookAheadAssertion) {
+        for (RegexASTSubtreeRootNode subtreeRootNode : subtrees) {
+            if (!subtreeRootNode.isLookBehindAssertion()) {
                 continue;
             }
+            LookBehindAssertion lb = subtreeRootNode.asLookBehindAssertion();
             int minPath = lb.getMinPath();
             RegexASTSubtreeRootNode laParent = lb.getSubTreeParent();
             while (!(laParent instanceof RegexASTRootNode)) {
@@ -474,23 +476,25 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         for (int i = 0; i < prefixLength; i++) {
             wrapRootSeq.add(createPrefixAnyMatcher());
         }
-        Group prevOpt = null;
-        // create optional matchers ((?:|[_any_](?:|[_any_]))...)
-        for (int i = 0; i < prefixLength; i++) {
-            Group opt = createGroup();
-            opt.setPrefix();
-            opt.add(createSequence());
-            opt.add(createSequence());
-            opt.getFirstAlternative().setPrefix();
-            opt.getAlternatives().get(1).setPrefix();
-            opt.getAlternatives().get(1).add(createPrefixAnyMatcher());
-            if (prevOpt != null) {
-                opt.getAlternatives().get(1).add(prevOpt);
+        if (!flags.isSticky()) {
+            Group prevOpt = null;
+            // create optional matchers ((?:|[_any_](?:|[_any_]))...)
+            for (int i = 0; i < prefixLength; i++) {
+                Group opt = createGroup();
+                opt.setPrefix();
+                opt.add(createSequence());
+                opt.add(createSequence());
+                opt.getFirstAlternative().setPrefix();
+                opt.getAlternatives().get(1).setPrefix();
+                opt.getAlternatives().get(1).add(createPrefixAnyMatcher());
+                if (prevOpt != null) {
+                    opt.getAlternatives().get(1).add(prevOpt);
+                }
+                prevOpt = opt;
             }
-            prevOpt = opt;
+            wrapRootSeq.add(prevOpt);
         }
         root.getSubTreeParent().setGroup(wrapRoot);
-        wrapRootSeq.add(prevOpt);
         wrapRootSeq.add(root);
         wrappedRoot = wrapRoot;
     }
@@ -507,16 +511,18 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         }
     }
 
-    public GroupBoundaries createGroupBoundaries(CompilationFinalBitSet updateIndices, CompilationFinalBitSet clearIndices) {
-        GroupBoundaries staticInstance = GroupBoundaries.getStaticInstance(updateIndices, clearIndices);
-        if (staticInstance != null) {
-            return staticInstance;
+    public GroupBoundaries createGroupBoundaries(TBitSet updateIndices, TBitSet clearIndices, int lastGroup) {
+        if (!getOptions().getFlavor().usesLastGroupResultField()) {
+            GroupBoundaries staticInstance = GroupBoundaries.getStaticInstance(language, updateIndices, clearIndices);
+            if (staticInstance != null) {
+                return staticInstance;
+            }
         }
-        GroupBoundaries lookup = new GroupBoundaries(updateIndices, clearIndices);
+        GroupBoundaries lookup = new GroupBoundaries(updateIndices, clearIndices, lastGroup);
         if (groupBoundariesDeduplicationMap.containsKey(lookup)) {
             return groupBoundariesDeduplicationMap.get(lookup);
         } else {
-            GroupBoundaries gb = new GroupBoundaries(updateIndices.copy(), clearIndices.copy());
+            GroupBoundaries gb = new GroupBoundaries(updateIndices.copy(), clearIndices.copy(), lastGroup);
             groupBoundariesDeduplicationMap.put(gb, gb);
             return gb;
         }
@@ -527,7 +533,7 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
      * set to true.
      */
     private CharacterClass createPrefixAnyMatcher() {
-        final CharacterClass anyMatcher = createCharacterClass(CodePointSet.getFull());
+        final CharacterClass anyMatcher = createCharacterClass(getEncoding().getFullSet());
         anyMatcher.setPrefix();
         return anyMatcher;
     }
@@ -553,9 +559,9 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
      * Groups generated by the parser, e.g. {@code (?:a|)} generated for {@code a?}, don't have
      * source sections.</li>
      * <li>{@link CharacterClass}: normally these nodes correspond to a single
-     * {@link com.oracle.truffle.regex.tregex.parser.Token.CharacterClass Token.CharacterClass}, but
-     * the parser may optimize redundant nodes away and add their source sections to existing nodes.
-     * Example: {@code a|b} will be optimized to {@code [ab]}, which will be mapped to both original
+     * {@link Token#createCharClass(CodePointSet)} Token.CharacterClass}, but the parser may
+     * optimize redundant nodes away and add their source sections to existing nodes. Example:
+     * {@code a|b} will be optimized to {@code [ab]}, which will be mapped to both original
      * characters.</li>
      * <li>{@link Sequence}, {@link MatchFound}, {@link RegexASTSubtreeRootNode}: no mapping.</li>
      * <li>{@link PositionAssertion}, {@link BackReference}: mapped to their respective
@@ -564,22 +570,22 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
      * counterparts.</li>
      * <li>Nodes inserted as substitutions for e.g. {@code \b} will simply point to the source
      * section they are substituting.</li>
-     * <li>Source sections of {@link com.oracle.truffle.regex.tregex.parser.Token.Quantifier
-     * quantifiers} are mapped to their respective {@link Term}.</li>
+     * <li>Source sections of {@link Token#createQuantifier(int, int, boolean)} quantifiers} are
+     * mapped to their respective {@link Term}.</li>
      * </ul>
      */
     public List<SourceSection> getSourceSections(RegexASTNode node) {
-        return options.isDumpAutomata() ? sourceSections.get(node) : null;
+        return getOptions().isDumpAutomataWithSourceSections() ? sourceSections.get(node) : null;
     }
 
     public void addSourceSection(RegexASTNode node, Token token) {
-        if (options.isDumpAutomata() && token != null && token.getSourceSection() != null) {
+        if (getOptions().isDumpAutomataWithSourceSections() && token != null && token.getSourceSection() != null) {
             getOrCreateSourceSections(node).add(token.getSourceSection());
         }
     }
 
     public void addSourceSections(RegexASTNode node, Collection<SourceSection> src) {
-        if (options.isDumpAutomata() && src != null) {
+        if (getOptions().isDumpAutomataWithSourceSections() && src != null) {
             getOrCreateSourceSections(node).addAll(src);
         }
     }
@@ -593,22 +599,69 @@ public class RegexAST implements StateIndex<RegexASTNode>, JsonConvertible {
         return sections;
     }
 
-    public InnerLiteral extractInnerLiteral(CompilationBuffer compilationBuffer) {
+    public InnerLiteral extractInnerLiteral() {
         assert properties.hasInnerLiteral();
         int literalEnd = properties.getInnerLiteralEnd();
         int literalStart = properties.getInnerLiteralStart();
-        CharArrayBuffer literal = compilationBuffer.getCharRangesBuffer1();
-        CharArrayBuffer mask = compilationBuffer.getCharRangesBuffer2();
-        literal.ensureCapacity(literalEnd - literalStart);
-        mask.ensureCapacity(literalEnd - literalStart);
+        AbstractStringBuffer literal = getEncoding().createStringBuffer(literalEnd - literalStart);
+        AbstractStringBuffer mask = getEncoding().createStringBuffer(literalEnd - literalStart);
         boolean hasMask = false;
         for (int i = literalStart; i < literalEnd; i++) {
             CharacterClass cc = root.getFirstAlternative().getTerms().get(i).asCharacterClass();
             assert cc.getCharSet().matchesSingleChar() || cc.getCharSet().matches2CharsWith1BitDifference();
+            assert getEncoding().isFixedCodePointWidth(cc.getCharSet());
             cc.extractSingleChar(literal, mask);
             hasMask |= cc.getCharSet().matches2CharsWith1BitDifference();
         }
-        return new InnerLiteral(new String(literal.toArray()), hasMask ? new String(mask.toArray()) : null, root.getFirstAlternative().get(literalStart).getMaxPath() - 1);
+        return new InnerLiteral(literal.materialize(), hasMask ? mask.materialize() : null, root.getFirstAlternative().get(literalStart).getMaxPath() - 1);
+    }
+
+    public boolean canTransformToDFA() {
+        boolean couldCalculateLastGroup = !getOptions().getFlavor().usesLastGroupResultField() || !getProperties().hasCaptureGroupsInLookAroundAssertions();
+        return getNumberOfNodes() <= TRegexOptions.TRegexMaxParseTreeSizeForDFA &&
+                        getNumberOfCaptureGroups() <= TRegexOptions.TRegexMaxNumberOfCaptureGroupsForDFA &&
+                        !(getRoot().hasBackReferences() ||
+                                        getProperties().hasLargeCountedRepetitions() ||
+                                        getProperties().hasNegativeLookAheadAssertions() ||
+                                        getProperties().hasNonLiteralLookBehindAssertions() ||
+                                        getProperties().hasNegativeLookBehindAssertions() ||
+                                        getRoot().hasQuantifiers() ||
+                                        getProperties().hasAtomicGroups()) &&
+                        couldCalculateLastGroup;
+    }
+
+    @TruffleBoundary
+    public String canTransformToDFAFailureReason() {
+        StringJoiner sb = new StringJoiner(", ");
+        if (getNumberOfNodes() > TRegexOptions.TRegexMaxParseTreeSizeForDFA) {
+            sb.add(String.format("Parser tree has too many nodes: %d (threshold: %d)", getNumberOfNodes(), TRegexOptions.TRegexMaxParseTreeSizeForDFA));
+        }
+        if (getNumberOfCaptureGroups() > TRegexOptions.TRegexMaxNumberOfCaptureGroupsForDFA) {
+            sb.add(String.format("regex has too many capture groups: %d (threshold: %d)", getNumberOfCaptureGroups(), TRegexOptions.TRegexMaxNumberOfCaptureGroupsForDFA));
+        }
+        if (getRoot().hasBackReferences()) {
+            sb.add("regex has back-references");
+        }
+        if (getProperties().hasLargeCountedRepetitions()) {
+            sb.add(String.format("regex has large counted repetitions (threshold: %d for single CC, %d for groups)",
+                            TRegexOptions.TRegexQuantifierUnrollThresholdSingleCC, TRegexOptions.TRegexQuantifierUnrollThresholdGroup));
+        }
+        if (getProperties().hasNegativeLookAheadAssertions()) {
+            sb.add("regex has negative look-ahead assertions");
+        }
+        if (getProperties().hasNegativeLookBehindAssertions()) {
+            sb.add("regex has negative look-behind assertions");
+        }
+        if (getProperties().hasNonLiteralLookBehindAssertions()) {
+            sb.add("regex has non-literal look-behind assertions");
+        }
+        if (getRoot().hasQuantifiers()) {
+            sb.add("could not unroll all quantifiers");
+        }
+        if (getProperties().hasAtomicGroups()) {
+            sb.add("regex has atomic groups");
+        }
+        return sb.toString();
     }
 
     @TruffleBoundary

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,18 +29,19 @@ typedef struct {
   char fFXSR;
   char fHT;
   char fMMX;
-  char fAMD3DNOWPREFETCH;
+  char fAMD_3DNOW_PREFETCH;
   char fSSE;
   char fSSE2;
   char fSSE3;
   char fSSSE3;
   char fSSE4A;
-  char fSSE41;
-  char fSSE42;
+  char fSSE4_1;
+  char fSSE4_2;
   char fPOPCNT;
   char fLZCNT;
   char fTSC;
   char fTSCINV;
+  char fTSCINV_BIT;
   char fAVX;
   char fAVX2;
   char fAES;
@@ -56,4 +57,24 @@ typedef struct {
   char fAVX512ER;
   char fAVX512CD;
   char fAVX512BW;
+  char fAVX512VL;
+  char fSHA;
+  char fFMA;
+  char fVZEROUPPER;
+  char fAVX512_VPOPCNTDQ;
+  char fAVX512_VPCLMULQDQ;
+  char fAVX512_VAES;
+  char fAVX512_VNNI;
+  char fFLUSH;
+  char fFLUSHOPT;
+  char fCLWB;
+  char fAVX512_VBMI2;
+  char fAVX512_VBMI;
+  char fHV;
+  char fSERIALIZE;
+  char fRDTSCP;
+  char fRDPID;
+  char fFSRM;
+  char fGFNI;
+  char fAVX512_BITALG;
 } CPUFeatures;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -45,10 +45,12 @@ public class StampFactory {
 
     private static final Stamp[] stampCache = new Stamp[JavaKind.values().length];
     private static final Stamp[] emptyStampCache = new Stamp[JavaKind.values().length];
-    private static final Stamp objectStamp = new ObjectStamp(null, false, false, false);
-    private static final Stamp objectNonNullStamp = new ObjectStamp(null, false, true, false);
-    private static final Stamp objectAlwaysNullStamp = new ObjectStamp(null, false, false, true);
+    private static final Stamp objectStamp = new ObjectStamp(null, false, false, false, false);
+    private static final Stamp objectNonNullStamp = new ObjectStamp(null, false, true, false, false);
+    private static final Stamp objectAlwaysNullStamp = new ObjectStamp(null, false, false, true, false);
     private static final Stamp positiveInt = forInteger(JavaKind.Int, 0, Integer.MAX_VALUE, 0, Integer.MAX_VALUE);
+    private static final Stamp nonZeroInt = IntegerStamp.create(32, JavaKind.Int.getMinValue(), JavaKind.Int.getMaxValue(), 0, CodeUtil.mask(JavaKind.Int.getStackKind().getBitCount()), false);
+    private static final Stamp nonZeroLong = IntegerStamp.create(64, JavaKind.Long.getMinValue(), JavaKind.Long.getMaxValue(), 0, CodeUtil.mask(JavaKind.Long.getStackKind().getBitCount()), false);
     private static final Stamp booleanTrue = forInteger(JavaKind.Boolean, -1, -1, 1, 1);
     private static final Stamp booleanFalse = forInteger(JavaKind.Boolean, 0, 0, 0, 0);
     private static final Stamp rawPointer = new RawPointerStamp();
@@ -126,6 +128,14 @@ public class StampFactory {
         return positiveInt;
     }
 
+    public static Stamp nonZeroInt() {
+        return nonZeroInt;
+    }
+
+    public static Stamp nonZeroLong() {
+        return nonZeroLong;
+    }
+
     public static Stamp empty(JavaKind kind) {
         return emptyStampCache[kind.ordinal()];
     }
@@ -172,6 +182,9 @@ public class StampFactory {
     }
 
     public static IntegerStamp forUnsignedInteger(int bits, long unsignedLowerBound, long unsignedUpperBound, long downMask, long upMask) {
+        if (Long.compareUnsigned(unsignedLowerBound, unsignedUpperBound) > 0) {
+            return IntegerStamp.createEmptyStamp(bits);
+        }
         long lowerBound = signExtend(unsignedLowerBound, bits);
         long upperBound = signExtend(unsignedUpperBound, bits);
         if (!NumUtil.sameSign(lowerBound, upperBound)) {
@@ -222,7 +235,7 @@ public class StampFactory {
     public static Stamp forConstant(JavaConstant value, MetaAccessProvider metaAccess) {
         if (value.getJavaKind() == JavaKind.Object) {
             ResolvedJavaType type = value.isNull() ? null : metaAccess.lookupJavaType(value);
-            return new ObjectStamp(type, value.isNonNull(), value.isNonNull(), value.isNull());
+            return new ObjectStamp(type, value.isNonNull(), value.isNonNull(), value.isNull(), false);
         } else {
             return forConstant(value);
         }
@@ -250,9 +263,9 @@ public class StampFactory {
 
     public static ObjectStamp object(TypeReference type, boolean nonNull) {
         if (type == null) {
-            return new ObjectStamp(null, false, nonNull, false);
+            return new ObjectStamp(null, false, nonNull, false, false);
         } else {
-            return new ObjectStamp(type.getType(), type.isExact(), nonNull, false);
+            return new ObjectStamp(type.getType(), type.isExact(), nonNull, false, false);
         }
     }
 

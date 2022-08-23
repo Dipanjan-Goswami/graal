@@ -26,6 +26,7 @@ package com.oracle.svm.core.posix.headers;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.graalvm.nativeimage.Platform;
@@ -42,7 +43,7 @@ public class PosixDirectives implements CContext.Directives {
                     "<pthread.h>",
                     "<pwd.h>",
                     "<signal.h>",
-                    "<sys/errno.h>",
+                    "<errno.h>",
                     "<sys/mman.h>",
                     "<sys/resource.h>",
                     "<sys/stat.h>",
@@ -54,7 +55,7 @@ public class PosixDirectives implements CContext.Directives {
     };
 
     private static final String[] darwinLibs = new String[]{
-                    "<CoreFoundation/CoreFoundation.h>",
+                    "<Foundation/Foundation.h>",
                     "<mach/mach.h>",
                     "<mach/mach_time.h>",
                     "<mach-o/dyld.h>",
@@ -64,7 +65,6 @@ public class PosixDirectives implements CContext.Directives {
 
     private static final String[] linuxLibs = new String[]{
                     "<mntent.h>",
-                    "<paths.h>",
     };
 
     @Override
@@ -86,7 +86,15 @@ public class PosixDirectives implements CContext.Directives {
     }
 
     @Override
+    public List<String> getOptions() {
+        if (Platform.includedIn(Platform.DARWIN.class)) {
+            return Collections.singletonList("-ObjC");
+        }
+        return Collections.emptyList();
+    }
+
+    @Override
     public List<String> getMacroDefinitions() {
-        return Arrays.asList("_GNU_SOURCE", "_LARGEFILE64_SOURCE");
+        return Arrays.asList("_GNU_SOURCE", "_LARGEFILE64_SOURCE", "_DARWIN_USE_64_BIT_INODE");
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -59,7 +59,7 @@ import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonArray;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
-import com.oracle.truffle.regex.util.CompilationFinalBitSet;
+import com.oracle.truffle.regex.util.TBitSet;
 
 /**
  * Represents a single state in the NFA form of a regular expression. States may either be matcher
@@ -70,42 +70,48 @@ import com.oracle.truffle.regex.util.CompilationFinalBitSet;
  * matches both the 'a' in the lookahead assertion as well as following 'a' in the expression, and
  * therefore will have a state set containing two AST nodes.
  */
-public class NFAState extends BasicState<NFAState, NFAStateTransition> implements JsonConvertible {
+public final class NFAState extends BasicState<NFAState, NFAStateTransition> implements JsonConvertible {
 
     private static final byte FLAGS_NONE = 0;
     private static final byte FLAG_HAS_PREFIX_STATES = 1 << N_FLAGS;
+    private static final byte FLAG_MUST_ADVANCE = 1 << N_FLAGS + 1;
 
     private static final NFAStateTransition[] EMPTY_TRANSITIONS = new NFAStateTransition[0];
 
-    private final StateSet<? extends RegexASTNode> stateSet;
+    private final StateSet<RegexAST, ? extends RegexASTNode> stateSet;
     @CompilationFinal private short transitionToAnchoredFinalState = -1;
     @CompilationFinal private short transitionToUnAnchoredFinalState = -1;
     @CompilationFinal private short revTransitionToAnchoredFinalState = -1;
     @CompilationFinal private short revTransitionToUnAnchoredFinalState = -1;
-    private CompilationFinalBitSet possibleResults;
+    private TBitSet possibleResults;
     private final CodePointSet matcherBuilder;
     private final Set<LookBehindAssertion> finishedLookBehinds;
 
     public NFAState(short id,
-                    StateSet<? extends RegexASTNode> stateSet,
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
                     CodePointSet matcherBuilder,
                     Set<LookBehindAssertion> finishedLookBehinds,
-                    boolean hasPrefixStates) {
-        this(id, stateSet, hasPrefixStates ? FLAG_HAS_PREFIX_STATES : FLAGS_NONE, null, matcherBuilder, finishedLookBehinds);
+                    boolean hasPrefixStates,
+                    boolean mustAdvance) {
+        this(id, stateSet, initFlags(hasPrefixStates, mustAdvance), null, matcherBuilder, finishedLookBehinds);
+    }
+
+    private static byte initFlags(boolean hasPrefixStates, boolean mustAdvance) {
+        return (byte) ((hasPrefixStates ? FLAG_HAS_PREFIX_STATES : FLAGS_NONE) | (mustAdvance ? FLAG_MUST_ADVANCE : FLAGS_NONE));
     }
 
     private NFAState(short id,
-                    StateSet<? extends RegexASTNode> stateSet,
-                    byte flags,
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
+                    short flags,
                     CodePointSet matcherBuilder,
                     Set<LookBehindAssertion> finishedLookBehinds) {
         this(id, stateSet, flags, null, matcherBuilder, finishedLookBehinds);
     }
 
     private NFAState(short id,
-                    StateSet<? extends RegexASTNode> stateSet,
-                    byte flags,
-                    CompilationFinalBitSet possibleResults,
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
+                    short flags,
+                    TBitSet possibleResults,
                     CodePointSet matcherBuilder,
                     Set<LookBehindAssertion> finishedLookBehinds) {
         super(id, EMPTY_TRANSITIONS);
@@ -128,7 +134,7 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
         return finishedLookBehinds;
     }
 
-    public StateSet<? extends RegexASTNode> getStateSet() {
+    public StateSet<RegexAST, ? extends RegexASTNode> getStateSet() {
         return stateSet;
     }
 
@@ -140,8 +146,16 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
         setFlag(FLAG_HAS_PREFIX_STATES, value);
     }
 
+    public boolean isMustAdvance() {
+        return getFlag(FLAG_MUST_ADVANCE);
+    }
+
+    public void setMustAdvance(boolean value) {
+        setFlag(FLAG_MUST_ADVANCE, value);
+    }
+
     public boolean hasTransitionToAnchoredFinalState(boolean forward) {
-        return (forward ? transitionToAnchoredFinalState : revTransitionToAnchoredFinalState) >= 0;
+        return getTransitionToAnchoredFinalStateId(forward) >= 0;
     }
 
     public short getTransitionToAnchoredFinalStateId(boolean forward) {
@@ -150,17 +164,17 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
 
     public NFAStateTransition getTransitionToAnchoredFinalState(boolean forward) {
         assert hasTransitionToAnchoredFinalState(forward);
-        return forward ? getSuccessors()[transitionToAnchoredFinalState] : getPredecessors()[revTransitionToAnchoredFinalState];
+        return getSuccessors(forward)[getTransitionToAnchoredFinalStateId(forward)];
     }
 
     @Override
     public boolean hasTransitionToUnAnchoredFinalState(boolean forward) {
-        return (forward ? transitionToUnAnchoredFinalState : revTransitionToUnAnchoredFinalState) >= 0;
+        return getTransitionToUnAnchoredFinalStateId(forward) >= 0;
     }
 
     public NFAStateTransition getTransitionToUnAnchoredFinalState(boolean forward) {
         assert hasTransitionToUnAnchoredFinalState(forward);
-        return forward ? getSuccessors()[transitionToUnAnchoredFinalState] : getPredecessors()[revTransitionToUnAnchoredFinalState];
+        return getSuccessors(forward)[getTransitionToUnAnchoredFinalStateId(forward)];
     }
 
     public short getTransitionToUnAnchoredFinalStateId(boolean forward) {
@@ -267,9 +281,9 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
      * priority, so when a single 'a' is encountered when searching for a match, the pre-calculated
      * result corresponding to capture group 1 must be preferred.
      */
-    public CompilationFinalBitSet getPossibleResults() {
+    public TBitSet getPossibleResults() {
         if (possibleResults == null) {
-            return CompilationFinalBitSet.getEmptyInstance();
+            return TBitSet.getEmptyInstance();
         }
         return possibleResults;
     }
@@ -280,7 +294,7 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
 
     public void addPossibleResult(int index) {
         if (possibleResults == null) {
-            possibleResults = new CompilationFinalBitSet(TRegexOptions.TRegexTraceFinderMaxNumberOfResults);
+            possibleResults = new TBitSet(TRegexOptions.TRegexTraceFinderMaxNumberOfResults);
         }
         possibleResults.set(index);
     }
@@ -313,7 +327,7 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
 
     @TruffleBoundary
     private JsonArray sourceSectionsToJson() {
-        return RegexAST.sourceSectionsToJson(getStateSet().stream().map(x -> ((RegexAST) getStateSet().getStateIndex()).getSourceSections(x)).filter(Objects::nonNull).flatMap(Collection::stream));
+        return RegexAST.sourceSectionsToJson(getStateSet().stream().map(x -> getStateSet().getStateIndex().getSourceSections(x)).filter(Objects::nonNull).flatMap(Collection::stream));
     }
 
     @TruffleBoundary
@@ -321,6 +335,7 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
     public JsonObject toJson() {
         return Json.obj(Json.prop("id", getId()),
                         Json.prop("stateSet", getStateSet().stream().map(x -> Json.val(x.getId()))),
+                        Json.prop("mustAdvance", isMustAdvance()),
                         Json.prop("sourceSections", sourceSectionsToJson()),
                         Json.prop("matcherBuilder", matcherBuilder.toString()),
                         Json.prop("forwardAnchoredFinalState", isAnchoredFinalState()),
@@ -335,6 +350,7 @@ public class NFAState extends BasicState<NFAState, NFAStateTransition> implement
     public JsonObject toJson(boolean forward) {
         return Json.obj(Json.prop("id", getId()),
                         Json.prop("stateSet", getStateSet().stream().map(x -> Json.val(x.getId()))),
+                        Json.prop("mustAdvance", isMustAdvance()),
                         Json.prop("sourceSections", sourceSectionsToJson()),
                         Json.prop("matcherBuilder", matcherBuilder.toString()),
                         Json.prop("anchoredFinalState", isAnchoredFinalState(forward)),

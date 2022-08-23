@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -43,7 +43,7 @@ import org.graalvm.component.installer.model.Verifier;
 /**
  * Abstract configurable base for installer. The real installer and test stub inherits from this
  * base; are configured by InstallCommand.
- * 
+ *
  * @author sdedic
  */
 public abstract class AbstractInstaller implements Closeable {
@@ -75,6 +75,14 @@ public abstract class AbstractInstaller implements Closeable {
         this.archive = a;
         this.catalog = cat;
         this.fileOps = fops;
+    }
+
+    public Archive getArchive() {
+        return archive;
+    }
+
+    public boolean isComplete() {
+        return archive != null;
     }
 
     public boolean isAllowUpgrades() {
@@ -203,8 +211,6 @@ public abstract class AbstractInstaller implements Closeable {
     public void setDryRun(boolean dryRun) {
         this.dryRun = dryRun;
     }
-
-    public abstract boolean isRebuildPolyglot();
 
     public Set<String> getComponentDirectories() {
         return componentDirectories;

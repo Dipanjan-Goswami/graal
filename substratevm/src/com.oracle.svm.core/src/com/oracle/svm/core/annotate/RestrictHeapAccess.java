@@ -24,6 +24,9 @@
  */
 package com.oracle.svm.core.annotate;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -35,11 +38,11 @@ import java.lang.annotation.Target;
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD, ElementType.CONSTRUCTOR})
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface RestrictHeapAccess {
     enum Access {
         UNRESTRICTED,
-        NO_ALLOCATION,
-        NO_HEAP_ACCESS;
+        NO_ALLOCATION;
 
         public boolean isMoreRestrictiveThan(Access other) {
             return ordinal() > other.ordinal();
@@ -48,14 +51,5 @@ public @interface RestrictHeapAccess {
 
     Access access();
 
-    /**
-     * When {@link #overridesCallers} is enabled and this method is (transitively) called from a
-     * caller with restricted heap access, override the caller's restrictions with those of this
-     * method from {@link #access}.
-     */
-    boolean overridesCallers() default false;
-
     String reason();
-
-    boolean mayBeInlined() default false;
 }

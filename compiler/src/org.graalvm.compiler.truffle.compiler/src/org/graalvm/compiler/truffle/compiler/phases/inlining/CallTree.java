@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,34 +24,39 @@
  */
 package org.graalvm.compiler.truffle.compiler.phases.inlining;
 
-import static org.graalvm.compiler.truffle.compiler.TruffleCompilerOptions.getPolyglotOptionValue;
-
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.graph.Graph;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.truffle.common.TruffleMetaAccessProvider;
-import org.graalvm.compiler.truffle.common.CompilableTruffleAST;
 import org.graalvm.compiler.truffle.common.TruffleCompilerRuntime;
+import org.graalvm.compiler.truffle.common.TruffleInliningData;
 import org.graalvm.compiler.truffle.compiler.PartialEvaluator;
+import org.graalvm.compiler.truffle.compiler.PostPartialEvaluationSuite;
+import org.graalvm.compiler.truffle.compiler.TruffleTierContext;
 import org.graalvm.compiler.truffle.options.PolyglotCompilerOptions;
-import org.graalvm.options.OptionValues;
 
 public final class CallTree extends Graph {
 
     private final InliningPolicy policy;
     private final GraphManager graphManager;
     private final CallNode root;
-    private final OptionValues options;
+    private final TruffleTierContext context;
+    final boolean useSize;
     int expanded = 1;
     int inlined = 1;
+    int frontierSize;
+    private int nextId = 0;
 
-    CallTree(OptionValues options, PartialEvaluator partialEvaluator, TruffleMetaAccessProvider truffleMetaAccessProvider, CompilableTruffleAST truffleAST, StructuredGraph ir, InliningPolicy policy) {
-        super(ir.getOptions(), ir.getDebug());
-        this.options = options;
+    CallTree(PartialEvaluator partialEvaluator, PostPartialEvaluationSuite postPartialEvaluationSuite, TruffleTierContext context, InliningPolicy policy) {
+        super(context.graph.getOptions(), context.debug);
         this.policy = policy;
-        this.graphManager = new GraphManager(ir, partialEvaluator, truffleMetaAccessProvider);
+        this.context = context;
+        this.graphManager = new GraphManager(partialEvaluator, postPartialEvaluationSuite, context);
+        useSize = context.options.get(PolyglotCompilerOptions.InliningUseSize);
         // Should be kept as the last call in the constructor, as this is an argument.
-        this.root = CallNode.makeRoot(options, this, truffleAST, ir);
+        this.root = CallNode.makeRoot(this, context);
+    }
+
+    int nextId() {
+        return nextId++;
     }
 
     InliningPolicy getPolicy() {
@@ -74,38 +79,23 @@ public final class CallTree extends Graph {
         return graphManager;
     }
 
-    public void trace() {
-        final Boolean details = getPolyglotOptionValue(options, PolyglotCompilerOptions.TraceInliningDetails);
-        if (getPolyglotOptionValue(options, PolyglotCompilerOptions.TraceInlining) || details) {
+    void trace() {
+        Boolean details = context.options.get(PolyglotCompilerOptions.TraceInliningDetails);
+        if (context.options.get(PolyglotCompilerOptions.TraceInlining) || details) {
             TruffleCompilerRuntime runtime = TruffleCompilerRuntime.getRuntime();
-            runtime.logEvent(0, "inline start", root.getName(), root.getStringProperties());
+            runtime.logEvent(root.getDirectCallTarget(), 0, "Inline start", root.getName(), root.getStringProperties(), null);
             traceRecursive(runtime, root, details, 0);
-            runtime.logEvent(0, "inline done", root.getName(), root.getStringProperties());
+            runtime.logEvent(root.getDirectCallTarget(), 0, "Inline done", root.getName(), root.getStringProperties(), null);
         }
     }
 
     private void traceRecursive(TruffleCompilerRuntime runtime, CallNode node, boolean details, int depth) {
         if (depth != 0) {
-            runtime.logEvent(depth, node.getState().toString(), node.getName(), node.getStringProperties());
+            runtime.logEvent(root.getDirectCallTarget(), depth, node.getState().toString(), node.getName(), node.getStringProperties(), null);
         }
         if (node.getState() == CallNode.State.Inlined || details) {
             for (CallNode child : node.getChildren()) {
                 traceRecursive(runtime, child, details, depth + 1);
-            }
-        }
-    }
-
-    public void dequeueInlined() {
-        dequeueInlined(root);
-    }
-
-    private void dequeueInlined(CallNode node) {
-        if (node.getState() == CallNode.State.Inlined) {
-            for (CallNode child : node.getChildren()) {
-                dequeueInlined(child);
-            }
-            if (!node.isRoot()) {
-                node.cancelCompilationIfSingleCallsite();
             }
         }
     }
@@ -115,11 +105,32 @@ public final class CallTree extends Graph {
         return "Call Tree";
     }
 
-    public void dumpBasic(String format, Object arg) {
-        getDebug().dump(DebugContext.BASIC_LEVEL, this, format, arg);
+    void dumpBasic(String format) {
+        getDebug().dump(DebugContext.BASIC_LEVEL, this, format, "");
     }
 
     public void dumpInfo(String format, Object arg) {
         getDebug().dump(DebugContext.INFO_LEVEL, this, format, arg);
+    }
+
+    public void finalizeGraph() {
+        root.finalizeGraph();
+    }
+
+    void collectTargetsToDequeue(TruffleInliningData provider) {
+        root.collectTargetsToDequeue(provider);
+    }
+
+    public void updateTracingInfo(TruffleInliningData inliningPlan) {
+        final int inlinedWithoutRoot = inlined - 1;
+        inliningPlan.setCallCounts(inlinedWithoutRoot + frontierSize, inlinedWithoutRoot);
+        if (loggingInlinedTargets()) {
+            root.collectInlinedTargets(inliningPlan);
+        }
+    }
+
+    private boolean loggingInlinedTargets() {
+        return context.debug.isDumpEnabled(DebugContext.BASIC_LEVEL) || context.options.get(PolyglotCompilerOptions.CompilationStatistics) ||
+                        context.options.get(PolyglotCompilerOptions.CompilationStatisticDetails);
     }
 }

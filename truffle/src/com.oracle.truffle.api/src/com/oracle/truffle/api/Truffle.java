@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,9 +42,12 @@ package com.oracle.truffle.api;
 
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ServiceConfigurationError;
+import java.util.ServiceLoader;
+import java.util.Set;
 
 import com.oracle.truffle.api.impl.DefaultTruffleRuntime;
 
@@ -113,19 +116,36 @@ public final class Truffle {
                         return (TruffleRuntime) runtimeClass.getDeclaredConstructor().newInstance();
                     } catch (Throwable e) {
                         // Fail fast for other errors
-                        throw (InternalError) new InternalError().initCause(e);
+                        throw new InternalError(e);
                     }
                 }
 
-                List<Iterable<TruffleRuntimeAccess>> loaders = LanguageAccessor.jdkServicesAccessor().getTruffleRuntimeLoaders(TruffleRuntimeAccess.class);
+                List<Iterable<TruffleRuntimeAccess>> loaders = Collections.singletonList(ServiceLoader.load(TruffleRuntimeAccess.class));
                 TruffleRuntimeAccess access = selectTruffleRuntimeAccess(loaders);
 
                 if (access != null) {
-                    LanguageAccessor.jdkServicesAccessor().exportTo(access.getClass());
+                    exportTo(access.getClass());
                     return access.getRuntime();
                 }
                 return new DefaultTruffleRuntime();
             }
         });
+    }
+
+    private static void exportTo(Class<?> client) {
+        Module truffleModule = Truffle.class.getModule();
+        exportFromTo(truffleModule, client.getModule());
+    }
+
+    private static void exportFromTo(Module truffleModule, Module clientModule) {
+        if (truffleModule != clientModule) {
+            Set<String> packages = truffleModule.getPackages();
+            for (String pkg : packages) {
+                boolean exported = truffleModule.isExported(pkg, clientModule);
+                if (!exported) {
+                    truffleModule.addExports(pkg, clientModule);
+                }
+            }
+        }
     }
 }

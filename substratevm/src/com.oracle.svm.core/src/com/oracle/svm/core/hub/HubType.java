@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,14 +25,18 @@
 package com.oracle.svm.core.hub;
 
 import com.oracle.svm.core.annotate.DuplicatedInNativeCode;
+import com.oracle.svm.core.annotate.Uninterruptible;
 
 @DuplicatedInNativeCode
 public enum HubType {
     // instance hubs
     Instance(0),
     InstanceReference(1),
-    // other hubs
-    Other(2),
+
+    // special hubs
+    PodInstance(2),
+    Other(3),
+
     // array hubs
     TypeArray(4),
     ObjectArray(5);
@@ -43,18 +47,27 @@ public enum HubType {
         this.value = value;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public int getValue() {
         return value;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isInstance(int hubType) {
-        return hubType <= InstanceReference.getValue();
+        return hubType <= PodInstance.getValue();
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isReferenceInstance(int hubType) {
         return hubType == InstanceReference.getValue();
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean isPodInstance(int hubType) {
+        return hubType == PodInstance.getValue();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isArray(int hubType) {
         return hubType >= TypeArray.getValue();
     }

@@ -48,13 +48,17 @@ public abstract class FrameAccess {
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public abstract CodePointer readReturnAddress(Pointer sourceSp);
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public abstract void writeReturnAddress(Pointer sourceSp, CodePointer newReturnAddress);
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract Pointer getReturnAddressLocation(Pointer sourceSp);
 
     @Fold
     public static int returnAddressSize() {
         Architecture arch = ConfigurationValues.getTarget().arch;
         if (arch instanceof AArch64) {
-            return 8;
+            return wordSize();
         } else {
             return arch.getReturnAddressSize();
         }
@@ -78,6 +82,7 @@ public abstract class FrameAccess {
         return ConfigurationValues.getTarget().arch.getWordSize();
     }
 
+    @Fold
     public static int uncompressedReferenceSize() {
         return wordSize();
     }

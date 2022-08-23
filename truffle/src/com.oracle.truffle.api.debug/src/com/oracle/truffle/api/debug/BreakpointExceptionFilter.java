@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,7 +46,6 @@ import java.util.WeakHashMap;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.api.TruffleException;
 import com.oracle.truffle.api.debug.DebugException.CatchLocation;
 import com.oracle.truffle.api.frame.FrameInstance;
 import com.oracle.truffle.api.frame.FrameInstanceVisitor;
@@ -92,7 +91,7 @@ final class BreakpointExceptionFilter {
 
     @TruffleBoundary
     private Match testExceptionCaught(Node throwNode, Throwable exception) {
-        if (!(exception instanceof TruffleException)) {
+        if (!InteropLibrary.getUncached().isException(exception)) {
             return uncaught ? Match.MATCHED : Match.UNMATCHED;
         }
         CatchLocation catchLocation = getCatchNode(throwNode, exception);
@@ -131,15 +130,14 @@ final class BreakpointExceptionFilter {
         if (node instanceof InstrumentableNode) {
             InstrumentableNode inode = (InstrumentableNode) node;
             if (inode.isInstrumentable() && inode.hasTag(TryBlockTag.class)) {
-                Object exceptionObject = ((TruffleException) exception).getExceptionObject();
                 Object nodeObject = inode.getNodeObject();
-                if (nodeObject != null && exceptionObject != null) {
+                if (nodeObject != null) {
                     InteropLibrary library = InteropLibrary.getFactory().getUncached(nodeObject);
                     TruffleObject object = (TruffleObject) nodeObject;
                     if (library.isMemberInvocable(nodeObject, "catches")) {
                         Object catches;
                         try {
-                            catches = library.invokeMember(nodeObject, "catches", exceptionObject);
+                            catches = library.invokeMember(nodeObject, "catches", exception);
                         } catch (UnsupportedTypeException | ArityException | UnknownIdentifierException | UnsupportedMessageException ex) {
                             throw new IllegalStateException("Unexpected exception from 'catches' on '" + object, exception);
                         }

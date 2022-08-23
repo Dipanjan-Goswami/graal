@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,7 +51,7 @@ public final class CompositeValueClass<T> extends FieldIntrospection<T> {
      * The CompositeValueClass is only used for formatting for the most part so cache it as a
      * ClassValue.
      */
-    private static final ClassValue<CompositeValueClass<?>> compositeClass = new ClassValue<CompositeValueClass<?>>() {
+    private static final ClassValue<CompositeValueClass<?>> compositeClass = new ClassValue<>() {
 
         @Override
         protected CompositeValueClass<?> computeValue(Class<?> type) {
@@ -75,8 +75,8 @@ public final class CompositeValueClass<T> extends FieldIntrospection<T> {
         CompositeValueFieldsScanner vfs = new CompositeValueFieldsScanner(new FieldsScanner.DefaultCalcOffset());
         vfs.scan(clazz, CompositeValue.class, false);
 
-        values = new Values(vfs.valueAnnotations.get(CompositeValue.Component.class));
-        data = new Fields(vfs.data);
+        values = Values.create(vfs.valueAnnotations.get(Component.class));
+        data = Fields.create(vfs.data);
     }
 
     private static class CompositeValueFieldsScanner extends LIRFieldsScanner {

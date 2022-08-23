@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -74,6 +74,11 @@ final class SourceImpl extends Source {
     }
 
     @Override
+    protected Object getSourceKey() {
+        return key;
+    }
+
+    @Override
     public CharSequence getCharacters() {
         if (hasCharacters()) {
             return (CharSequence) key.content;
@@ -124,11 +129,6 @@ final class SourceImpl extends Source {
     @Override
     public boolean isInternal() {
         return key.internal;
-    }
-
-    @Override
-    boolean isLegacy() {
-        return key.legacy;
     }
 
     @Override
@@ -192,11 +192,11 @@ final class SourceImpl extends Source {
         final boolean internal;
         final boolean interactive;
         final boolean cached;
-        // TODO remove legacy field with deprecated Source builders.
-        final boolean legacy;
+        final boolean embedderSource;
+        // TODO GR-38632 remove legacy field with deprecated Source builders.
         volatile Integer cachedHashCode;
 
-        Key(Object content, String mimeType, String languageId, String name, boolean internal, boolean interactive, boolean cached, boolean legacy) {
+        Key(Object content, String mimeType, String languageId, String name, boolean internal, boolean interactive, boolean cached, boolean embedderSource) {
             this.content = content;
             this.mimeType = mimeType;
             this.language = languageId;
@@ -204,7 +204,7 @@ final class SourceImpl extends Source {
             this.internal = internal;
             this.interactive = interactive;
             this.cached = cached;
-            this.legacy = legacy;
+            this.embedderSource = embedderSource;
         }
 
         abstract String getPath();
@@ -217,18 +217,19 @@ final class SourceImpl extends Source {
         public int hashCode() {
             Integer hashCode = cachedHashCode;
             if (hashCode == null) {
-                hashCode = hashCodeImpl(content, mimeType, language, getURL(), getURI(), name, getPath(), internal, interactive, cached, legacy);
+                hashCode = hashCodeImpl(content, mimeType, language, getURL(), getURI(), name, getPath(), internal, interactive, cached, embedderSource);
                 cachedHashCode = hashCode;
             }
             return hashCode;
         }
 
         static int hashCodeImpl(Object content, String mimeType, String language, URL url, URI uri, String name, String path, boolean internal, boolean interactive,
-                        boolean cached, @SuppressWarnings("unused") boolean legacy) {
+                        boolean cached, boolean embedderSource) {
             int result = 31 * 1 + ((content == null) ? 0 : content.hashCode());
             result = 31 * result + (interactive ? 1231 : 1237);
             result = 31 * result + (internal ? 1231 : 1237);
             result = 31 * result + (cached ? 1231 : 1237);
+            result = 31 * result + (embedderSource ? 1231 : 1237);
             result = 31 * result + ((language == null) ? 0 : language.hashCode());
             result = 31 * result + ((mimeType == null) ? 0 : mimeType.hashCode());
             result = 31 * result + ((name == null) ? 0 : name.hashCode());
@@ -259,6 +260,7 @@ final class SourceImpl extends Source {
                             interactive == other.interactive && //
                             internal == other.internal &&
                             cached == other.cached &&
+                            embedderSource == other.embedderSource &&
                             compareContent(other);
         }
 
@@ -320,14 +322,14 @@ final class SourceImpl extends Source {
          * path in the language home and does not include {@code url} nor {@code uri} as they
          * contain absolute paths.
          */
-        ImmutableKey(Object content, String mimeType, String languageId, URL url, URI uri, String name, String path, boolean internal, boolean interactive, boolean cached, boolean legacy,
-                        String relativePathInLanguageHome) {
-            super(content, mimeType, languageId, name, internal, interactive, cached, legacy);
+        ImmutableKey(Object content, String mimeType, String languageId, URL url, URI uri, String name, String path, boolean internal, boolean interactive, boolean cached,
+                        String relativePathInLanguageHome, boolean embedderSource) {
+            super(content, mimeType, languageId, name, internal, interactive, cached, embedderSource);
             this.uri = uri;
             this.url = url;
             this.path = path;
             if (relativePathInLanguageHome != null) {
-                this.cachedHashCode = hashCodeImpl(content, mimeType, language, null, null, name, relativePathInLanguageHome, internal, interactive, cached, legacy);
+                this.cachedHashCode = hashCodeImpl(content, mimeType, language, null, null, name, relativePathInLanguageHome, internal, interactive, cached, embedderSource);
             }
         }
 
@@ -368,26 +370,26 @@ final class SourceImpl extends Source {
          * {@code uri} as they contain absolute paths.
          */
         ReinitializableKey(TruffleFile truffleFile, Object content, String mimeType, String languageId, URL url, URI uri, String name, String path, boolean internal, boolean interactive,
-                        boolean cached, boolean legacy, String relativePathInLanguageHome) {
-            super(content, mimeType, languageId, name, internal, interactive, cached, legacy);
+                        boolean cached, String relativePathInLanguageHome, boolean embedderSource) {
+            super(content, mimeType, languageId, name, internal, interactive, cached, embedderSource);
             Objects.requireNonNull(truffleFile, "TruffleFile must be non null.");
             this.truffleFile = truffleFile;
             this.uri = uri;
             this.url = url;
             this.path = path;
-            this.cachedHashCode = hashCodeImpl(content, mimeType, language, null, null, name, relativePathInLanguageHome, internal, interactive, cached, legacy);
+            this.cachedHashCode = hashCodeImpl(content, mimeType, language, null, null, name, relativePathInLanguageHome, internal, interactive, cached, embedderSource);
         }
 
         @Override
         void invalidateAfterPreinitialiation() {
-            if (Objects.equals(path, truffleFile.getPath())) {
+            if (path != INVALID && Objects.equals(path, SourceAccessor.getReinitializedPath(truffleFile))) {
                 path = INVALID;
             }
-            if (Objects.equals(uri, truffleFile.toUri())) {
+            if (uri != INVALID && Objects.equals(uri, SourceAccessor.getReinitializedURI(truffleFile))) {
                 this.uri = INVALID;
             }
             try {
-                if (url != null && truffleFile.toUri().toURL().toExternalForm().equals(((URL) url).toExternalForm())) {
+                if (url != null && url != INVALID && SourceAccessor.getReinitializedURI(truffleFile).toURL().toExternalForm().equals(((URL) url).toExternalForm())) {
                     this.url = INVALID;
                 }
             } catch (MalformedURLException mue) {

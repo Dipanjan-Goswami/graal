@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,15 +31,17 @@ import org.graalvm.compiler.core.common.calc.FloatConvert;
 import org.graalvm.compiler.core.common.type.ArithmeticOpTable;
 import org.graalvm.compiler.core.common.type.ArithmeticOpTable.FloatConvertOp;
 import org.graalvm.compiler.core.common.type.ArithmeticOpTable.UnaryOp;
+import org.graalvm.compiler.core.common.type.FloatStamp;
+import org.graalvm.compiler.core.common.type.IntegerStamp;
+import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
+import org.graalvm.compiler.nodes.spi.CanonicalizerTool;
 import org.graalvm.compiler.lir.gen.ArithmeticLIRGeneratorTool;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.NodeView;
 import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.compiler.nodes.spi.ArithmeticLIRLowerable;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.compiler.nodes.spi.NodeLIRBuilderTool;
 
 import jdk.vm.ci.meta.Constant;
@@ -94,9 +96,34 @@ public final class FloatConvertNode extends UnaryArithmeticNode<FloatConvertOp> 
             case F2D:
             case I2D:
                 return true;
+            case I2F:
+            case L2D:
+            case L2F:
+                if (value.stamp(NodeView.DEFAULT) instanceof IntegerStamp) {
+                    return isLosslessIntegerToFloatingPoint((IntegerStamp) value.stamp(NodeView.DEFAULT), (FloatStamp) stamp(NodeView.DEFAULT));
+                } else {
+                    return false;
+                }
             default:
                 return false;
         }
+    }
+
+    private static boolean isLosslessIntegerToFloatingPoint(IntegerStamp inputStamp, FloatStamp resultStamp) {
+        int mantissaBits;
+        switch (resultStamp.getBits()) {
+            case 32:
+                mantissaBits = 24;
+                break;
+            case 64:
+                mantissaBits = 53;
+                break;
+            default:
+                throw GraalError.shouldNotReachHere();
+        }
+        long max = 1L << mantissaBits;
+        long min = -(1L << mantissaBits);
+        return min <= inputStamp.lowerBound() && inputStamp.upperBound() <= max;
     }
 
     @Override
@@ -113,11 +140,6 @@ public final class FloatConvertNode extends UnaryArithmeticNode<FloatConvertOp> 
             }
         }
         return this;
-    }
-
-    @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
     }
 
     @Override

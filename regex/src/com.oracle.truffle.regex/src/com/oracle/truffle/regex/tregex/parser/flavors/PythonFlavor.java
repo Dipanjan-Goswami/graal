@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,11 @@
  */
 package com.oracle.truffle.regex.tregex.parser.flavors;
 
+import com.oracle.truffle.regex.RegexLanguage;
 import com.oracle.truffle.regex.RegexSource;
+import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
+import com.oracle.truffle.regex.tregex.parser.RegexParser;
+import com.oracle.truffle.regex.tregex.parser.RegexValidator;
 
 /**
  * An implementation of the Python regex flavor. Technically, this class provides an implementation
@@ -63,12 +67,11 @@ import com.oracle.truffle.regex.RegexSource;
  * to use much more complex global rewriting rules than the current approach.</li>
  * </ul>
  *
- * Furthermore, features not supported by TRegex in general are also not supported (e.g.
- * backreferences or variable-length lookbehind).
- * 
  * @see PythonREMode
  */
-public final class PythonFlavor implements RegexFlavor {
+public final class PythonFlavor extends RegexFlavor {
+
+    public static final PythonFlavor INSTANCE = new PythonFlavor(PythonREMode.None);
 
     public static final PythonFlavor STR_INSTANCE = new PythonFlavor(PythonREMode.Str);
     public static final PythonFlavor BYTES_INSTANCE = new PythonFlavor(PythonREMode.Bytes);
@@ -76,12 +79,18 @@ public final class PythonFlavor implements RegexFlavor {
     private final PythonREMode mode;
 
     private PythonFlavor(PythonREMode mode) {
+        super(BACKREFERENCES_TO_UNMATCHED_GROUPS_FAIL | NESTED_CAPTURE_GROUPS_KEPT_ON_LOOP_REENTRY | FAILING_EMPTY_CHECKS_DONT_BACKTRACK | USES_LAST_GROUP_RESULT_FIELD |
+                        LOOKBEHINDS_RUN_LEFT_TO_RIGHT);
         this.mode = mode;
     }
 
     @Override
-    public RegexFlavorProcessor forRegex(RegexSource source) {
-        return new PythonFlavorProcessor(source, mode);
+    public RegexValidator createValidator(RegexSource source) {
+        return PythonRegexParser.createValidator(source, mode);
     }
 
+    @Override
+    public RegexParser createParser(RegexLanguage language, RegexSource source, CompilationBuffer compilationBuffer) {
+        return PythonRegexParser.createParser(language, source, compilationBuffer, mode);
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,6 +48,7 @@ import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.strings.TruffleString;
 
 @GenerateUncached
 public abstract class ExpectStringOrTruffleObjectNode extends Node {
@@ -55,30 +56,39 @@ public abstract class ExpectStringOrTruffleObjectNode extends Node {
     public abstract Object execute(Object arg) throws UnsupportedTypeException;
 
     @Specialization
-    static Object doString(String input) {
+    static String doString(String input) {
+        return input;
+    }
+
+    @Specialization
+    static TruffleString doTString(TruffleString input) {
         return input;
     }
 
     @Specialization(guards = "inputs.isString(input)", limit = "2")
-    static Object doBoxedString(Object input, @CachedLibrary("input") InteropLibrary inputs) throws UnsupportedTypeException {
+    static String doBoxedString(Object input,
+                    @CachedLibrary("input") InteropLibrary inputs) throws UnsupportedTypeException {
         try {
             return inputs.asString(input);
         } catch (UnsupportedMessageException e) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             throw UnsupportedTypeException.create(new Object[]{input});
         }
     }
 
+    // Deprecated
     @Specialization(guards = "inputs.hasArrayElements(input)", limit = "2")
     static Object doBoxedCharArray(Object input,
                     @CachedLibrary("input") InteropLibrary inputs) throws UnsupportedTypeException {
         try {
             final long inputLength = inputs.getArraySize(input);
             if (inputLength > Integer.MAX_VALUE) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
                 throw UnsupportedTypeException.create(new Object[]{input});
             }
             return input;
         } catch (UnsupportedMessageException e) {
-            CompilerDirectives.transferToInterpreter();
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             throw UnsupportedTypeException.create(new Object[]{input});
         }
     }

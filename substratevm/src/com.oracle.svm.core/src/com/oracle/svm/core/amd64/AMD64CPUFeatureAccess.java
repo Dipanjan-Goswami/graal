@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,175 +26,105 @@ package com.oracle.svm.core.amd64;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
-import java.util.List;
 
-import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.c.struct.SizeOf;
-import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.word.Pointer;
 
-import com.oracle.svm.core.CPUFeatureAccess;
-import com.oracle.svm.core.CalleeSavedRegisters;
-import com.oracle.svm.core.MemoryUtil;
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.CPUFeatureAccessImpl;
+import com.oracle.svm.core.ReservedRegisters;
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.jdk.JVMCISubstitutions;
 import com.oracle.svm.core.util.VMError;
 
 import jdk.vm.ci.amd64.AMD64;
+import jdk.vm.ci.amd64.AMD64Kind;
 import jdk.vm.ci.code.Architecture;
 
-@AutomaticFeature
-@Platforms(Platform.AMD64.class)
-class AMD64CPUFeatureAccessFeature implements Feature {
-    @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(CPUFeatureAccess.class, new AMD64CPUFeatureAccess());
-    }
-}
+public class AMD64CPUFeatureAccess extends CPUFeatureAccessImpl {
 
-public class AMD64CPUFeatureAccess implements CPUFeatureAccess {
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public AMD64CPUFeatureAccess(EnumSet<?> buildtimeCPUFeatures, int[] offsets, byte[] errorMessageBytes, byte[] buildtimeFeatureMaskBytes) {
+        super(buildtimeCPUFeatures, offsets, errorMessageBytes, buildtimeFeatureMaskBytes);
+    }
+
+    /**
+     * We include all flags that enable AMD64 CPU instructions as we want best possible performance
+     * for the code.
+     *
+     * @return All the flags that enable AMD64 CPU instructions.
+     */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static EnumSet<AMD64.Flag> allAMD64Flags() {
+        return EnumSet.of(AMD64.Flag.UseCountLeadingZerosInstruction, AMD64.Flag.UseCountTrailingZerosInstruction);
+    }
+
+    @Override
     @Platforms(Platform.AMD64.class)
-    public static EnumSet<AMD64.CPUFeature> determineHostCPUFeatures() {
+    public EnumSet<AMD64.CPUFeature> determineHostCPUFeatures() {
         EnumSet<AMD64.CPUFeature> features = EnumSet.noneOf(AMD64.CPUFeature.class);
 
         AMD64LibCHelper.CPUFeatures cpuFeatures = StackValue.get(AMD64LibCHelper.CPUFeatures.class);
 
-        MemoryUtil.fillToMemoryAtomic((Pointer) cpuFeatures, SizeOf.unsigned(AMD64LibCHelper.CPUFeatures.class), (byte) 0);
+        UnmanagedMemoryUtil.fill((Pointer) cpuFeatures, SizeOf.unsigned(AMD64LibCHelper.CPUFeatures.class), (byte) 0);
 
         AMD64LibCHelper.determineCPUFeatures(cpuFeatures);
-        if (cpuFeatures.fCX8()) {
-            features.add(AMD64.CPUFeature.CX8);
-        }
-        if (cpuFeatures.fCMOV()) {
-            features.add(AMD64.CPUFeature.CMOV);
-        }
-        if (cpuFeatures.fFXSR()) {
-            features.add(AMD64.CPUFeature.FXSR);
-        }
-        if (cpuFeatures.fHT()) {
-            features.add(AMD64.CPUFeature.HT);
-        }
-        if (cpuFeatures.fMMX()) {
-            features.add(AMD64.CPUFeature.MMX);
-        }
-        if (cpuFeatures.fAMD3DNOWPREFETCH()) {
-            features.add(AMD64.CPUFeature.AMD_3DNOW_PREFETCH);
-        }
-        if (cpuFeatures.fSSE()) {
-            features.add(AMD64.CPUFeature.SSE);
-        }
-        if (cpuFeatures.fSSE2()) {
-            features.add(AMD64.CPUFeature.SSE2);
-        }
-        if (cpuFeatures.fSSE3()) {
-            features.add(AMD64.CPUFeature.SSE3);
-        }
-        if (cpuFeatures.fSSSE3()) {
-            features.add(AMD64.CPUFeature.SSSE3);
-        }
-        if (cpuFeatures.fSSE4A()) {
-            features.add(AMD64.CPUFeature.SSE4A);
-        }
-        if (cpuFeatures.fSSE41()) {
-            features.add(AMD64.CPUFeature.SSE4_1);
-        }
-        if (cpuFeatures.fSSE42()) {
-            features.add(AMD64.CPUFeature.SSE4_2);
-        }
-        if (cpuFeatures.fPOPCNT()) {
-            features.add(AMD64.CPUFeature.POPCNT);
-        }
-        if (cpuFeatures.fLZCNT()) {
-            features.add(AMD64.CPUFeature.LZCNT);
-        }
-        if (cpuFeatures.fTSC()) {
-            features.add(AMD64.CPUFeature.TSC);
-        }
-        if (cpuFeatures.fTSCINV()) {
-            features.add(AMD64.CPUFeature.TSCINV);
-        }
-        if (cpuFeatures.fAVX()) {
-            features.add(AMD64.CPUFeature.AVX);
-        }
-        if (cpuFeatures.fAVX2()) {
-            features.add(AMD64.CPUFeature.AVX2);
-        }
-        if (cpuFeatures.fAES()) {
-            features.add(AMD64.CPUFeature.AES);
-        }
-        if (cpuFeatures.fERMS()) {
-            features.add(AMD64.CPUFeature.ERMS);
-        }
-        if (cpuFeatures.fCLMUL()) {
-            features.add(AMD64.CPUFeature.CLMUL);
-        }
-        if (cpuFeatures.fBMI1()) {
-            features.add(AMD64.CPUFeature.BMI1);
-        }
-        if (cpuFeatures.fBMI2()) {
-            features.add(AMD64.CPUFeature.BMI2);
-        }
-        if (cpuFeatures.fRTM()) {
-            features.add(AMD64.CPUFeature.RTM);
-        }
-        if (cpuFeatures.fADX()) {
-            features.add(AMD64.CPUFeature.ADX);
-        }
-        if (cpuFeatures.fAVX512F()) {
-            features.add(AMD64.CPUFeature.AVX512F);
-        }
-        if (cpuFeatures.fAVX512DQ()) {
-            features.add(AMD64.CPUFeature.AVX512DQ);
-        }
-        if (cpuFeatures.fAVX512PF()) {
-            features.add(AMD64.CPUFeature.AVX512PF);
-        }
-        if (cpuFeatures.fAVX512ER()) {
-            features.add(AMD64.CPUFeature.AVX512ER);
-        }
-        if (cpuFeatures.fAVX512CD()) {
-            features.add(AMD64.CPUFeature.AVX512CD);
-        }
-        if (cpuFeatures.fAVX512BW()) {
-            features.add(AMD64.CPUFeature.AVX512BW);
-        }
 
+        ArrayList<String> unknownFeatures = new ArrayList<>();
+        for (AMD64.CPUFeature feature : AMD64.CPUFeature.values()) {
+            if (isFeaturePresent(feature, (Pointer) cpuFeatures, unknownFeatures)) {
+                features.add(feature);
+            }
+        }
+        if (!unknownFeatures.isEmpty()) {
+            throw VMError.shouldNotReachHere("Native image does not support the following JVMCI CPU features: " + unknownFeatures);
+        }
         return features;
     }
 
+    @Uninterruptible(reason = "Thread state not set up yet.")
     @Override
-    public void verifyHostSupportsArchitecture(Architecture imageArchitecture) {
-        AMD64 architecture = (AMD64) imageArchitecture;
-        EnumSet<AMD64.CPUFeature> features = determineHostCPUFeatures();
+    public int verifyHostSupportsArchitectureEarly() {
+        return AMD64LibCHelper.checkCPUFeatures(BUILDTIME_CPU_FEATURE_MASK.get());
+    }
 
-        if (!features.containsAll(architecture.getFeatures())) {
-            List<AMD64.CPUFeature> missingFeatures = new ArrayList<>();
-            for (AMD64.CPUFeature feature : architecture.getFeatures()) {
-                if (!features.contains(feature)) {
-                    missingFeatures.add(feature);
-                }
-            }
-            throw VMError.shouldNotReachHere("Current target does not support the following CPU features that are required by the image: " + missingFeatures);
-        }
+    @Uninterruptible(reason = "Thread state not set up yet.")
+    @Override
+    public void verifyHostSupportsArchitectureEarlyOrExit() {
+        AMD64LibCHelper.checkCPUFeaturesOrExit(BUILDTIME_CPU_FEATURE_MASK.get(), IMAGE_CPU_FEATURE_ERROR_MSG.get());
+    }
+
+    /**
+     * Returns {@code true} if the CPU feature set will be updated for JIT compilations. As a
+     * consequence, the size of {@link AMD64#XMM} registers is different AOT vs JIT.
+     *
+     * Updating CPU features in only enabled if {@linkplain SubstrateOptions#SpawnIsolates isolates
+     * are enabled}. There is not a fundamental problem. The only reason for this restriction is
+     * that with isolates we have a {@linkplain ReservedRegisters#getHeapBaseRegister() heap base
+     * register} which makes dynamic CPU feature checks simple because they do not require an
+     * intermediate register for testing the
+     * {@linkplain com.oracle.svm.core.cpufeature.RuntimeCPUFeatureCheckImpl cpu feature mask}.
+     */
+    public static boolean canUpdateCPUFeatures() {
+        return SubstrateOptions.SpawnIsolates.getValue();
     }
 
     @Override
     public void enableFeatures(Architecture runtimeArchitecture) {
-        if (CalleeSavedRegisters.supportedByPlatform()) {
-            /*
-             * The code for saving and restoring callee-saved registers currently only covers the
-             * registers and register bit width for the CPU features used at image build time. To
-             * enable more CPU features for JIT compilation at run time, the new CPU features
-             * computed by this method would need to be taken into account. Until this is
-             * implemented as part of GR-20653, JIT compilation uses the same CPU features as AOT
-             * compilation.
-             */
+        if (!canUpdateCPUFeatures()) {
             return;
         }
+        // update cpu features
         AMD64 architecture = (AMD64) runtimeArchitecture;
         EnumSet<AMD64.CPUFeature> features = determineHostCPUFeatures();
         architecture.getFeatures().addAll(features);
+
+        // update largest storable kind
+        AMD64Kind largestStorableKind = (new AMD64(features, architecture.getFlags())).getLargestStorableKind(AMD64.XMM);
+        JVMCISubstitutions.updateLargestStorableKind(architecture, largestStorableKind);
     }
 }

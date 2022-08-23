@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,7 +24,9 @@
  */
 package com.oracle.svm.core.meta;
 
+import com.oracle.svm.core.annotate.ExplicitCallingConvention;
 import com.oracle.svm.core.deopt.Deoptimizer;
+import com.oracle.svm.core.graal.code.SubstrateCallingConventionKind;
 
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
@@ -38,6 +40,17 @@ public interface SharedMethod extends ResolvedJavaMethod {
      * must not be called from Java code then.
      */
     boolean isEntryPoint();
+
+    default SubstrateCallingConventionKind getCallingConventionKind() {
+        ExplicitCallingConvention explicitCallingConvention = getAnnotation(ExplicitCallingConvention.class);
+        if (explicitCallingConvention != null) {
+            return explicitCallingConvention.value();
+        } else if (isEntryPoint()) {
+            return SubstrateCallingConventionKind.Native;
+        } else {
+            return SubstrateCallingConventionKind.Java;
+        }
+    }
 
     boolean hasCalleeSavedRegisters();
 
@@ -55,7 +68,10 @@ public interface SharedMethod extends ResolvedJavaMethod {
      */
     Deoptimizer.StubType getDeoptStubType();
 
+    boolean hasCodeOffsetInImage();
+
     int getCodeOffsetInImage();
 
     int getDeoptOffsetInImage();
+
 }

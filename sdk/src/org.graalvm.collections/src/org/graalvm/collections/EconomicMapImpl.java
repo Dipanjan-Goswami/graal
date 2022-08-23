@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,7 +41,6 @@
 package org.graalvm.collections;
 
 import java.util.Iterator;
-import java.util.Objects;
 import java.util.function.BiFunction;
 
 /**
@@ -240,7 +239,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
     @SuppressWarnings("unchecked")
     @Override
     public V get(K key) {
-        Objects.requireNonNull(key);
+        checkKeyNonNull(key);
 
         int index = find(key);
         if (index != -1) {
@@ -420,9 +419,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
     @SuppressWarnings("unchecked")
     @Override
     public V put(K key, V value) {
-        if (key == null) {
-            throw new UnsupportedOperationException("null not supported as key!");
-        }
+        checkKeyNonNull(key);
         int index = find(key);
         if (index != -1) {
             Object oldValue = getValue(index);
@@ -583,7 +580,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
         setHashArray(hashIndex, entryIndex + 1);
         Object value = getRawValue(entryIndex);
         if (oldIndex != -1) {
-            assert entryIndex != oldIndex : "this cannot happend and would create an endless collision link cycle";
+            assert entryIndex != oldIndex : "this cannot happen and would create an endless collision link cycle";
             if (value instanceof CollisionLink) {
                 CollisionLink collisionLink = (CollisionLink) value;
                 setRawValue(entryIndex, new CollisionLink(collisionLink.value, oldIndex));
@@ -622,9 +619,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
     @SuppressWarnings("unchecked")
     @Override
     public V removeKey(K key) {
-        if (key == null) {
-            throw new UnsupportedOperationException("null not supported as key!");
-        }
+        checkKeyNonNull(key);
         int index;
         if (hasHashArray()) {
             index = this.findAndRemoveHash(key);
@@ -638,6 +633,12 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
             return (V) value;
         }
         return null;
+    }
+
+    private void checkKeyNonNull(K key) {
+        if (key == null) {
+            throw new UnsupportedOperationException("null not supported as key!");
+        }
     }
 
     /**
@@ -697,10 +698,10 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
 
     @Override
     public Iterable<V> getValues() {
-        return new Iterable<V>() {
+        return new Iterable<>() {
             @Override
             public Iterator<V> iterator() {
-                return new SparseMapIterator<V>() {
+                return new SparseMapIterator<>() {
                     @SuppressWarnings("unchecked")
                     @Override
                     public V next() {
@@ -734,7 +735,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
 
     @Override
     public MapCursor<K, V> getEntries() {
-        return new MapCursor<K, V>() {
+        return new MapCursor<>() {
             int current = -1;
 
             @Override
@@ -769,6 +770,14 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
                     EconomicMapImpl.this.findAndRemoveHash(EconomicMapImpl.this.getKey(current));
                 }
                 current = EconomicMapImpl.this.remove(current) - 1;
+            }
+
+            @SuppressWarnings("unchecked")
+            @Override
+            public V setValue(V newValue) {
+                V oldValue = (V) EconomicMapImpl.this.getValue(current);
+                EconomicMapImpl.this.setValue(current, newValue);
+                return oldValue;
             }
         };
     }
@@ -842,7 +851,7 @@ final class EconomicMapImpl<K, V> implements EconomicMap<K, V>, EconomicSet<K> {
 
     @Override
     public Iterator<K> iterator() {
-        return new SparseMapIterator<K>() {
+        return new SparseMapIterator<>() {
             @SuppressWarnings("unchecked")
             @Override
             public K next() {

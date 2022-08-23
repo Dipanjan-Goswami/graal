@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -84,6 +84,31 @@ public interface Platform {
         return platformGroup.isInstance(ImageSingletons.lookup(Platform.class));
     }
 
+    /**
+     * Returns the string representing Platform's OS name.
+     * <p>
+     * This method should be implemented either in a final class or as default method in respective
+     * OS interface.
+     *
+     * @since 21.0
+     */
+    default String getOS() {
+        throw new UnsupportedOperationException("Platform `" + this.getClass().getCanonicalName() + "`, doesn't implement getOS");
+    }
+
+    /**
+     * Returns the string representing Platform's architecture name. This value should be the same
+     * as desired os.arch system property.
+     * <p>
+     * This method should be implemented either in final class or as default method in respective
+     * architecture interface.
+     *
+     * @since 21.0
+     */
+    default String getArchitecture() {
+        throw new UnsupportedOperationException("Platform `" + this.getClass().getCanonicalName() + "`, doesn't implement getArchitecture");
+    }
+
     /*
      * The standard architectures that are supported.
      */
@@ -94,6 +119,14 @@ public interface Platform {
      */
     interface AMD64 extends Platform {
 
+        /**
+         * Returns string representing AMD64 architecture.
+         *
+         * @since 21.0
+         */
+        default String getArchitecture() {
+            return "amd64";
+        }
     }
 
     /**
@@ -103,6 +136,14 @@ public interface Platform {
      */
     interface AARCH64 extends Platform {
 
+        /**
+         * Returns string representing AARCH64 architecture.
+         *
+         * @since 21.0
+         */
+        default String getArchitecture() {
+            return "aarch64";
+        }
     }
 
     /*
@@ -115,15 +156,73 @@ public interface Platform {
      */
     interface LINUX extends InternalPlatform.PLATFORM_JNI {
 
+        /**
+         * Returns string representing LINUX OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return LINUX.class.getSimpleName().toLowerCase();
+        }
     }
 
     /**
-     * Supported operating system: Darwin (MacOS).
+     * Supported operating system: Android.
+     *
+     * @since 21.0
+     */
+    interface ANDROID extends LINUX {
+
+        /**
+         * Returns string representing ANDROID OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return ANDROID.class.getSimpleName().toLowerCase();
+        }
+    }
+
+    /**
+     * Basis for all Apple operating systems (MacOS and iOS).
      *
      * @since 19.0
      */
     interface DARWIN extends InternalPlatform.PLATFORM_JNI {
+    }
 
+    /**
+     * Supported operating system: iOS.
+     *
+     * @since 21.0
+     */
+    interface IOS extends DARWIN {
+
+        /**
+         * Returns string representing iOS OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return IOS.class.getSimpleName().toLowerCase();
+        }
+    }
+
+    /**
+     * Supported operating system: MacOS.
+     *
+     * @since 22.1
+     */
+    interface MACOS extends DARWIN {
+
+        /**
+         * Returns string representing MACOS OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return "darwin";
+        }
     }
 
     /**
@@ -133,6 +232,46 @@ public interface Platform {
      */
     interface WINDOWS extends InternalPlatform.PLATFORM_JNI {
 
+        /**
+         * Returns string representing WINDOWS OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return WINDOWS.class.getSimpleName().toLowerCase();
+        }
+    }
+
+    /**
+     * Basis for all Linux operating systems on AMD64 (LINUX_AMD64).
+     *
+     * @since 22.1
+     */
+    interface LINUX_AMD64_BASE extends LINUX, AMD64 {
+    }
+
+    /**
+     * Basis for all Linux operating systems on AARCH64 (LINUX_AARCH64 & ANDROID_AARCH64).
+     *
+     * @since 22.1
+     */
+    interface LINUX_AARCH64_BASE extends LINUX, AARCH64 {
+    }
+
+    /**
+     * Basis for all Apple operating systems on AMD64 (MACOS_AMD64 & IOS_AMD64).
+     *
+     * @since 22.1
+     */
+    interface DARWIN_AMD64 extends DARWIN, AMD64 {
+    }
+
+    /**
+     * Basis for all Apple operating systems on AMD64 (MACOS_AMD64 & IOS_AMD64).
+     *
+     * @since 22.1
+     */
+    interface DARWIN_AARCH64 extends DARWIN, AARCH64 {
     }
 
     /*
@@ -143,7 +282,7 @@ public interface Platform {
      *
      * @since 19.0
      */
-    class LINUX_AMD64 implements LINUX, AMD64 {
+    class LINUX_AMD64 implements LINUX, LINUX_AMD64_BASE {
 
         /**
          * Instantiates a marker instance of this platform.
@@ -160,7 +299,7 @@ public interface Platform {
      *
      * @since 19.0
      */
-    final class LINUX_AARCH64 implements LINUX, AARCH64 {
+    final class LINUX_AARCH64 implements LINUX, LINUX_AARCH64_BASE {
 
         /**
          * Instantiates a marker instance of this platform.
@@ -173,34 +312,83 @@ public interface Platform {
     }
 
     /**
-     * Supported leaf platform: Darwin (MacOS) on x86 64-bit.
+     * Supported leaf platform: Android on AArch64 64-bit.
      *
-     * @since 19.0
+     * @since 21.0
      */
-    class DARWIN_AMD64 implements DARWIN, AMD64 {
+    final class ANDROID_AARCH64 implements ANDROID, LINUX_AARCH64_BASE {
 
         /**
          * Instantiates a marker instance of this platform.
          *
-         * @since 19.0
+         * @since 21.0
          */
-        public DARWIN_AMD64() {
+        public ANDROID_AARCH64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: iOS on x86 64-bit.
+     *
+     * @since 21.3
+     */
+    final class IOS_AMD64 implements IOS, DARWIN_AMD64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 21.3
+         */
+        public IOS_AMD64() {
         }
     }
 
     /**
-     * Supported leaf platform: Darwin (MacOS) on AArch 64-bit.
+     * Supported leaf platform: iOS on AArch 64-bit.
      *
-     * @since 2.0
+     * @since 21.0
      */
-    final class DARWIN_AARCH64 implements DARWIN, AARCH64 {
+    final class IOS_AARCH64 implements IOS, DARWIN_AARCH64 {
 
         /**
          * Instantiates a marker instance of this platform.
          *
-         * @since 2.0
+         * @since 21.0
          */
-        public DARWIN_AARCH64() {
+        public IOS_AARCH64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: MacOS on x86 64-bit.
+     *
+     * @since 22.1
+     */
+    final class MACOS_AMD64 implements MACOS, DARWIN_AMD64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.1
+         */
+        public MACOS_AMD64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: MacOS on AArch 64-bit.
+     *
+     * @since 22.1
+     */
+    final class MACOS_AARCH64 implements MACOS, DARWIN_AARCH64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.1
+         */
+        public MACOS_AARCH64() {
         }
     }
 
@@ -209,7 +397,7 @@ public interface Platform {
      *
      * @since 19.0
      */
-    class WINDOWS_AMD64 implements WINDOWS, AMD64 {
+    final class WINDOWS_AMD64 implements WINDOWS, AMD64 {
 
         /**
          * Instantiates a marker instance of this platform.
@@ -217,6 +405,23 @@ public interface Platform {
          * @since 19.0
          */
         public WINDOWS_AMD64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: Windows on AArch 64-bit.
+     *
+     * @since 22.0
+     */
+    final class WINDOWS_AARCH64 implements WINDOWS, AARCH64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.0
+         */
+        public WINDOWS_AARCH64() {
         }
 
     }

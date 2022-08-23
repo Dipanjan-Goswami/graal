@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,11 +42,11 @@ import org.graalvm.compiler.nodes.calc.AddNode;
 import org.graalvm.compiler.nodes.calc.BinaryArithmeticNode;
 import org.graalvm.compiler.nodes.cfg.Block;
 import org.graalvm.compiler.nodes.spi.CoreProviders;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
 import org.graalvm.compiler.phases.common.FrameStateAssignmentPhase;
 import org.graalvm.compiler.phases.common.GuardLoweringPhase;
-import org.graalvm.compiler.phases.common.LoweringPhase;
+import org.graalvm.compiler.phases.common.HighTierLoweringPhase;
+import org.graalvm.compiler.phases.common.MidTierLoweringPhase;
 import org.graalvm.compiler.phases.schedule.SchedulePhase;
 import org.graalvm.compiler.phases.schedule.SchedulePhase.SchedulingStrategy;
 import org.graalvm.compiler.phases.tiers.MidTierContext;
@@ -72,7 +72,7 @@ public class SchedulingTest2 extends GraphScheduleTest {
         beginNode.setNext(returnNode);
         debug.dump(DebugContext.BASIC_LEVEL, graph, "Graph");
         SchedulePhase schedulePhase = new SchedulePhase(SchedulingStrategy.EARLIEST_WITH_GUARD_ORDER);
-        schedulePhase.apply(graph);
+        schedulePhase.apply(graph, getDefaultHighTierContext());
         ScheduleResult schedule = graph.getLastSchedule();
         BlockMap<List<Node>> blockToNodesMap = schedule.getBlockToNodesMap();
         NodeMap<Block> nodeToBlock = schedule.getNodeToBlockMap();
@@ -98,15 +98,15 @@ public class SchedulingTest2 extends GraphScheduleTest {
         }
 
         CoreProviders context = getProviders();
-        new LoweringPhase(createCanonicalizerPhase(), LoweringTool.StandardLoweringStage.HIGH_TIER).apply(graph, context);
-        new LoweringPhase(createCanonicalizerPhase(), LoweringTool.StandardLoweringStage.MID_TIER).apply(graph, context);
+        new HighTierLoweringPhase(createCanonicalizerPhase()).apply(graph, context);
         MidTierContext midContext = new MidTierContext(getProviders(), getTargetProvider(), OptimisticOptimizations.ALL, graph.getProfilingInfo());
-
         new GuardLoweringPhase().apply(graph, midContext);
+        new MidTierLoweringPhase(createCanonicalizerPhase()).apply(graph, context);
+
         FrameStateAssignmentPhase phase = new FrameStateAssignmentPhase();
         phase.apply(graph);
 
-        schedulePhase.apply(graph);
+        schedulePhase.apply(graph, midContext);
         schedule = graph.getLastSchedule();
         blockToNodesMap = schedule.getBlockToNodesMap();
         nodeToBlock = schedule.getNodeToBlockMap();

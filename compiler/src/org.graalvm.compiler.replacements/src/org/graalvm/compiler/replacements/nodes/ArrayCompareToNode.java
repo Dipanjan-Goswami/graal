@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,73 +24,89 @@
  */
 package org.graalvm.compiler.replacements.nodes;
 
-import static org.graalvm.compiler.core.common.GraalOptions.UseGraalStubs;
-import static org.graalvm.compiler.nodeinfo.InputType.Memory;
 import static org.graalvm.compiler.nodeinfo.NodeCycles.CYCLES_1024;
-import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_1024;
+import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_16;
 
-import org.graalvm.compiler.core.common.spi.ForeignCallLinkage;
+import java.util.EnumSet;
+
+import org.graalvm.compiler.core.common.Stride;
+import org.graalvm.compiler.core.common.spi.ForeignCallDescriptor;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.graph.spi.Canonicalizable;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
+import org.graalvm.compiler.lir.GenerateStub;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.ConstantNode;
-import org.graalvm.compiler.nodes.FixedWithNextNode;
 import org.graalvm.compiler.nodes.NamedLocationIdentity;
 import org.graalvm.compiler.nodes.ValueNode;
-import org.graalvm.compiler.nodes.ValueNodeUtil;
-import org.graalvm.compiler.nodes.memory.MemoryAccess;
-import org.graalvm.compiler.nodes.memory.MemoryKill;
-import org.graalvm.compiler.nodes.spi.LIRLowerable;
+import org.graalvm.compiler.nodes.spi.Canonicalizable;
+import org.graalvm.compiler.nodes.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodes.spi.NodeLIRBuilderTool;
 import org.graalvm.compiler.nodes.spi.Virtualizable;
 import org.graalvm.compiler.nodes.spi.VirtualizerTool;
 import org.graalvm.compiler.nodes.util.GraphUtil;
-import org.graalvm.word.LocationIdentity;
+import org.graalvm.word.Pointer;
 
 import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.Value;
 
 // JaCoCo Exclude
 
 /**
  * Compares two arrays lexicographically.
  */
-@NodeInfo(cycles = CYCLES_1024, size = SIZE_1024)
-public final class ArrayCompareToNode extends FixedWithNextNode implements LIRLowerable, Canonicalizable, Virtualizable, MemoryAccess {
+@NodeInfo(cycles = CYCLES_1024, size = SIZE_16)
+public class ArrayCompareToNode extends PureFunctionStubIntrinsicNode implements Canonicalizable, Virtualizable {
 
     public static final NodeClass<ArrayCompareToNode> TYPE = NodeClass.create(ArrayCompareToNode.class);
 
-    /** {@link JavaKind} of one array to compare. */
-    protected final JavaKind kind1;
+    /** {@link Stride} of one array to compare. */
+    protected final Stride strideA;
 
-    /** {@link JavaKind} of the other array to compare. */
-    protected final JavaKind kind2;
+    /** {@link Stride} of the other array to compare. */
+    protected final Stride strideB;
 
     /** One array to be tested for equality. */
-    @Input ValueNode array1;
+    @Input protected ValueNode arrayA;
+
+    /** Length of array A. */
+    @Input protected ValueNode lengthA;
 
     /** The other array to be tested for equality. */
-    @Input ValueNode array2;
+    @Input protected ValueNode arrayB;
 
-    /** Length of one array. */
-    @Input ValueNode length1;
+    /** Length of array B. */
+    @Input protected ValueNode lengthB;
 
-    /** Length of the other array. */
-    @Input ValueNode length2;
+    public ArrayCompareToNode(ValueNode arrayA, ValueNode lengthA, ValueNode arrayB, ValueNode lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB) {
+        this(TYPE, arrayA, lengthA, arrayB, lengthB, strideA, strideB);
+    }
 
-    @OptionalInput(Memory) MemoryKill lastLocationAccess;
+    public ArrayCompareToNode(ValueNode arrayA, ValueNode lengthA, ValueNode arrayB, ValueNode lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB,
+                    @ConstantNodeParameter EnumSet<?> runtimeCheckedCPUFeatures) {
+        this(TYPE, arrayA, lengthA, arrayB, lengthB, strideA, strideB, runtimeCheckedCPUFeatures);
+    }
 
-    public ArrayCompareToNode(ValueNode array1, ValueNode array2, ValueNode length1, ValueNode length2, @ConstantNodeParameter JavaKind kind1, @ConstantNodeParameter JavaKind kind2) {
-        super(TYPE, StampFactory.forKind(JavaKind.Int));
-        this.kind1 = kind1;
-        this.kind2 = kind2;
-        this.array1 = array1;
-        this.array2 = array2;
-        this.length1 = length1;
-        this.length2 = length2;
+    protected ArrayCompareToNode(NodeClass<? extends ArrayCompareToNode> c, ValueNode arrayA, ValueNode lengthA, ValueNode arrayB, ValueNode lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB) {
+        this(c, arrayA, lengthA, arrayB, lengthB, strideA, strideB, null);
+    }
+
+    protected ArrayCompareToNode(NodeClass<? extends ArrayCompareToNode> c, ValueNode arrayA, ValueNode lengthA, ValueNode arrayB, ValueNode lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB,
+                    @ConstantNodeParameter EnumSet<?> runtimeCheckedCPUFeatures) {
+        super(c, StampFactory.forKind(JavaKind.Int), runtimeCheckedCPUFeatures, NamedLocationIdentity.getArrayLocation(JavaKind.Byte));
+        this.strideA = strideA;
+        this.strideB = strideB;
+        this.arrayA = arrayA;
+        this.lengthA = lengthA;
+        this.arrayB = arrayB;
+        this.lengthB = lengthB;
     }
 
     @Override
@@ -98,8 +114,8 @@ public final class ArrayCompareToNode extends FixedWithNextNode implements LIRLo
         if (tool.allUsagesAvailable() && hasNoUsages()) {
             return null;
         }
-        ValueNode a1 = GraphUtil.unproxify(array1);
-        ValueNode a2 = GraphUtil.unproxify(array2);
+        ValueNode a1 = GraphUtil.unproxify(arrayA);
+        ValueNode a2 = GraphUtil.unproxify(arrayB);
         if (a1 == a2) {
             return ConstantNode.forInt(0);
         }
@@ -108,8 +124,8 @@ public final class ArrayCompareToNode extends FixedWithNextNode implements LIRLo
 
     @Override
     public void virtualize(VirtualizerTool tool) {
-        ValueNode alias1 = tool.getAlias(array1);
-        ValueNode alias2 = tool.getAlias(array2);
+        ValueNode alias1 = tool.getAlias(arrayA);
+        ValueNode alias2 = tool.getAlias(arrayB);
         if (alias1 == alias2) {
             // the same virtual objects will always have the same contents
             tool.replaceWithValue(ConstantNode.forInt(0, graph()));
@@ -117,44 +133,63 @@ public final class ArrayCompareToNode extends FixedWithNextNode implements LIRLo
     }
 
     @NodeIntrinsic
-    public static native int compareTo(Object array1, Object array2, int length1, int length2, @ConstantNodeParameter JavaKind kind1, @ConstantNodeParameter JavaKind kind2);
+    @GenerateStub(name = "byteArrayCompareToByteArray", parameters = {"S1", "S1"})
+    @GenerateStub(name = "byteArrayCompareToCharArray", parameters = {"S1", "S2"})
+    @GenerateStub(name = "charArrayCompareToByteArray", parameters = {"S2", "S1"})
+    @GenerateStub(name = "charArrayCompareToCharArray", parameters = {"S2", "S2"})
+    public static native int compareTo(Pointer arrayA, int lengthA, Pointer arrayB, int lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB);
 
-    public JavaKind getKind1() {
-        return kind1;
+    @NodeIntrinsic
+    public static native int compareTo(Pointer arrayA, int lengthA, Pointer arrayB, int lengthB,
+                    @ConstantNodeParameter Stride strideA,
+                    @ConstantNodeParameter Stride strideB,
+                    @ConstantNodeParameter EnumSet<?> runtimeCheckedCPUFeatures);
+
+    public Stride getStrideA() {
+        return strideA;
     }
 
-    public JavaKind getKind2() {
-        return kind2;
+    public Stride getStrideB() {
+        return strideB;
+    }
+
+    public ValueNode getArrayA() {
+        return arrayA;
+    }
+
+    public ValueNode getLengthA() {
+        return lengthA;
+    }
+
+    public ValueNode getArrayB() {
+        return arrayB;
+    }
+
+    public ValueNode getLengthB() {
+        return lengthB;
     }
 
     @Override
-    public void generate(NodeLIRBuilderTool gen) {
-        if (UseGraalStubs.getValue(graph().getOptions())) {
-            ForeignCallLinkage linkage = gen.lookupGraalStub(this);
-            if (linkage != null) {
-                Value result = gen.getLIRGeneratorTool().emitForeignCall(linkage, null, gen.operand(array1), gen.operand(array2), gen.operand(length1), gen.operand(length2));
-                gen.setResult(this, result);
-                return;
-            }
-        }
-
-        Value result = gen.getLIRGeneratorTool().emitArrayCompareTo(kind1, kind2, gen.operand(array1), gen.operand(array2), gen.operand(length1), gen.operand(length2));
-        gen.setResult(this, result);
+    public ForeignCallDescriptor getForeignCallDescriptor() {
+        return ArrayCompareToForeignCalls.getStub(this);
     }
 
     @Override
-    public LocationIdentity getLocationIdentity() {
-        return kind1 != kind2 ? LocationIdentity.ANY_LOCATION : NamedLocationIdentity.getArrayLocation(kind1);
+    public ValueNode[] getForeignCallArguments() {
+        return new ValueNode[]{arrayA, lengthA, arrayB, lengthB};
     }
 
     @Override
-    public MemoryKill getLastLocationAccess() {
-        return lastLocationAccess;
-    }
-
-    @Override
-    public void setLastLocationAccess(MemoryKill lla) {
-        updateUsages(ValueNodeUtil.asNode(lastLocationAccess), ValueNodeUtil.asNode(lla));
-        lastLocationAccess = lla;
+    public void emitIntrinsic(NodeLIRBuilderTool gen) {
+        gen.setResult(this, gen.getLIRGeneratorTool().emitArrayCompareTo(
+                        strideA,
+                        strideB,
+                        getRuntimeCheckedCPUFeatures(),
+                        gen.operand(arrayA),
+                        gen.operand(lengthA),
+                        gen.operand(arrayB),
+                        gen.operand(lengthB)));
     }
 }

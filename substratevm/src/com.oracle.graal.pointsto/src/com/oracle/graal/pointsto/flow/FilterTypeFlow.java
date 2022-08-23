@@ -24,30 +24,36 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import org.graalvm.compiler.graph.NodeSourcePosition;
+
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
 
-public class FilterTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
 
-    private final AnalysisType type;
+/**
+ * The points-to analysis model of an {@code InstanceOfNode}, which represents an instanceof test.
+ */
+public class FilterTypeFlow extends TypeFlow<BytecodePosition> {
+
     /**
-     * If the filter is exact we only compare with the {@link #type}, not including its instantiated
-     * sub-types, otherwise we compare with the entire type hierarchy rooted at {@link #type}.
+     * If the filter is exact we only compare with the {@link #declaredType}, not including its
+     * instantiated sub-types, otherwise we compare with the entire type hierarchy rooted at
+     * {@link #declaredType}.
      */
     private final boolean isExact;
+    /** True if the filter allows types assignable from the test type, false otherwise. */
     private final boolean isAssignable;
+    /** True if the filter allows null, false otherwise. */
     private final boolean includeNull;
 
-    public FilterTypeFlow(ValueNode node, AnalysisType type, boolean isAssignable, boolean includeNull) {
-        this(node, type, false, isAssignable, includeNull);
+    public FilterTypeFlow(NodeSourcePosition position, AnalysisType filterType, boolean isAssignable, boolean includeNull) {
+        this(position, filterType, false, isAssignable, includeNull);
     }
 
-    public FilterTypeFlow(ValueNode node, AnalysisType type, boolean isExact, boolean isAssignable, boolean includeNull) {
-        super(node, null);
-        this.type = type;
+    public FilterTypeFlow(BytecodePosition position, AnalysisType filterType, boolean isExact, boolean isAssignable, boolean includeNull) {
+        super(position, filterType);
         this.isExact = isExact;
         this.isAssignable = isAssignable;
         this.includeNull = includeNull;
@@ -55,26 +61,18 @@ public class FilterTypeFlow extends TypeFlow<ValueNode> {
 
     public FilterTypeFlow(MethodFlowsGraph methodFlows, FilterTypeFlow original) {
         super(original, methodFlows);
-        this.type = original.type;
         this.isExact = original.isExact;
         this.isAssignable = original.isAssignable;
         this.includeNull = original.includeNull;
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new FilterTypeFlow(methodFlows, this);
     }
 
     @Override
-    public TypeState filter(BigBang bb, TypeState update) {
-        if (update.isUnknown()) {
-            // Filtering UnknownTypeState would otherwise return EmptyTypeState.
-            AnalysisMethod method = (AnalysisMethod) source.graph().method();
-            bb.reportIllegalUnknownUse(method, source, "Illegal: Filter of UnknownTypeState objects.");
-            return TypeState.forEmpty();
-        }
-
+    public TypeState filter(PointsToAnalysis bb, TypeState update) {
         TypeState result;
         if (isExact) {
             /*
@@ -82,9 +80,9 @@ public class FilterTypeFlow extends TypeFlow<ValueNode> {
              * its entire hierarchy.
              */
             if (isAssignable) {
-                result = TypeState.forIntersection(bb, update, TypeState.forExactType(bb, type, includeNull));
+                result = TypeState.forIntersection(bb, update, TypeState.forExactType(bb, declaredType, includeNull));
             } else {
-                result = TypeState.forSubtraction(bb, update, TypeState.forExactType(bb, type, !includeNull));
+                result = TypeState.forSubtraction(bb, update, TypeState.forExactType(bb, declaredType, !includeNull));
             }
         } else {
             /*
@@ -93,23 +91,41 @@ public class FilterTypeFlow extends TypeFlow<ValueNode> {
              * instantiated sub-types).
              */
             if (isAssignable) {
-                result = TypeState.forIntersection(bb, update, type.getTypeFlow(bb, includeNull).getState());
+                result = TypeState.forIntersection(bb, update, declaredType.getAssignableTypes(includeNull));
             } else {
-                result = TypeState.forSubtraction(bb, update, type.getTypeFlow(bb, !includeNull).getState());
+                result = TypeState.forSubtraction(bb, update, declaredType.getAssignableTypes(!includeNull));
             }
         }
-
         return result;
     }
 
     @Override
-    public boolean addState(BigBang bb, TypeState add) {
-        assert this.isClone();
-        return super.addState(bb, add);
+    protected void onInputSaturated(PointsToAnalysis bb, TypeFlow<?> input) {
+        if (isAssignable) {
+            /* Swap this flow out at its uses/observers with its declared type flow. */
+            setSaturated();
+            swapOut(bb, declaredType.getTypeFlow(bb, includeNull));
+        } else {
+            super.onInputSaturated(bb, input);
+        }
     }
 
-    public AnalysisType getType() {
-        return type;
+    @Override
+    protected void notifyUseOfSaturation(PointsToAnalysis bb, TypeFlow<?> use) {
+        if (isAssignable) {
+            swapAtUse(bb, declaredType.getTypeFlow(bb, includeNull), use);
+        } else {
+            super.notifyUseOfSaturation(bb, use);
+        }
+    }
+
+    @Override
+    protected void notifyObserverOfSaturation(PointsToAnalysis bb, TypeFlow<?> observer) {
+        if (isAssignable) {
+            swapAtObserver(bb, declaredType.getTypeFlow(bb, includeNull), observer);
+        } else {
+            super.notifyObserverOfSaturation(bb, observer);
+        }
     }
 
     public boolean isExact() {
@@ -126,6 +142,6 @@ public class FilterTypeFlow extends TypeFlow<ValueNode> {
 
     @Override
     public String toString() {
-        return "FilterTypeFlow<" + type + ", isAssignable: " + isAssignable + ", includeNull: " + includeNull + ">";
+        return "FilterTypeFlow<" + declaredType + ", isAssignable: " + isAssignable + ", includeNull: " + includeNull + ">";
     }
 }

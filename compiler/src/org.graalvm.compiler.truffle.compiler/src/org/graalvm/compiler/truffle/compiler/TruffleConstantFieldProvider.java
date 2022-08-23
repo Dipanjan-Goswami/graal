@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,25 +24,24 @@
  */
 package org.graalvm.compiler.truffle.compiler;
 
-import org.graalvm.collections.EconomicMap;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.graalvm.compiler.core.common.spi.ConstantFieldProvider;
 import org.graalvm.compiler.truffle.common.TruffleCompilerRuntime;
 import org.graalvm.compiler.truffle.common.TruffleCompilerRuntime.ConstantFieldInfo;
+import org.graalvm.compiler.truffle.compiler.substitutions.KnownTruffleTypes;
 
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaField;
 
-public class TruffleConstantFieldProvider implements ConstantFieldProvider {
-    private final ConstantFieldProvider graalConstantFieldProvider;
-    private final MetaAccessProvider metaAccess;
-    private final EconomicMap<ResolvedJavaField, ConstantFieldInfo> cachedConstantFieldInfo;
+public class TruffleConstantFieldProvider extends TruffleStringConstantFieldProvider {
+    private final ConcurrentHashMap<ResolvedJavaField, ConstantFieldInfo> cachedConstantFieldInfo;
 
-    public TruffleConstantFieldProvider(ConstantFieldProvider graalConstantFieldProvider, MetaAccessProvider metaAccess) {
-        this.graalConstantFieldProvider = graalConstantFieldProvider;
-        this.metaAccess = metaAccess;
-        this.cachedConstantFieldInfo = EconomicMap.create();
+    public TruffleConstantFieldProvider(ConstantFieldProvider graalConstantFieldProvider, MetaAccessProvider metaAccess, KnownTruffleTypes types) {
+        super(graalConstantFieldProvider, metaAccess, types);
+        this.cachedConstantFieldInfo = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -51,6 +50,10 @@ public class TruffleConstantFieldProvider implements ConstantFieldProvider {
         if (!isStaticField && tool.getReceiver().isNull()) {
             // can't be optimized
             return null;
+        }
+        T wellKnownField = readWellKnownConstantTruffleField(field, tool);
+        if (wellKnownField != null) {
+            return wellKnownField;
         }
 
         boolean isArrayField = field.getType().isArray();
@@ -91,12 +94,7 @@ public class TruffleConstantFieldProvider implements ConstantFieldProvider {
     }
 
     private ConstantFieldInfo getConstantFieldInfo(ResolvedJavaField field) {
-        ConstantFieldInfo info = cachedConstantFieldInfo.get(field);
-        if (info == null) {
-            info = TruffleCompilerRuntime.getRuntime().getConstantFieldInfo(field);
-            cachedConstantFieldInfo.put(field, info);
-        }
-        return info;
+        return cachedConstantFieldInfo.computeIfAbsent(field, f -> TruffleCompilerRuntime.getRuntime().getConstantFieldInfo(f));
     }
 
     private <T> T readConstantFieldFast(ResolvedJavaField field, ConstantFieldTool<T> tool) {

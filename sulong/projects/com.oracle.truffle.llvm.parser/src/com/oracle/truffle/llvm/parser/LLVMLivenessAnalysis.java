@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,7 +29,6 @@
  */
 package com.oracle.truffle.llvm.parser;
 
-import java.io.PrintStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -37,6 +36,7 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
 
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
 import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
@@ -55,6 +55,7 @@ import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgValueInstruc
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ExtractElementInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ExtractValueInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.FenceInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.FreezeInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.GetElementPointerInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.IndirectBranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.InsertElementInstruction;
@@ -73,14 +74,20 @@ import com.oracle.truffle.llvm.parser.model.symbols.instructions.StoreInstructio
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.SwitchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.SwitchOldInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.TerminatingInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.UnaryOperationInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.UnreachableInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.VaArgInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ValueInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidCallInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidInvokeInstruction;
 import com.oracle.truffle.llvm.parser.model.visitors.SymbolVisitor;
+import com.oracle.truffle.llvm.runtime.LLVMContext;
+import com.oracle.truffle.llvm.runtime.types.symbols.LLVMIdentifier;
 import com.oracle.truffle.llvm.runtime.types.symbols.SSAValue;
 
 public final class LLVMLivenessAnalysis {
+
+    private static final Level LIFETIME_ANALYSIS_LOGGING_LEVEL = Level.FINER;
 
     private final FunctionDefinition functionDefinition;
 
@@ -107,20 +114,20 @@ public final class LLVMLivenessAnalysis {
         this.frameSlots = slots.toArray(new SSAValue[slots.size()]);
     }
 
-    public static LLVMLivenessAnalysisResult computeLiveness(Map<InstructionBlock, List<LLVMPhiManager.Phi>> phis, FunctionDefinition functionDefinition, PrintStream logLivenessStream) {
+    public static LLVMLivenessAnalysisResult computeLiveness(Map<InstructionBlock, List<LLVMPhiManager.Phi>> phis, FunctionDefinition functionDefinition) {
         LLVMLivenessAnalysis analysis = new LLVMLivenessAnalysis(functionDefinition);
 
         List<InstructionBlock> blocks = functionDefinition.getBlocks();
         BlockInfo[] blockInfos = analysis.initializeGenKill(phis, blocks);
         ArrayList<InstructionBlock>[] predecessors = computePredecessors(blocks);
         int processedBlocks = iterateToFixedPoint(blocks, analysis.frameSlots.length, blockInfos, predecessors);
-        if (logLivenessStream != null) {
-            analysis.printIntermediateResult(logLivenessStream, blocks, blockInfos, processedBlocks);
+        if (livenessLoggingEnabled()) {
+            analysis.printIntermediateResult(blocks, blockInfos, processedBlocks);
         }
 
         LLVMLivenessAnalysisResult result = analysis.computeLivenessAnalysisResult(blocks, blockInfos, predecessors);
-        if (logLivenessStream != null) {
-            analysis.printResult(logLivenessStream, blocks, result);
+        if (livenessLoggingEnabled()) {
+            analysis.printResult(blocks, result);
         }
         return result;
     }
@@ -202,7 +209,7 @@ public final class LLVMLivenessAnalysis {
         return processedBlocks;
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private LLVMLivenessAnalysisResult computeLivenessAnalysisResult(List<InstructionBlock> blocks, BlockInfo[] blockInfos, ArrayList<InstructionBlock>[] predecessors) {
         ArrayList<NullerInformation>[] nullableWithinBlock = new ArrayList[blocks.size()];
         BitSet[] nullableBeforeBlock = new BitSet[blocks.size()];
@@ -309,7 +316,7 @@ public final class LLVMLivenessAnalysis {
         }
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private static ArrayList<InstructionBlock>[] computePredecessors(List<InstructionBlock> blocks) {
         ArrayList<InstructionBlock>[] result = new ArrayList[blocks.size()];
         for (int i = 0; i < blocks.size(); i++) {
@@ -444,6 +451,11 @@ public final class LLVMLivenessAnalysis {
         }
 
         @Override
+        public void visit(UnaryOperationInstruction operation) {
+            visitLocalRead(operation.getOperand());
+        }
+
+        @Override
         public void visit(BranchInstruction branch) {
         }
 
@@ -526,6 +538,11 @@ public final class LLVMLivenessAnalysis {
         @Override
         public void visit(LoadInstruction load) {
             visitLocalRead(load.getSource());
+        }
+
+        @Override
+        public void visit(VaArgInstruction vaArg) {
+            visitLocalRead(vaArg.getSource());
         }
 
         @Override
@@ -617,6 +634,11 @@ public final class LLVMLivenessAnalysis {
         }
 
         @Override
+        public void visit(FreezeInstruction freeze) {
+            visitLocalRead(freeze.getValue());
+        }
+
+        @Override
         public void visit(DbgDeclareInstruction inst) {
             visitLocalRead(inst.getValue());
         }
@@ -691,77 +713,43 @@ public final class LLVMLivenessAnalysis {
         }
     }
 
-    private void printIntermediateResult(PrintStream logLivenessStream, List<InstructionBlock> blocks, BlockInfo[] blockInfos, int processedBlocks) {
-        StringBuilder builder = new StringBuilder();
-        builder.append(functionDefinition.getName());
-        builder.append(" (processed ");
-        builder.append(processedBlocks);
-        builder.append(" blocks - CFG has ");
-        builder.append(blocks.size());
-        builder.append(" blocks)\n");
-        for (int i = 0; i < blockInfos.length; i++) {
-            BlockInfo blockInfo = blockInfos[i];
-            builder.append("Basic block ");
-            builder.append(i);
-            builder.append(" (");
-            builder.append(blocks.get(i).getName());
-            builder.append(")\n");
-
-            builder.append("  In:      ");
-            builder.append(formatLocals(blockInfo.in));
-            builder.append("\n");
-
-            builder.append("  Gen:     ");
-            builder.append(formatLocals(blockInfo.gen));
-            builder.append("\n");
-
-            builder.append("  Kill:    ");
-            builder.append(formatLocals(blockInfo.kill));
-            builder.append("\n");
-
-            builder.append("  Def:     ");
-            builder.append(formatLocals(blockInfo.defs));
-            builder.append("\n");
-
-            builder.append("  PhiDefs: ");
-            builder.append(formatLocals(blockInfo.phiDefs));
-            builder.append("\n");
-
-            builder.append("  PhiUses: ");
-            builder.append(formatLocals(blockInfo.phiUses));
-            builder.append("\n");
-
-            builder.append("  Out:     ");
-            builder.append(formatLocals(blockInfo.out));
-            builder.append("\n");
-        }
-
-        logLivenessStream.println(builder.toString());
+    private static boolean livenessLoggingEnabled() {
+        return LLVMContext.lifetimeAnalysisLogger().isLoggable(LIFETIME_ANALYSIS_LOGGING_LEVEL);
     }
 
-    private void printResult(PrintStream logLivenessStream, List<InstructionBlock> blocks, LLVMLivenessAnalysisResult result) {
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < blocks.size(); i++) {
-            builder.append("Basic block ");
-            builder.append(i);
-            builder.append(" (");
-            builder.append(blocks.get(i).getName());
-            builder.append(")\n");
+    private static void log(String message, Object... args) {
+        LLVMContext.lifetimeAnalysisLogger().log(LIFETIME_ANALYSIS_LOGGING_LEVEL, String.format(message, args));
+    }
 
-            builder.append("  NullableBefore: ");
-            builder.append(formatLocals(result.nullableBeforeBlock[i]));
-            builder.append("\n");
-
-            builder.append("  NullableWithin:  ");
-            builder.append(formatLocalNullers(result.nullableWithinBlock[i]));
-            builder.append("\n");
-
-            builder.append("  NullableAfter:  ");
-            builder.append(formatLocals(result.nullableAfterBlock[i]));
-            builder.append("\n");
+    private void printIntermediateResult(List<InstructionBlock> blocks, BlockInfo[] blockInfos, int processedBlocks) {
+        log("%s (processed) %d blocks - CFG has %d blocks", functionDefinition.getName(), processedBlocks, blocks.size());
+        for (int i = 0; i < blockInfos.length; i++) {
+            BlockInfo blockInfo = blockInfos[i];
+            log("Basic block  %d (%s)", i, blocks.get(i).getName());
+            log("  In:      %s", formatLocals(blockInfo.in));
+            log("  Gen:     %s", formatLocals(blockInfo.gen));
+            log("  Kill:    %s", formatLocals(blockInfo.kill));
+            log("  Def:     %s", formatLocals(blockInfo.defs));
+            log("  PhiDefs: %s", formatLocals(blockInfo.phiDefs));
+            log("  PhiUses: %s", formatLocals(blockInfo.phiUses));
+            log("  Out:     %s", formatLocals(blockInfo.out));
         }
+    }
 
-        logLivenessStream.println(builder.toString());
+    private void printResult(List<InstructionBlock> blocks, LLVMLivenessAnalysisResult result) {
+        for (int i = 0; i < blocks.size(); i++) {
+            log("Basic block %d (%s)", i, blocks.get(i).getName());
+            log("  NullableBefore: %s", formatLocals(result.nullableBeforeBlock[i]));
+            log("  NullableWithin: %s", formatLocalNullers(result.nullableWithinBlock[i]));
+            log("  NullableAfter:  %s", formatLocals(result.nullableAfterBlock[i]));
+        }
+    }
+
+    private static void appendValue(StringBuilder str, SSAValue value) {
+        str.append(value.getFrameIdentifier());
+        if (value.getName() != null && !LLVMIdentifier.UNKNOWN.equals(value.getName())) {
+            str.append(" (").append(value.getName()).append(')');
+        }
     }
 
     private String formatLocals(BitSet bitSet) {
@@ -771,7 +759,7 @@ public final class LLVMLivenessAnalysis {
             if (result.length() > 0) {
                 result.append(", ");
             }
-            result.append(frameSlots[bitIndex]);
+            appendValue(result, frameSlots[bitIndex]);
         }
         return result.toString();
     }
@@ -782,7 +770,7 @@ public final class LLVMLivenessAnalysis {
             if (result.length() > 0) {
                 result.append(", ");
             }
-            result.append(nuller.getIdentifier());
+            appendValue(result, nuller.getIdentifier());
         }
         return result.toString();
     }

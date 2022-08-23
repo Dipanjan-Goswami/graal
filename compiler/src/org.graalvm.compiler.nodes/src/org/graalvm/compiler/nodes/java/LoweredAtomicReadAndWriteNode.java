@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -48,7 +48,7 @@ import jdk.vm.ci.meta.Value;
 
 /**
  * Represents the lowered version of an atomic read-and-write operation like
- * {@link sun.misc.Unsafe#getAndSetInt(Object, long, int)}.
+ * {@code sun.misc.Unsafe.getAndSetInt(Object, long, int)}.
  */
 @NodeInfo(allowedUsageTypes = {Memory}, cycles = CYCLES_8, size = SIZE_2)
 public final class LoweredAtomicReadAndWriteNode extends FixedAccessNode implements StateSplit, LIRLowerableAccess, SingleMemoryKill {

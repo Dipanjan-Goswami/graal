@@ -29,14 +29,18 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+
 /**
  * Injects the annotated field into the {@link TargetClass}.
  *
- * The field must not be declared static. If instances of the target class are in the native image
- * heap, the field also needs to be annotated with {@link RecomputeFieldValue} to provide a value
- * for the native image objects.
+ * The field must not be declared static. If instances of the target class are in the image heap,
+ * the field also needs to be annotated with {@link RecomputeFieldValue} to provide a value for the
+ * injected field.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.FIELD})
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface Inject {
 }

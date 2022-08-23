@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,10 +29,16 @@
  */
 package com.oracle.truffle.llvm.parser.model.symbols.globals;
 
+import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
 import com.oracle.truffle.llvm.parser.model.SymbolTable;
 import com.oracle.truffle.llvm.parser.model.enums.Linkage;
 import com.oracle.truffle.llvm.parser.model.enums.Visibility;
 import com.oracle.truffle.llvm.parser.model.visitors.SymbolVisitor;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.LLVMSymbol;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.PointerType;
 
 public final class GlobalVariable extends GlobalValueSymbol {
@@ -41,10 +47,17 @@ public final class GlobalVariable extends GlobalValueSymbol {
 
     private final int align;
 
-    private GlobalVariable(boolean isReadOnly, PointerType type, int align, Linkage linkage, Visibility visibility, SymbolTable symbolTable, int value, int index) {
+    private final String sectionName;
+
+    private final boolean isThreadLocal;
+
+    private GlobalVariable(boolean isReadOnly, PointerType type, int align, String sectionName, Linkage linkage, Visibility visibility, boolean threadLocal, SymbolTable symbolTable, int value,
+                    int index) {
         super(type, linkage, visibility, symbolTable, value, index);
         this.isReadOnly = isReadOnly;
         this.align = align;
+        this.isThreadLocal = threadLocal;
+        this.sectionName = sectionName;
     }
 
     @Override
@@ -60,7 +73,29 @@ public final class GlobalVariable extends GlobalValueSymbol {
         return isReadOnly;
     }
 
-    public static GlobalVariable create(boolean isReadOnly, PointerType type, int align, long linkage, long visibility, SymbolTable symbolTable, int value, int index) {
-        return new GlobalVariable(isReadOnly, type, align, Linkage.decode(linkage), Visibility.decode(visibility), symbolTable, value, index);
+    public String getSectionName() {
+        return sectionName;
+    }
+
+    public static GlobalVariable create(boolean isReadOnly, PointerType type, int align, String sectionName, long linkage, long visibility, long threadLocal, SymbolTable symbolTable, int value,
+                    int index) {
+        return new GlobalVariable(isReadOnly, type, align, sectionName, Linkage.decode(linkage), Visibility.decode(visibility), threadLocal > 0, symbolTable, value, index);
+    }
+
+    public boolean isThreadLocal() {
+        return isThreadLocal;
+    }
+
+    @Override
+    public LLVMExpressionNode createNode(LLVMParserRuntime runtime, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        LLVMSymbol symbol = runtime.lookupSymbol(getName());
+        if (symbol.isGlobalVariable()) {
+            symbol = symbol.asGlobalVariable();
+        } else if (symbol.isThreadLocalSymbol()) {
+            symbol = symbol.asThreadLocalSymbol();
+        } else {
+            throw new AssertionError(symbol.getClass());
+        }
+        return CommonNodeFactory.createLiteral(symbol, new PointerType(getType()));
     }
 }

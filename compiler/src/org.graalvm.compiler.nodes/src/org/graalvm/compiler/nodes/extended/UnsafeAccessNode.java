@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,15 +29,19 @@ import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_1;
 
 import java.nio.ByteOrder;
 
+import org.graalvm.compiler.core.common.memory.MemoryOrderMode;
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.graph.spi.Canonicalizable;
-import org.graalvm.compiler.graph.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodeinfo.NodeInfo;
 import org.graalvm.compiler.nodes.FixedWithNextNode;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.NamedLocationIdentity;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.memory.MemoryAccess;
+import org.graalvm.compiler.nodes.memory.OrderedMemoryAccess;
+import org.graalvm.compiler.nodes.spi.Canonicalizable;
+import org.graalvm.compiler.nodes.spi.CanonicalizerTool;
 import org.graalvm.compiler.nodes.type.StampTool;
 import org.graalvm.word.LocationIdentity;
 
@@ -49,33 +53,44 @@ import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
 @NodeInfo(cycles = CYCLES_2, size = SIZE_1)
-public abstract class UnsafeAccessNode extends FixedWithNextNode implements Canonicalizable {
+public abstract class UnsafeAccessNode extends FixedWithNextNode implements Canonicalizable, OrderedMemoryAccess, MemoryAccess {
 
     public static final NodeClass<UnsafeAccessNode> TYPE = NodeClass.create(UnsafeAccessNode.class);
     @Input ValueNode object;
     @Input ValueNode offset;
     protected final JavaKind accessKind;
     protected final LocationIdentity locationIdentity;
-    protected final boolean forceAnyLocation;
+    /** Whether the location identity of this node must not change. */
+    protected final boolean forceLocation;
+    private final MemoryOrderMode memoryOrder;
 
     protected UnsafeAccessNode(NodeClass<? extends UnsafeAccessNode> c, Stamp stamp, ValueNode object, ValueNode offset, JavaKind accessKind, LocationIdentity locationIdentity,
-                    boolean forceAnyLocation) {
+                    boolean forceLocation, MemoryOrderMode memoryOrder) {
         super(c, stamp);
-        this.forceAnyLocation = forceAnyLocation;
+        this.forceLocation = forceLocation;
         assert accessKind != null;
         assert locationIdentity != null;
         this.object = object;
         this.offset = offset;
         this.accessKind = accessKind;
         this.locationIdentity = locationIdentity;
+        this.memoryOrder = memoryOrder;
     }
 
+    @Override
     public LocationIdentity getLocationIdentity() {
         return locationIdentity;
     }
 
-    public boolean isAnyLocationForced() {
-        return forceAnyLocation;
+    public boolean isLocationForced() {
+        return forceLocation;
+    }
+
+    public boolean isCanonicalizable() {
+        /*
+         * When a node's location is forced, it cannot be improved.
+         */
+        return !isLocationForced();
     }
 
     public ValueNode object() {
@@ -91,8 +106,13 @@ public abstract class UnsafeAccessNode extends FixedWithNextNode implements Cano
     }
 
     @Override
+    public MemoryOrderMode getMemoryOrder() {
+        return memoryOrder;
+    }
+
+    @Override
     public Node canonical(CanonicalizerTool tool) {
-        if (!isAnyLocationForced() && getLocationIdentity().isAny()) {
+        if (isCanonicalizable()) {
             if (offset().isConstant()) {
                 long constantOffset = offset().asJavaConstant().asLong();
 
@@ -107,35 +127,34 @@ public abstract class UnsafeAccessNode extends FixedWithNextNode implements Cano
                     // No need for checking that the receiver is non-null. The field access
                     // includes the null check and if a field is found, the offset is so small that
                     // this is never a valid access of an arbitrary address.
-                    if (field != null && field.getJavaKind() == this.accessKind()) {
-                        assert !graph().isAfterFloatingReadPhase() : "cannot add more precise memory location after floating read phase";
-                        // Unsafe accesses never have volatile semantics.
-                        // Memory barriers are placed around such an unsafe access at construction
-                        // time if necessary, unlike AccessFieldNodes which encapsulate their
-                        // potential volatile semantics.
-                        return cloneAsFieldAccess(graph().getAssumptions(), field, false);
+                    if ((field != null && field.getJavaKind() == this.accessKind() &&
+                                    !field.isInternal() /* Ensure this is a true java field. */)) {
+                        assert graph().isBeforeStage(StageFlag.FLOATING_READS) : "cannot add more precise memory location after floating read phase";
+                        return cloneAsFieldAccess(graph().getAssumptions(), field, getMemoryOrder());
                     }
                 }
             }
-            ResolvedJavaType receiverType = StampTool.typeOrNull(object());
-            // Try to build a better location identity.
-            if (receiverType != null && receiverType.isArray()) {
-                LocationIdentity identity = NamedLocationIdentity.getArrayLocation(receiverType.getComponentType().getJavaKind());
-                assert !graph().isAfterFloatingReadPhase() : "cannot add more precise memory location after floating read phase";
-                return cloneAsArrayAccess(offset(), identity);
+            if (getLocationIdentity().isAny()) {
+                // If we have a vague one, try to build a better location identity.
+                ResolvedJavaType receiverType = StampTool.typeOrNull(object());
+                if (receiverType != null && receiverType.isArray()) {
+                    /*
+                     * This code might assign a wrong location identity in case the offset is
+                     * outside of the body of the array. This seems to be benign.
+                     */
+                    LocationIdentity identity = NamedLocationIdentity.getArrayLocation(receiverType.getComponentType().getJavaKind());
+                    assert graph().isBeforeStage(StageFlag.FLOATING_READS) : "cannot add more precise memory location after floating read phase";
+                    return cloneAsArrayAccess(offset(), identity, getMemoryOrder());
+                }
             }
         }
 
         return this;
     }
 
-    protected ValueNode cloneAsFieldAccess(Assumptions assumptions, ResolvedJavaField field) {
-        return cloneAsFieldAccess(assumptions, field, field.isVolatile());
-    }
+    protected abstract ValueNode cloneAsFieldAccess(Assumptions assumptions, ResolvedJavaField field, MemoryOrderMode memOrder);
 
-    protected abstract ValueNode cloneAsFieldAccess(Assumptions assumptions, ResolvedJavaField field, boolean volatileAccess);
-
-    protected abstract ValueNode cloneAsArrayAccess(ValueNode location, LocationIdentity identity);
+    protected abstract ValueNode cloneAsArrayAccess(ValueNode location, LocationIdentity identity, MemoryOrderMode memOrder);
 
     /**
      * In this method we check if the unsafe access is to a static field. This is the case when

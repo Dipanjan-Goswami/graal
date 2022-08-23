@@ -24,32 +24,20 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import static jdk.vm.ci.common.JVMCIError.guarantee;
-
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
-import org.graalvm.compiler.debug.DebugContext;
-import org.graalvm.compiler.nodes.CallTargetNode.InvokeKind;
-import org.graalvm.compiler.nodes.Invoke;
-import org.graalvm.compiler.nodes.ParameterNode;
-import org.graalvm.compiler.nodes.java.MethodCallTargetNode;
-
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.api.PointstoOptions;
-import com.oracle.graal.pointsto.flow.context.AnalysisContext;
-import com.oracle.graal.pointsto.flow.context.BytecodeLocation;
 import com.oracle.graal.pointsto.flow.context.object.AnalysisObject;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import com.oracle.graal.pointsto.meta.AnalysisType;
+import com.oracle.graal.pointsto.meta.InvokeInfo;
+import com.oracle.graal.pointsto.meta.PointsToAnalysisMethod;
 import com.oracle.graal.pointsto.typestate.TypeState;
-import com.oracle.graal.pointsto.util.AnalysisError;
 
-public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
+import jdk.vm.ci.code.BytecodePosition;
 
-    protected final BytecodeLocation location;
+public abstract class InvokeTypeFlow extends TypeFlow<BytecodePosition> implements InvokeInfo {
 
     /**
      * Actual parameters passed to the callee.
@@ -61,28 +49,30 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
      */
     protected ActualReturnTypeFlow actualReturn;
 
-    protected final Invoke invoke;
-
     protected final InvokeTypeFlow originalInvoke;
 
-    protected InvokeTypeFlow(Invoke invoke, MethodCallTargetNode target, TypeFlow<?>[] actualParameters, ActualReturnTypeFlow actualReturn, BytecodeLocation location) {
-        super(target, null);
+    protected final AnalysisType receiverType;
+    protected final PointsToAnalysisMethod targetMethod;
+    protected boolean isContextInsensitive;
 
+    protected InvokeTypeFlow(BytecodePosition invokeLocation, AnalysisType receiverType, PointsToAnalysisMethod targetMethod,
+                    TypeFlow<?>[] actualParameters, ActualReturnTypeFlow actualReturn) {
+        super(invokeLocation, null);
         this.originalInvoke = null;
-        this.location = location;
-        this.invoke = invoke;
+        this.receiverType = receiverType;
+        this.targetMethod = targetMethod;
         this.actualParameters = actualParameters;
         this.actualReturn = actualReturn;
 
         getTargetMethod().registerAsInvoked(this);
     }
 
-    protected InvokeTypeFlow(BigBang bb, MethodFlowsGraph methodFlows, InvokeTypeFlow original) {
+    protected InvokeTypeFlow(PointsToAnalysis bb, MethodFlowsGraph methodFlows, InvokeTypeFlow original) {
         super(original, methodFlows);
 
         this.originalInvoke = original;
-        this.location = original.location;
-        this.invoke = original.invoke;
+        this.receiverType = original.receiverType;
+        this.targetMethod = original.targetMethod;
 
         actualReturn = original.getActualReturn() != null ? (ActualReturnTypeFlow) methodFlows.lookupCloneOf(bb, original.getActualReturn()) : null;
 
@@ -94,24 +84,26 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
         }
     }
 
-    public BytecodeLocation getLocation() {
-        return location;
+    public void markAsContextInsensitive() {
+        isContextInsensitive = true;
     }
 
-    public DebugContext getDebug() {
-        return invoke.asNode().getDebug();
+    @Override
+    public boolean isContextInsensitive() {
+        return isContextInsensitive;
     }
 
-    public AnalysisMethod getTargetMethod() {
-        return (AnalysisMethod) getSource().targetMethod();
+    public AnalysisType getReceiverType() {
+        return receiverType;
+    }
+
+    @Override
+    public PointsToAnalysisMethod getTargetMethod() {
+        return targetMethod;
     }
 
     public int actualParametersCount() {
         return actualParameters.length;
-    }
-
-    public Invoke invoke() {
-        return invoke;
     }
 
     public TypeFlow<?>[] getActualParameters() {
@@ -122,6 +114,15 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
         return actualParameters[0];
     }
 
+    public InvokeTypeFlow getOriginalInvoke() {
+        return originalInvoke;
+    }
+
+    @Override
+    public void setObserved(TypeFlow<?> newReceiver) {
+        actualParameters[0] = newReceiver;
+    }
+
     public TypeFlow<?> getActualParameter(int index) {
         return actualParameters[index];
     }
@@ -130,42 +131,47 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
         return actualReturn;
     }
 
-    public void setActualReturn(ActualReturnTypeFlow actualReturn) {
+    public void setActualReturn(PointsToAnalysis bb, boolean isStatic, ActualReturnTypeFlow actualReturn) {
         this.actualReturn = actualReturn;
+        bb.analysisPolicy().linkActualReturn(bb, isStatic, this);
     }
 
     public TypeFlow<?> getResult() {
         return actualReturn;
     }
 
-    @Override
-    public boolean addState(BigBang bb, TypeState add) {
-        /* Only a clone should be updated */
-        assert this.isClone();
-        return super.addState(bb, add);
+    /**
+     * When the type flow constraints are relaxed the receiver object state can contain types that
+     * are not part of the receiver's type hierarchy. We filter those out.
+     */
+    protected TypeState filterReceiverState(PointsToAnalysis bb, TypeState invokeState) {
+        if (bb.analysisPolicy().relaxTypeFlowConstraints()) {
+            return TypeState.forIntersection(bb, invokeState, receiverType.getAssignableTypes(true));
+        }
+        return invokeState;
     }
 
-    protected void updateReceiver(BigBang bb, MethodFlowsGraph calleeFlows, AnalysisObject receiverObject) {
+    protected void updateReceiver(PointsToAnalysis bb, MethodFlowsGraph calleeFlows, AnalysisObject receiverObject) {
         TypeState receiverTypeState = TypeState.forExactType(bb, receiverObject, false);
         updateReceiver(bb, calleeFlows, receiverTypeState);
     }
 
-    protected void updateReceiver(BigBang bb, MethodFlowsGraph calleeFlows, TypeState receiverTypeState) {
+    protected void updateReceiver(PointsToAnalysis bb, MethodFlowsGraph calleeFlows, TypeState receiverTypeState) {
         FormalReceiverTypeFlow formalReceiverFlow = calleeFlows.getFormalReceiver();
         if (formalReceiverFlow != null) {
             formalReceiverFlow.addReceiverState(bb, receiverTypeState);
         }
 
         if (PointstoOptions.DivertParameterReturningMethod.getValue(bb.getOptions())) {
-            ParameterNode paramNode = calleeFlows.getMethod().getTypeFlow().getReturnedParameter();
-            if (actualReturn != null && paramNode != null && paramNode.index() == 0) {
+            int paramIndex = calleeFlows.getMethod().getTypeFlow().getReturnedParameterIndex();
+            if (actualReturn != null && paramIndex == 0) {
                 actualReturn.addState(bb, receiverTypeState);
             }
         }
 
     }
 
-    protected void linkCallee(BigBang bb, boolean isStatic, MethodFlowsGraph calleeFlows) {
+    protected void linkCallee(PointsToAnalysis bb, boolean isStatic, MethodFlowsGraph calleeFlows) {
 
         // iterate over the actual parameters in caller context
         for (int i = 0; i < actualParameters.length; i++) {
@@ -193,12 +199,18 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
             }
         }
 
+        linkReturn(bb, isStatic, calleeFlows);
+
+        bb.analysisPolicy().registerAsImplementationInvoked(this, calleeFlows);
+    }
+
+    public void linkReturn(PointsToAnalysis bb, boolean isStatic, MethodFlowsGraph calleeFlows) {
         if (actualReturn != null) {
             if (PointstoOptions.DivertParameterReturningMethod.getValue(bb.getOptions())) {
-                ParameterNode paramNode = calleeFlows.getMethod().getTypeFlow().getReturnedParameter();
-                if (paramNode != null) {
-                    if (isStatic || paramNode.index() != 0) {
-                        TypeFlow<?> actualParam = actualParameters[paramNode.index()];
+                int paramNodeIndex = calleeFlows.getMethod().getTypeFlow().getReturnedParameterIndex();
+                if (paramNodeIndex != -1) {
+                    if (isStatic || paramNodeIndex != 0) {
+                        TypeFlow<?> actualParam = actualParameters[paramNodeIndex];
                         actualParam.addUse(bb, actualReturn);
                     }
                     // else {
@@ -210,8 +222,8 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
                      * might throw an exception instead of returning, hence the formal return is
                      * null.
                      */
-                    if (calleeFlows.getResult() != null) {
-                        calleeFlows.getResult().addUse(bb, actualReturn);
+                    if (calleeFlows.getReturnFlow() != null) {
+                        calleeFlows.getReturnFlow().addUse(bb, actualReturn);
                     }
                 }
             } else {
@@ -219,15 +231,15 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
                  * The callee may have a return type, hence the actualReturn is non-null, but it
                  * might throw an exception instead of returning, hence the formal return is null.
                  */
-                if (calleeFlows.getResult() != null) {
-                    calleeFlows.getResult().addUse(bb, actualReturn);
+                if (calleeFlows.getReturnFlow() != null) {
+                    calleeFlows.getReturnFlow().addUse(bb, actualReturn);
                 }
             }
         }
+    }
 
-        assert this.isClone() && originalInvoke != null;
-        calleeFlows.getMethod().registerAsImplementationInvoked(originalInvoke);
-
+    public static boolean isContextInsensitiveVirtualInvoke(InvokeTypeFlow invoke) {
+        return invoke instanceof AbstractVirtualInvokeTypeFlow && invoke.isContextInsensitive();
     }
 
     /**
@@ -236,7 +248,13 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
      * If this is an invoke clone it returns the callees registered with the clone. If this is the
      * original invoke it returns the current registered callees of all clones.
      */
+    @Override
     public abstract Collection<AnalysisMethod> getCallees();
+
+    @Override
+    public BytecodePosition getPosition() {
+        return getSource();
+    }
 
     /**
      * Checks if this invoke can be statically bound.
@@ -250,16 +268,17 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
      * statically bound. If the invoke doesn't link to any callee then it is unreachable, i.e., it
      * has no implementation, and should be removed by the analysis client.
      */
+    @Override
     public boolean canBeStaticallyBound() {
         /*
          * Check whether this method can be trivially statically bound, i.e., without the help of
          * the analysis, but asking the host VM. That means it is final or private or static, but
          * not abstract, or the declaring class is final.
          */
-        boolean triviallyStaticallyBound = invoke.callTarget().targetMethod().canBeStaticallyBound();
+        boolean triviallyStaticallyBound = targetMethod.canBeStaticallyBound();
         if (triviallyStaticallyBound) {
             /*
-             * The check bellow is "size <= 1" and not "size == 1" because a method can be reported
+             * The check below is "size <= 1" and not "size == 1" because a method can be reported
              * as trivially statically bound by the host VM but unreachable in the analysis.
              */
             assert getCallees().size() <= 1 : "Statically bound result mismatch between analysis and host VM.";
@@ -273,169 +292,5 @@ public abstract class InvokeTypeFlow extends TypeFlow<MethodCallTargetNode> {
      * That means that for each callee only those method flows corresponding to contexts reached
      * from this invoke are returned.
      */
-    public abstract Collection<MethodFlowsGraph> getCalleesFlows(BigBang bb);
-
-}
-
-abstract class DirectInvokeTypeFlow extends InvokeTypeFlow {
-
-    protected MethodTypeFlow callee;
-
-    /**
-     * Context of the caller.
-     */
-    protected AnalysisContext callerContext;
-
-    protected DirectInvokeTypeFlow(Invoke invoke, MethodCallTargetNode target, TypeFlow<?>[] actualParameters, ActualReturnTypeFlow actualReturn, BytecodeLocation location) {
-        super(invoke, target, actualParameters, actualReturn, location);
-        callerContext = null;
-    }
-
-    protected DirectInvokeTypeFlow(BigBang bb, MethodFlowsGraph methodFlows, DirectInvokeTypeFlow original) {
-        super(bb, methodFlows, original);
-        this.callerContext = methodFlows.context();
-    }
-
-    @Override
-    public Collection<AnalysisMethod> getCallees() {
-        if (callee != null && callee.getMethod().isImplementationInvoked()) {
-            return Collections.singletonList(callee.getMethod());
-        } else {
-            return Collections.emptyList();
-        }
-    }
-
-}
-
-final class StaticInvokeTypeFlow extends DirectInvokeTypeFlow {
-
-    private AnalysisContext calleeContext;
-
-    protected StaticInvokeTypeFlow(Invoke invoke, MethodCallTargetNode target, TypeFlow<?>[] actualParameters, ActualReturnTypeFlow actualReturn, BytecodeLocation location) {
-        super(invoke, target, actualParameters, actualReturn, location);
-        calleeContext = null;
-        assert target.invokeKind() == InvokeKind.Static;
-    }
-
-    protected StaticInvokeTypeFlow(BigBang bb, MethodFlowsGraph methodFlows, StaticInvokeTypeFlow original) {
-        super(bb, methodFlows, original);
-    }
-
-    @Override
-    public TypeFlow<MethodCallTargetNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
-        return new StaticInvokeTypeFlow(bb, methodFlows, this);
-    }
-
-    @Override
-    public void update(BigBang bb) {
-        assert this.isClone();
-
-        /* The static invokes should be updated only once and the callee should be null. */
-        guarantee(callee == null, "static invoke updated multiple times!");
-
-        /*
-         * Initialize the callee lazily so that if the invoke flow is not reached in this context,
-         * i.e. for this clone, there is no callee linked/
-         */
-        MethodCallTargetNode target = (MethodCallTargetNode) invoke.callTarget();
-        callee = ((AnalysisMethod) target.targetMethod()).getTypeFlow();
-        // set the callee in the original invoke too
-        ((DirectInvokeTypeFlow) originalInvoke).callee = callee;
-
-        calleeContext = bb.contextPolicy().staticCalleeContext(bb, location, callerContext, callee);
-        MethodFlowsGraph calleeFlows = callee.addContext(bb, calleeContext, this);
-        linkCallee(bb, true, calleeFlows);
-    }
-
-    @Override
-    public Collection<MethodFlowsGraph> getCalleesFlows(BigBang bb) {
-        if (callee == null || calleeContext == null) {
-            /* This static invoke was not updated. */
-            return Collections.emptyList();
-        } else {
-            assert calleeContext != null;
-            MethodFlowsGraph methodFlows = callee.getFlows(calleeContext);
-            return Collections.singletonList(methodFlows);
-        }
-    }
-
-    @Override
-    public String toString() {
-        return "StaticInvoke<" + getSource().targetMethod().format("%h.%n") + ">" + ":" + getState();
-    }
-
-}
-
-final class SpecialInvokeTypeFlow extends DirectInvokeTypeFlow {
-
-    /**
-     * Contexts of the resolved method.
-     */
-    protected ConcurrentMap<MethodFlowsGraph, Object> calleesFlows;
-
-    protected SpecialInvokeTypeFlow(Invoke invoke, MethodCallTargetNode target, TypeFlow<?>[] actualParameters, ActualReturnTypeFlow actualReturn,
-                    BytecodeLocation location) {
-        super(invoke, target, actualParameters, actualReturn, location);
-        assert target.invokeKind() == InvokeKind.Special;
-    }
-
-    protected SpecialInvokeTypeFlow(BigBang bb, MethodFlowsGraph methodFlows, DirectInvokeTypeFlow original) {
-        super(bb, methodFlows, original);
-        calleesFlows = new ConcurrentHashMap<>(4, 0.75f, 1);
-    }
-
-    @Override
-    public TypeFlow<MethodCallTargetNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
-        return new SpecialInvokeTypeFlow(bb, methodFlows, this);
-    }
-
-    @Override
-    public boolean addState(BigBang bb, TypeState add, boolean postFlow) {
-        throw AnalysisError.shouldNotReachHere("The SpecialInvokeTypeFlow should not be updated directly.");
-    }
-
-    @Override
-    public void update(BigBang bb) {
-        throw AnalysisError.shouldNotReachHere("The SpecialInvokeTypeFlow should not be updated directly.");
-    }
-
-    @Override
-    public void onObservedUpdate(BigBang bb) {
-        assert this.isClone();
-        /* The receiver state has changed. Process the invoke. */
-
-        /*
-         * Initialize the callee lazily so that if the invoke flow is not reached in this context,
-         * i.e. for this clone, there is no callee linked.
-         */
-        if (callee == null) {
-            MethodCallTargetNode target = (MethodCallTargetNode) invoke.callTarget();
-            callee = ((AnalysisMethod) target.targetMethod()).getTypeFlow();
-            // set the callee in the original invoke too
-            ((DirectInvokeTypeFlow) originalInvoke).callee = callee;
-        }
-
-        TypeState invokeState = getReceiver().getState();
-        for (AnalysisObject receiverObject : invokeState.objects()) {
-            AnalysisContext calleeContext = bb.contextPolicy().calleeContext(bb, receiverObject, callerContext, callee);
-            MethodFlowsGraph calleeFlows = callee.addContext(bb, calleeContext, this);
-
-            if (calleesFlows.putIfAbsent(calleeFlows, Boolean.TRUE) == null) {
-                linkCallee(bb, false, calleeFlows);
-            }
-
-            updateReceiver(bb, calleeFlows, receiverObject);
-        }
-    }
-
-    @Override
-    public Collection<MethodFlowsGraph> getCalleesFlows(BigBang bb) {
-        return new ArrayList<>(calleesFlows.keySet());
-    }
-
-    @Override
-    public String toString() {
-        return "SpecialInvoke<" + getSource().targetMethod().format("%h.%n") + ">" + ":" + getState();
-    }
-
+    public abstract Collection<MethodFlowsGraph> getCalleesFlows(PointsToAnalysis bb);
 }

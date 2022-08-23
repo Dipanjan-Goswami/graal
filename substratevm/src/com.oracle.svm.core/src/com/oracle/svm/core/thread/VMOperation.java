@@ -31,6 +31,9 @@ import org.graalvm.nativeimage.IsolateThread;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.annotate.RestrictHeapAccess;
 import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.heap.VMOperationInfo;
+import com.oracle.svm.core.jfr.JfrTicks;
+import com.oracle.svm.core.jfr.events.ExecuteVMOperationEvent;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.thread.VMOperationControl.OpInProgress;
 import com.oracle.svm.core.util.VMError;
@@ -42,26 +45,36 @@ import com.oracle.svm.core.util.VMError;
  * unexpected exceptions while executing critical code.
  */
 public abstract class VMOperation {
-    private final String name;
-    private final SystemEffect systemEffect;
+    private final VMOperationInfo info;
 
-    protected VMOperation(String name, SystemEffect systemEffect) {
-        this.name = name;
-        this.systemEffect = systemEffect;
-    }
-
-    public final String getName() {
-        return name;
+    protected VMOperation(VMOperationInfo info) {
+        assert info.getVMOperationClass() == this.getClass();
+        this.info = info;
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    protected boolean isGC() {
+    public final int getId() {
+        return info.getId();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final String getName() {
+        return info.getName();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public boolean isGC() {
         return false;
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public final boolean getCausesSafepoint() {
-        return systemEffect == SystemEffect.SAFEPOINT;
+        return info.getCausesSafepoint();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final boolean isBlocking() {
+        return info.isBlocking();
     }
 
     protected final void execute(NativeVMOperationData data) {
@@ -74,7 +87,7 @@ public abstract class VMOperation {
              * The caller already does some filtering but it can still happen that we reach this
              * code even though no work needs to be done.
              */
-            trace.string("[Skipping operation ").string(name).string("]");
+            trace.string("[Skipping operation ").string(getName()).string("]");
             return;
         }
 
@@ -82,17 +95,20 @@ public abstract class VMOperation {
         VMOperation prevOperation = control.getInProgress().getOperation();
         IsolateThread prevQueuingThread = control.getInProgress().getQueuingThread();
         IsolateThread prevExecutingThread = control.getInProgress().getExecutingThread();
+        IsolateThread requestingThread = getQueuingThread(data);
 
-        control.setInProgress(this, getQueuingThread(data), CurrentIsolate.getCurrentThread());
+        control.setInProgress(this, requestingThread, CurrentIsolate.getCurrentThread(), true);
+        long startTicks = JfrTicks.elapsedTicks();
         try {
-            trace.string("[Executing operation ").string(name);
+            trace.string("[Executing operation ").string(getName());
             operate(data);
             trace.string("]");
         } catch (Throwable t) {
             trace.string("[VMOperation.execute caught: ").string(t.getClass().getName()).string("]").newline();
             throw VMError.shouldNotReachHere(t);
         } finally {
-            control.setInProgress(prevOperation, prevQueuingThread, prevExecutingThread);
+            ExecuteVMOperationEvent.emit(this, requestingThread, startTicks);
+            control.setInProgress(prevOperation, prevQueuingThread, prevExecutingThread, false);
         }
     }
 
@@ -116,7 +132,7 @@ public abstract class VMOperation {
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    private static boolean isInProgress(OpInProgress inProgress) {
+    static boolean isInProgress(OpInProgress inProgress) {
         return inProgress.getExecutingThread() == CurrentIsolate.getCurrentThread();
     }
 
@@ -171,11 +187,16 @@ public abstract class VMOperation {
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     protected abstract void setFinished(NativeVMOperationData data, boolean value);
 
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Whitelisted because some operations may allocate.")
+    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, reason = "Whitelisted because some operations may allocate.")
     protected abstract void operate(NativeVMOperationData data);
 
     public enum SystemEffect {
         NONE,
-        SAFEPOINT
+        SAFEPOINT;
+
+        @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+        public static boolean getCausesSafepoint(SystemEffect value) {
+            return value == SAFEPOINT;
+        }
     }
 }

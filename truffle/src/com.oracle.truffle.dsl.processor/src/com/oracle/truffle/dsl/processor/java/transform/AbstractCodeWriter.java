@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -51,6 +51,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import javax.annotation.processing.FilerException;
 import javax.lang.model.element.AnnotationMirror;
@@ -78,7 +79,6 @@ import com.oracle.truffle.dsl.processor.java.model.CodeTree;
 import com.oracle.truffle.dsl.processor.java.model.CodeTreeKind;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeElement;
 import com.oracle.truffle.dsl.processor.java.model.CodeVariableElement;
-import com.sun.org.apache.xpath.internal.functions.Function;
 
 public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> {
 
@@ -127,7 +127,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                         w.close();
                     } catch (Throwable e1) {
                         // see eclipse bug https://bugs.eclipse.org/bugs/show_bug.cgi?id=361378
-                        // TODO temporary suppress errors on close.
+                        // TODO GR-38632 temporary suppress errors on close.
                     }
                 }
                 writer = null;
@@ -186,7 +186,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         }
     }
 
-    static class Foobar<S extends Function, BiFunction> {
+    static class Foobar<S extends Function<?, ?>, BiFunction> {
 
     }
 
@@ -862,7 +862,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
                 int end = Math.min(i + nextSize, string.length());
 
-                // TODO(CH): fails in normal usage - output ok though
+                // TODO GR-38632 (CH): fails in normal usage - output ok though
                 // assert lineLength + (end - i) + 2 < maxLineLength;
                 write("\"");
                 write(string.substring(i, end));
@@ -928,7 +928,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 String lhs = trimTrailing(buffer.substring(0, newLinePoint));
                 delegate.write(lhs);
                 delegate.write(LN);
-                buffer.delete(0, newLinePoint + 1);
+                buffer.delete(0, newLinePoint + LN.length());
             }
         }
 

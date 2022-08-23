@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,9 +29,15 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
+import java.math.BigInteger;
+
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
 import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class VariableBitWidthType extends Type {
@@ -46,6 +52,9 @@ public final class VariableBitWidthType extends Type {
     public static final int MIN_INT_BITS = 1;
     /**
      * Maximum number of bits that can be specified.
+     *
+     * This value changed to {@code 1 << 23} in LLVM 14 (https://reviews.llvm.org/D109721). We keep
+     * the old value to stay compatible with older versions (but it is unlikely to be used anyway).
      *
      * @see <a href=
      *      "https://github.com/llvm/llvm-project/blob/llvmorg-9.0.0/llvm/include/llvm/IR/DerivedTypes.h#L52">
@@ -167,5 +176,10 @@ public final class VariableBitWidthType extends Type {
         } else {
             return String.format("i%d", getBitSize());
         }
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        return CommonNodeFactory.createSimpleConstantNoArray(BigInteger.ZERO, this);
     }
 }

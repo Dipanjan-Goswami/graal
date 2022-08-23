@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,7 +29,9 @@
  */
 package com.oracle.truffle.llvm.runtime.debug.debugexpr.nodes;
 
-import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.GenerateAOT;
 import com.oracle.truffle.api.dsl.NodeChild;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.interop.InteropLibrary;
@@ -38,6 +40,7 @@ import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.nodes.NodeInfo;
+import com.oracle.truffle.api.profiles.BranchProfile;
 import com.oracle.truffle.llvm.runtime.debug.debugexpr.parser.DebugExprException;
 import com.oracle.truffle.llvm.runtime.debug.debugexpr.parser.DebugExprType;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
@@ -63,40 +66,49 @@ public abstract class DebugExprArrayElementNode extends LLVMExpressionNode {
     }
 
     @Specialization
+    @GenerateAOT.Exclude
     public Object doIntIndex(Object baseMember, int idx,
-                    @CachedLibrary(limit = "3") InteropLibrary library) {
+                    @CachedLibrary(limit = "3") InteropLibrary library,
+                    @Cached BranchProfile exception) {
         if (library.hasMembers(baseMember)) {
             Object getmembers;
             try {
                 getmembers = library.getMembers(baseMember);
                 if (library.isArrayElementReadable(getmembers, idx)) {
                     Object arrayElement = library.readArrayElement(getmembers, idx);
-                    if (library.isMemberReadable(baseMember, arrayElement.toString())) {
-                        Object member = library.readMember(baseMember, arrayElement.toString());
+                    String identifier = library.asString(arrayElement);
+                    if (library.isMemberReadable(baseMember, identifier)) {
+                        Object member = library.readMember(baseMember, identifier);
                         return type.parse(member);
                     }
                 }
             } catch (UnsupportedMessageException e) {
-                CompilerDirectives.transferToInterpreter();
-                throw DebugExprException.create(this, "Array access of " + baseMember + " not possible");
+                exception.enter();
+                throw DebugExprException.create(this, "Array access of %s not possible", baseMember);
             } catch (InvalidArrayIndexException e) {
-                CompilerDirectives.transferToInterpreter();
-                throw DebugExprException.create(this, "Invalid array index: " + e.getInvalidIndex());
+                exception.enter();
+                throw DebugExprException.create(this, "Invalid array index: %d", e.getInvalidIndex());
             } catch (UnknownIdentifierException e) {
-                CompilerDirectives.transferToInterpreter();
+                exception.enter();
                 throw DebugExprException.symbolNotFound(this, e.getUnknownIdentifier(), baseMember);
             }
         }
-        CompilerDirectives.transferToInterpreter();
-        throw DebugExprException.create(this, "Array access of " + baseMember + " not possible");
+        exception.enter();
+        throw DebugExprException.create(this, "Array access of %s not possible", baseMember);
+    }
+
+    @TruffleBoundary
+    private static int toIntIndex(Object index) {
+        return Integer.parseInt(index.toString());
     }
 
     @Specialization
+    @GenerateAOT.Exclude
     public Object doGeneric(Object baseMember, Object index,
-                    @CachedLibrary(limit = "3") InteropLibrary library) {
+                    @CachedLibrary(limit = "3") InteropLibrary library,
+                    @Cached BranchProfile exception) {
         // in case of a complex expression as index (e.g. outerArray[innerArray[2]]), the
         // index is no Integer but a LLVMDebugObject$Primitive instead
-        int idx = Integer.parseInt(index.toString());
-        return doIntIndex(baseMember, idx, library);
+        return doIntIndex(baseMember, toIntIndex(index), library, exception);
     }
 }

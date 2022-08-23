@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,21 +43,24 @@ package com.oracle.truffle.sl.runtime;
 import java.util.HashMap;
 import java.util.Map;
 
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.dsl.Cached;
 import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.library.ExportLibrary;
 import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.profiles.BranchProfile;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.sl.SLLanguage;
 
 @ExportLibrary(InteropLibrary.class)
 @SuppressWarnings("static-method")
 final class FunctionsObject implements TruffleObject {
 
-    final Map<String, SLFunction> functions = new HashMap<>();
+    final Map<TruffleString, SLFunction> functions = new HashMap<>();
 
     FunctionsObject() {
     }
@@ -79,14 +82,18 @@ final class FunctionsObject implements TruffleObject {
 
     @ExportMessage
     @TruffleBoundary
-    Object readMember(String member) {
-        return functions.get(member);
+    Object readMember(String member) throws UnknownIdentifierException {
+        Object value = functions.get(SLStrings.fromJavaString(member));
+        if (value != null) {
+            return value;
+        }
+        throw UnknownIdentifierException.create(member);
     }
 
     @ExportMessage
     @TruffleBoundary
     boolean isMemberReadable(String member) {
-        return functions.containsKey(member);
+        return functions.containsKey(SLStrings.fromJavaString(member));
     }
 
     @ExportMessage
@@ -106,9 +113,14 @@ final class FunctionsObject implements TruffleObject {
     }
 
     @ExportMessage
+    boolean isScope() {
+        return true;
+    }
+
+    @ExportMessage
     @TruffleBoundary
     Object toDisplayString(@SuppressWarnings("unused") boolean allowSideEffects) {
-        return functions.toString();
+        return "global";
     }
 
     public static boolean isInstance(TruffleObject obj) {
@@ -140,9 +152,9 @@ final class FunctionsObject implements TruffleObject {
         }
 
         @ExportMessage
-        Object readArrayElement(long index) throws InvalidArrayIndexException {
+        Object readArrayElement(long index, @Cached BranchProfile error) throws InvalidArrayIndexException {
             if (!isArrayElementReadable(index)) {
-                CompilerDirectives.transferToInterpreter();
+                error.enter();
                 throw InvalidArrayIndexException.create(index);
             }
             return names[(int) index];

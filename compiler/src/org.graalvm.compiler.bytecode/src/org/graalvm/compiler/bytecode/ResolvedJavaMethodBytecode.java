@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,11 +24,12 @@
  */
 package org.graalvm.compiler.bytecode;
 
+import java.util.Objects;
+
 import jdk.vm.ci.meta.ConstantPool;
 import jdk.vm.ci.meta.ExceptionHandler;
 import jdk.vm.ci.meta.LineNumberTable;
 import jdk.vm.ci.meta.LocalVariableTable;
-import jdk.vm.ci.meta.ProfilingInfo;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
@@ -105,12 +106,24 @@ public class ResolvedJavaMethodBytecode implements Bytecode {
     }
 
     @Override
-    public ProfilingInfo getProfilingInfo() {
-        return method.getProfilingInfo();
+    public String toString() {
+        return getClass().getSimpleName() + method.format("<%h.%n(%p)>");
     }
 
     @Override
-    public String toString() {
-        return getClass().getSimpleName() + method.format("<%h.%n(%p)>");
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        ResolvedJavaMethodBytecode that = (ResolvedJavaMethodBytecode) o;
+        return Objects.equals(method, that.method) && Objects.equals(origin, that.origin);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(method, origin);
     }
 }

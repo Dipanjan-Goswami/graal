@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.core.nodes;
 
+import static org.graalvm.compiler.nodeinfo.InputType.Memory;
 import static org.graalvm.compiler.nodeinfo.NodeCycles.CYCLES_8;
 import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_8;
 
@@ -37,7 +38,6 @@ import org.graalvm.compiler.nodes.InvokeWithExceptionNode;
 import org.graalvm.compiler.nodes.debug.ControlFlowAnchored;
 import org.graalvm.compiler.nodes.memory.SingleMemoryKill;
 import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.word.LocationIdentity;
 
 import com.oracle.svm.core.stack.JavaFrameAnchor;
@@ -56,40 +56,39 @@ import com.oracle.svm.core.thread.VMThreads.StatusSupport;
  * class CFunctionSnippets. Other parts are emitted in the backend when the call instruction is
  * emitted.
  */
-@NodeInfo(cycles = CYCLES_8, size = SIZE_8)
+@NodeInfo(cycles = CYCLES_8, size = SIZE_8, allowedUsageTypes = {Memory})
 public final class CFunctionPrologueNode extends FixedWithNextNode implements Lowerable, SingleMemoryKill, ControlFlowAnchored {
     public static final NodeClass<CFunctionPrologueNode> TYPE = NodeClass.create(CFunctionPrologueNode.class);
 
     private final int newThreadStatus;
     /**
-     * The marker object prevents value numbering of the node. This means that the marker must be a
-     * unique object per node, even after node cloning (e.g., because of method inlining).
-     * Therefore, {@link #afterClone} properly re-initializes the field to a new marker instance.
-     *
-     * The marker is also used for LIR frame state verification, to ensure we have a proper matching
-     * of prologue and epilogue and no unexpected machine code while the thread is in Native state.
+     * The marker is used for LIR frame state verification, to ensure we have a proper matching of
+     * prologue and epilogue and no unexpected machine code while the thread is in Native state.
      */
     private CFunctionPrologueMarker marker;
 
     public CFunctionPrologueNode(int newThreadStatus) {
         super(TYPE, StampFactory.forVoid());
         this.newThreadStatus = newThreadStatus;
-        marker = new CFunctionPrologueMarker(newThreadStatus);
     }
 
     @Override
     protected void afterClone(Node other) {
         super.afterClone(other);
-        marker = new CFunctionPrologueMarker(newThreadStatus);
+        /*
+         * Note that this method is invoked by the regular method inlining, but not by the
+         * PEGraphDecoder. So the method inlining before analysis, as well as the trivial method
+         * inlining before compilation, do not invoke this method. So it is only suitable for
+         * assertion checking.
+         */
+        assert marker == null : "Marker must be unique";
     }
 
     public CFunctionPrologueMarker getMarker() {
+        if (marker == null) {
+            marker = new CFunctionPrologueMarker(newThreadStatus);
+        }
         return marker;
-    }
-
-    @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
     }
 
     @Override

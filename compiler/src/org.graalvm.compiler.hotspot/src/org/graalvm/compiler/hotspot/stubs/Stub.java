@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,16 +24,14 @@
  */
 package org.graalvm.compiler.hotspot.stubs;
 
-import static java.util.Collections.singletonList;
 import static org.graalvm.compiler.core.GraalCompiler.emitFrontEnd;
-import static org.graalvm.compiler.core.common.GraalOptions.GeneratePIC;
 import static org.graalvm.compiler.core.common.GraalOptions.RegisterPressure;
-import static org.graalvm.compiler.debug.DebugContext.DEFAULT_LOG_STREAM;
 import static org.graalvm.compiler.debug.DebugOptions.DebugStubsAndSnippets;
 import static org.graalvm.compiler.hotspot.HotSpotHostBackend.DEOPT_BLOB_UNCOMMON_TRAP;
 import static org.graalvm.util.CollectionsUtil.allMatch;
 
 import java.util.ListIterator;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.graalvm.collections.EconomicSet;
@@ -42,6 +40,7 @@ import org.graalvm.compiler.core.common.CompilationIdentifier;
 import org.graalvm.compiler.core.common.GraalOptions;
 import org.graalvm.compiler.core.target.Backend;
 import org.graalvm.compiler.debug.DebugContext;
+import org.graalvm.compiler.debug.DebugContext.Builder;
 import org.graalvm.compiler.debug.DebugContext.Description;
 import org.graalvm.compiler.hotspot.HotSpotCompiledCodeBuilder;
 import org.graalvm.compiler.hotspot.HotSpotForeignCallLinkage;
@@ -52,10 +51,14 @@ import org.graalvm.compiler.lir.phases.LIRPhase;
 import org.graalvm.compiler.lir.phases.LIRSuites;
 import org.graalvm.compiler.lir.phases.PostAllocationOptimizationPhase.PostAllocationOptimizationContext;
 import org.graalvm.compiler.lir.profiling.MoveProfilingPhase;
+import org.graalvm.compiler.nodes.GraphState;
+import org.graalvm.compiler.nodes.GraphState.StageFlag;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.options.OptionValues;
+import org.graalvm.compiler.phases.BasePhase;
 import org.graalvm.compiler.phases.OptimisticOptimizations;
 import org.graalvm.compiler.phases.PhaseSuite;
+import org.graalvm.compiler.phases.tiers.HighTierContext;
 import org.graalvm.compiler.phases.tiers.Suites;
 import org.graalvm.compiler.printer.GraalDebugHandlersFactory;
 
@@ -162,7 +165,7 @@ public abstract class Stub {
 
     @Override
     public String toString() {
-        return "Stub<" + linkage.getDescriptor() + ">";
+        return "Stub<" + linkage.getDescriptor().getSignature() + ">";
     }
 
     /**
@@ -180,7 +183,8 @@ public abstract class Stub {
     private DebugContext openDebugContext(DebugContext outer) {
         if (DebugStubsAndSnippets.getValue(options)) {
             Description description = new Description(linkage, "Stub_" + nextStubId.incrementAndGet());
-            return DebugContext.create(options, description, outer.getGlobalMetrics(), DEFAULT_LOG_STREAM, singletonList(new GraalDebugHandlersFactory(providers.getSnippetReflection())));
+            GraalDebugHandlersFactory factory = new GraalDebugHandlersFactory(providers.getSnippetReflection());
+            return new Builder(options, factory).globalMetrics(outer.getGlobalMetrics()).description(description).build();
         }
         return DebugContext.disabled(options);
     }
@@ -198,8 +202,6 @@ public abstract class Stub {
                     try (DebugContext.Scope s = debug.scope("CodeInstall", compResult);
                                     DebugContext.Activation a = debug.activate()) {
                         assert destroyedCallerRegisters != null;
-                        // Add a GeneratePIC check here later, we don't want to install
-                        // code if we don't have a corresponding VM global symbol.
                         HotSpotCompiledCode compiledCode = HotSpotCompiledCodeBuilder.createCompiledCode(codeCache, null, null, compResult, options);
                         code = codeCache.installCode(null, compiledCode, null, null, false);
                     } catch (Throwable e) {
@@ -219,7 +221,7 @@ public abstract class Stub {
     private CompilationResult buildCompilationResult(DebugContext debug, final Backend backend) {
         CompilationIdentifier compilationId = getStubCompilationId();
         final StructuredGraph graph = getGraph(debug, compilationId);
-        CompilationResult compResult = new CompilationResult(compilationId, toString(), GeneratePIC.getValue(options));
+        CompilationResult compResult = new CompilationResult(compilationId, toString());
 
         // Stubs cannot be recompiled so they cannot be compiled with assumptions
         assert graph.getAssumptions() == null;
@@ -281,7 +283,7 @@ public abstract class Stub {
                 }
             }
 
-            assert !(data.reference instanceof ConstantReference) : this + " cannot have embedded object or metadata constant: " + data.reference;
+            checkSafeDataReference(data);
         }
         for (Infopoint infopoint : compResult.getInfopoints()) {
             assert infopoint instanceof Call : this + " cannot have non-call infopoint: " + infopoint;
@@ -293,9 +295,37 @@ public abstract class Stub {
         return true;
     }
 
+    protected void checkSafeDataReference(DataPatch data) {
+        assert !(data.reference instanceof ConstantReference) : this + " cannot have embedded object or metadata constant: " + data.reference;
+    }
+
+    private static class EmptyHighTier extends BasePhase<HighTierContext> {
+        @Override
+        public Optional<NotApplicable> canApply(GraphState graphState) {
+            return ALWAYS_APPLICABLE;
+        }
+
+        @Override
+        protected void run(StructuredGraph graph, HighTierContext context) {
+        }
+
+        @Override
+        public void updateGraphState(GraphState graphState) {
+            super.updateGraphState(graphState);
+            if (graphState.isBeforeStage(StageFlag.HIGH_TIER_LOWERING)) {
+                graphState.setAfterStage(StageFlag.HIGH_TIER_LOWERING);
+            }
+        }
+
+    }
+
     protected Suites createSuites() {
-        Suites defaultSuites = providers.getSuites().getDefaultSuites(options);
-        return new Suites(new PhaseSuite<>(), defaultSuites.getMidTier(), defaultSuites.getLowTier());
+        Suites defaultSuites = providers.getSuites().getDefaultSuites(options, providers.getLowerer().getTarget().arch);
+
+        PhaseSuite<HighTierContext> emptyHighTier = new PhaseSuite<>();
+        emptyHighTier.appendPhase(new EmptyHighTier());
+
+        return new Suites(emptyHighTier, defaultSuites.getMidTier(), defaultSuites.getLowTier());
     }
 
     protected LIRSuites createLIRSuites() {

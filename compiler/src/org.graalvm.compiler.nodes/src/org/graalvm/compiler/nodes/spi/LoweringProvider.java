@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,10 +24,15 @@
  */
 package org.graalvm.compiler.nodes.spi;
 
+import org.graalvm.compiler.core.common.memory.MemoryExtendKind;
 import org.graalvm.compiler.graph.Node;
 import org.graalvm.compiler.nodes.ValueNode;
+import org.graalvm.compiler.nodes.calc.RoundNode;
+import org.graalvm.compiler.nodes.memory.ExtendableMemoryAccess;
 import org.graalvm.compiler.nodes.memory.address.AddressNode;
+import org.graalvm.compiler.options.OptionValues;
 
+import jdk.vm.ci.code.TargetDescription;
 import jdk.vm.ci.meta.JavaKind;
 
 /**
@@ -56,4 +61,50 @@ public interface LoweringProvider {
      * Indicates whether this target platform supports bulk zeroing of arbitrary size.
      */
     boolean supportsBulkZeroing();
+
+    /**
+     * Indicates whether this target platform supports optimized filling of memory regions with
+     * {@code long} values.
+     */
+    boolean supportsOptimizedFilling(OptionValues options);
+
+    /**
+     * Indicates whether this target platform supports lowering {@link RoundNode}.
+     */
+    boolean supportsRounding();
+
+    /**
+     * Indicates whether this target platform supports the usage of implicit (trapping) null checks.
+     */
+    boolean supportsImplicitNullChecks();
+
+    /**
+     * Indicates whether all writes are ordered on this target platform.
+     */
+    boolean writesStronglyOrdered();
+
+    /**
+     * Returns the target being lowered.
+     */
+    TargetDescription getTarget();
+
+    /**
+     * Indicates whether the target platform complies with the JVM specification semantics for
+     * {@code idiv} and {@code ldiv} when the dividend is {@link Integer#MAX_VALUE} or
+     * {@link Long#MAX_VALUE} respectively and the divisor is {@code -1}. The specified result for
+     * this case is the dividend.
+     */
+    boolean divisionOverflowIsJVMSCompliant();
+
+    /**
+     * Indicates whether this target platform supports uses
+     * {@link org.graalvm.compiler.lir.CastValue} for narrows.
+     */
+    boolean narrowsUseCastValue();
+
+    /**
+     * Indicates whether this target platform can fold an {@code extendKind} into a given
+     * {@link ExtendableMemoryAccess}.
+     */
+    boolean supportsFoldingExtendIntoAccess(ExtendableMemoryAccess access, MemoryExtendKind extendKind);
 }

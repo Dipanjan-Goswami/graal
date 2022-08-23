@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,11 +34,12 @@ import org.graalvm.compiler.asm.amd64.AMD64MacroAssembler;
 import org.graalvm.compiler.bytecode.BytecodeProvider;
 import org.graalvm.compiler.core.common.CompilationIdentifier;
 import org.graalvm.compiler.core.common.LIRKind;
-import org.graalvm.compiler.core.common.spi.ForeignCallDescriptor;
+import org.graalvm.compiler.core.common.spi.ForeignCallSignature;
 import org.graalvm.compiler.core.common.type.DataPointerConstant;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.hotspot.HotSpotBackend;
 import org.graalvm.compiler.hotspot.HotSpotForeignCallLinkage;
+import org.graalvm.compiler.hotspot.meta.HotSpotForeignCallDescriptor;
 import org.graalvm.compiler.hotspot.meta.HotSpotForeignCallsProviderImpl;
 import org.graalvm.compiler.hotspot.meta.HotSpotProviders;
 import org.graalvm.compiler.hotspot.stubs.SnippetStub;
@@ -72,6 +73,8 @@ import jdk.vm.ci.meta.AllocatableValue;
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.Value;
+
+import java.util.BitSet;
 
 public class StubAVXTest extends LIRTest {
 
@@ -191,16 +194,16 @@ public class StubAVXTest extends LIRTest {
         }
 
         @Override
-        protected StructuredGraph buildInitialGraph(DebugContext debug, CompilationIdentifier compilationId, Object[] args) {
+        protected StructuredGraph buildInitialGraph(DebugContext debug, CompilationIdentifier compilationId, Object[] args, BitSet nonNullParameters) {
             // Build the snippet graph directly since snippet registration is closed at this point.
             ReplacementsImpl d = (ReplacementsImpl) providers.getReplacements();
             MetaAccessProvider metaAccess = d.getProviders().getMetaAccess();
             BytecodeProvider bytecodes = new ClassfileBytecodeProvider(metaAccess, d.snippetReflection, ClassLoader.getSystemClassLoader());
-            return d.makeGraph(debug, bytecodes, method, args, null, false, null);
+            return d.makeGraph(debug, bytecodes, method, args, nonNullParameters, null, false, null);
         }
     }
 
-    public static final ForeignCallDescriptor TEST_STUB = new ForeignCallDescriptor("test_stub", void.class);
+    public static final ForeignCallSignature TEST_STUB = new ForeignCallSignature("test_stub", void.class);
 
     @LIRIntrinsic
     public static int compareAVXRegister(@SuppressWarnings("unused") LIRTestSpecification spec, Object left, Object right) {
@@ -211,7 +214,7 @@ public class StubAVXTest extends LIRTest {
     protected GraphBuilderConfiguration editGraphBuilderConfiguration(GraphBuilderConfiguration conf) {
         InvocationPlugins invocationPlugins = conf.getPlugins().getInvocationPlugins();
         InvocationPlugins.Registration r = new InvocationPlugins.Registration(invocationPlugins, TestStub.class);
-        r.register0("testStub", new InvocationPlugin() {
+        r.register(new InvocationPlugin("testStub") {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, InvocationPlugin.Receiver receiver) {
                 b.add(new ForeignCallNode(getProviders().getForeignCalls(), TEST_STUB));
@@ -234,8 +237,9 @@ public class StubAVXTest extends LIRTest {
     @Test
     public void test() {
         HotSpotProviders providers = (HotSpotProviders) getProviders();
-        HotSpotForeignCallsProviderImpl foreignCalls = (HotSpotForeignCallsProviderImpl) providers.getForeignCalls();
-        HotSpotForeignCallLinkage linkage = foreignCalls.registerStubCall(TEST_STUB, HotSpotForeignCallLinkage.Transition.LEAF_NO_VZERO, HotSpotForeignCallLinkage.Reexecutability.REEXECUTABLE,
+        HotSpotForeignCallsProviderImpl foreignCalls = providers.getForeignCalls();
+        HotSpotForeignCallLinkage linkage = foreignCalls.registerStubCall(TEST_STUB, HotSpotForeignCallDescriptor.Transition.LEAF_NO_VZERO,
+                        HotSpotForeignCallDescriptor.Reexecutability.REEXECUTABLE,
                         COMPUTES_REGISTERS_KILLED);
         linkage.setCompiledStub(new TestStub(getInitialOptions(), providers, linkage));
         runTest("testStub");

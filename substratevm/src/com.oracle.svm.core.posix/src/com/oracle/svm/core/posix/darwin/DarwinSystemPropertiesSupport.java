@@ -24,12 +24,14 @@
  */
 package com.oracle.svm.core.posix.darwin;
 
-import static com.oracle.svm.core.posix.headers.darwin.CoreFoundation.CFRetain;
-
+import com.oracle.svm.core.headers.LibC;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.StackValue;
+import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
+import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
 import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordFactory;
@@ -38,14 +40,15 @@ import com.oracle.svm.core.annotate.AutomaticFeature;
 import com.oracle.svm.core.jdk.SystemPropertiesSupport;
 import com.oracle.svm.core.posix.PosixSystemPropertiesSupport;
 import com.oracle.svm.core.posix.headers.Limits;
+import com.oracle.svm.core.posix.headers.Stdlib;
 import com.oracle.svm.core.posix.headers.Unistd;
-import com.oracle.svm.core.posix.headers.darwin.CoreFoundation;
-import com.oracle.svm.core.posix.headers.darwin.CoreFoundation.CFStringRef;
+import com.oracle.svm.core.posix.headers.darwin.Foundation;
 
+@CLibrary(value = "darwin", requireStatic = true)
 public class DarwinSystemPropertiesSupport extends PosixSystemPropertiesSupport {
 
     @Override
-    protected String tmpdirValue() {
+    protected String javaIoTmpdirValue() {
         /* Darwin has a per-user temp dir */
         int buflen = Limits.PATH_MAX();
         CCharPointer tmpPath = StackValue.get(buflen);
@@ -54,11 +57,32 @@ public class DarwinSystemPropertiesSupport extends PosixSystemPropertiesSupport 
             return CTypeConversion.toJavaString(tmpPath);
         } else {
             /*
-             * Default as defined in JDK source/jdk/src/solaris/native/java/lang/java_props_md.c
-             * line 135.
+             * Default as defined in JDK src/java.base/unix/native/libjava/java_props_md.c line 90.
              */
             return "/var/tmp";
         }
+    }
+
+    @Override
+    protected String javaLibraryPathValue() {
+        /*
+         * Adapted from `os::init_system_properties_values` in `src/hotspot/os/bsd/os_bsd.cpp`, but
+         * omits HotSpot specifics.
+         */
+        CCharPointer dyldLibraryPath;
+        try (CCharPointerHolder name = CTypeConversion.toCString("DYLD_LIBRARY_PATH")) {
+            dyldLibraryPath = Stdlib.getenv(name.get());
+        }
+
+        if (dyldLibraryPath.isNull()) {
+            return ".";
+        }
+        return CTypeConversion.toJavaString(dyldLibraryPath) + ":.";
+    }
+
+    @Override
+    protected String osNameValue() {
+        return Platform.includedIn(Platform.IOS.class) ? "iOS" : "Mac OS X";
     }
 
     private static volatile String osVersionValue = null;
@@ -69,37 +93,43 @@ public class DarwinSystemPropertiesSupport extends PosixSystemPropertiesSupport 
             return osVersionValue;
         }
 
-        /* On OSX Java returns the ProductVersion instead of kernel release info. */
-        CoreFoundation.CFDictionaryRef dict = CoreFoundation._CFCopyServerVersionDictionary();
-        if (dict.isNull()) {
-            dict = CoreFoundation._CFCopySystemVersionDictionary();
+        Foundation.NSOperatingSystemVersion osVersion = StackValue.get(Foundation.NSOperatingSystemVersion.class);
+        Foundation.operatingSystemVersion(osVersion);
+        if (osVersion.isNonNull()) {
+            long major = osVersion.getMajorVersion();
+            long minor = osVersion.getMinorVersion();
+            long patch = osVersion.getPatchVersion();
+            if (major == 10 && minor >= 16 && patch == 0) {
+                // Read *real* ProductVersion
+                CCharPointer osVersionStr = Foundation.systemVersionPlatform();
+                if (osVersionStr.isNonNull()) {
+                    osVersionValue = CTypeConversion.toJavaString(osVersionStr);
+                    LibC.free(osVersionStr);
+                    return osVersionValue;
+                }
+            } else {
+                if (patch == 0) {
+                    return osVersionValue = major + "." + minor;
+                } else {
+                    return osVersionValue = major + "." + minor + "." + patch;
+                }
+            }
         }
-        if (dict.isNull()) {
-            return osVersionValue = "Unknown";
+        // Fallback
+        CCharPointer osVersionStr = Foundation.systemVersionPlatformFallback();
+        if (osVersionStr.isNonNull()) {
+            osVersionValue = CTypeConversion.toJavaString(osVersionStr);
+            LibC.free(osVersionStr);
+            return osVersionValue;
         }
-        CoreFoundation.CFStringRef dictKeyRef = DarwinCoreFoundationUtils.toCFStringRef("MacOSXProductVersion");
-        CoreFoundation.CFStringRef dictValue = CoreFoundation.CFDictionaryGetValue(dict, dictKeyRef);
-        CoreFoundation.CFRelease(dictKeyRef);
-        if (dictValue.isNull()) {
-            dictKeyRef = DarwinCoreFoundationUtils.toCFStringRef("ProductVersion");
-            dictValue = CoreFoundation.CFDictionaryGetValue(dict, dictKeyRef);
-            CoreFoundation.CFRelease(dictKeyRef);
-        }
-        if (dictValue.isNonNull()) {
-            dictValue = (CFStringRef) CFRetain(dictValue);
-            osVersionValue = DarwinCoreFoundationUtils.fromCFStringRef(dictValue);
-            CoreFoundation.CFRelease(dictValue);
-        } else {
-            osVersionValue = "Unknown";
-        }
-        return osVersionValue;
+        return osVersionValue = "Unknown";
     }
 }
 
 @AutomaticFeature
 class DarwinSystemPropertiesFeature implements Feature {
     @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
+    public void duringSetup(DuringSetupAccess access) {
         ImageSingletons.add(SystemPropertiesSupport.class, new DarwinSystemPropertiesSupport());
     }
 }

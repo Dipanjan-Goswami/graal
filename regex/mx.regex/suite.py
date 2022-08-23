@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # The Universal Permissive License (UPL), Version 1.0
@@ -39,11 +39,11 @@
 # SOFTWARE.
 #
 suite = {
-  "mxversion" : "5.223.0",
+  "mxversion" : "6.4.0",
 
   "name" : "regex",
 
-  "version" : "20.1.0",
+  "version" : "22.3.0",
   "release" : False,
   "groupId" : "org.graalvm.regex",
   "url" : "http://www.graalvm.org/",
@@ -70,8 +70,15 @@ suite = {
       },
     ]
   },
+  "ignore_suite_commit_info": True,
+  "licenses" : {
+    "upl" : {
+      "name" : "Universal Permissive License, Version 1.0",
+      "url" : "http://opensource.org/licenses/upl",
+    },
+  },
 
-  "defaultLicense" : "GPLv2-CPE",
+  "defaultLicense" : "UPL",
 
   "javac.lint.overrides" : "none",
 
@@ -81,13 +88,18 @@ suite = {
       "sourceDirs" : ["src"],
       "dependencies" : [
         "truffle:TRUFFLE_API",
+        "truffle:ICU4J",
+      ],
+      "requires" : [
+        "java.logging",
+        "jdk.unsupported", # sun.misc.Unsafe
       ],
       "annotationProcessors" : ["truffle:TRUFFLE_DSL_PROCESSOR"],
       "exports" : [
         "com.oracle.truffle.regex.chardata",
       ],
-      "checkstyleVersion" : "8.8",
-      "javaCompliance" : "8+",
+      "checkstyleVersion" : "8.36.1",
+      "javaCompliance" : "11+",
       "workingSets" : "Truffle,Regex",
       "spotbugsIgnoresGenerated" : True,
     },
@@ -105,18 +117,27 @@ suite = {
         "mx:JMH_1_21",
       ],
       "checkstyle" : "com.oracle.truffle.regex",
-      "javaCompliance" : "8+",
+      "javaCompliance" : "11+",
       "workingSets" : "Truffle,Regex",
     },
   },
 
   "distributions" : {
     "TREGEX" : {
-      "moduleName" : "com.oracle.truffle.regex",
+      "moduleInfo" : {
+        "name" : "com.oracle.truffle.regex",
+        "requires" : [
+          "java.logging",
+          "jdk.unsupported", # sun.misc.Unsafe
+        ],
+      },
       "subDir" : "src",
       "dependencies" : ["com.oracle.truffle.regex"],
       "distDependencies" : [
         "truffle:TRUFFLE_API",
+      ],
+      "exclude" : [
+        "truffle:ICU4J",
       ],
       "maven" : {
         "artifactId" : "regex",

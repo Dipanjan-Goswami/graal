@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,30 +29,6 @@
  */
 package com.oracle.truffle.llvm.tests.debug;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Collection;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
-import org.graalvm.polyglot.Context;
-import org.graalvm.polyglot.Context.Builder;
-import org.graalvm.polyglot.Source;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-import org.junit.runners.Parameterized.Parameters;
-
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.debug.Breakpoint;
 import com.oracle.truffle.api.debug.DebugException;
@@ -61,52 +37,85 @@ import com.oracle.truffle.api.debug.DebuggerSession;
 import com.oracle.truffle.api.debug.SuspendedCallback;
 import com.oracle.truffle.api.debug.SuspendedEvent;
 import com.oracle.truffle.llvm.runtime.LLVMLanguage;
+import com.oracle.truffle.llvm.tests.TestCaseCollector;
 import com.oracle.truffle.llvm.tests.options.TestOptions;
 import com.oracle.truffle.tck.DebuggerTester;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Source;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.AssumptionViolatedException;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Map.Entry;
+
+import static com.oracle.truffle.llvm.tests.debug.LLVMDebugTestBase.TEST_FOLDER_EXT;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(Parameterized.class)
 public final class LLVMDebugExprParserTest {
 
-    private static final Path BC_DIR_PATH = Paths.get(TestOptions.TEST_SUITE_PATH, "debugexpr");
+    private static final Path BC_DIR_PATH = Paths.get(TestOptions.getTestDistribution("SULONG_EMBEDDED_TEST_SUITES"), "debugexpr");
     private static final Path SRC_DIR_PATH = Paths.get(TestOptions.PROJECT_ROOT, "..", "tests", "com.oracle.truffle.llvm.tests.debugexpr.native", "debugexpr");
     private static final Path TRACE_DIR_PATH = Paths.get(TestOptions.PROJECT_ROOT, "..", "tests", "com.oracle.truffle.llvm.tests.debugexpr.native", "testExpr");
 
-    private static final String OPTION_ENABLE_LVI = "llvm.enableLVI";
+    // Use the no-optimization BC file as the evaluation of the debug expressions in the optimized
+    // one fails due to
+    // missing variables removed during constant folding.
+    private static final String CONFIGURATION = "bitcode-O0.bc";
 
-    private static final String CONFIGURATION = "O1.bc";
-
-    public LLVMDebugExprParserTest(String testName, String configuration) {
-        this.testName = testName;
-        this.configuration = configuration;
+    public LLVMDebugExprParserTest(Path testPath, String testName, String excludeReason) {
+        this.testPath = testPath;
+        this.testName = getTestSource(testName);
+        this.excludeReason = excludeReason;
     }
 
-    static void setContextOptions(Builder contextBuilder) {
-        // contextBuilder.option(EXPERIMENTAL_OPTIONS, String.valueOf(true));
-        contextBuilder.option(OPTION_ENABLE_LVI, String.valueOf(true));
-    }
-
-    @Parameters(name = "{0}")
+    @Parameters(name = "{1}")
     public static Collection<Object[]> getConfigurations() {
-        try (Stream<Path> dirs = Files.walk(BC_DIR_PATH)) {
-            return dirs.filter(path -> path.endsWith(CONFIGURATION)).map(path -> new Object[]{path.getParent().getFileName().toString(), CONFIGURATION}).collect(Collectors.toSet());
-        } catch (IOException e) {
-            throw new AssertionError("Error while finding tests!", e);
+        return TestCaseCollector.collectTestCases(LLVMDebugExprParserTest.class, BC_DIR_PATH, f -> f.getFileName().toString().equals(CONFIGURATION));
+    }
+
+    private static String getTestSource(String filename) {
+        if (filename.endsWith(TEST_FOLDER_EXT)) {
+            return filename.substring(0, filename.length() - TEST_FOLDER_EXT.length());
         }
+        return filename;
     }
 
     private static final String LANG_ID = LLVMLanguage.ID;
 
-    private static final String SOURCE_FILE_EXTENSIONS = ".c";
     private static final String TRACE_EXT = ".txt";
     private static final String OPTION_LAZY_PARSING = "llvm.lazyParsing";
 
+    private final Path testPath;
     private final String testName;
-    private final String configuration;
+    private final String excludeReason;
 
     private DebuggerTester tester;
 
-    String getTestName() {
+    protected String getTestName() {
         return testName;
+    }
+
+    protected void assumeNotExcluded() {
+        if (getExclusionReason() != null) {
+            throw new AssumptionViolatedException("Test excluded: " + getExclusionReason());
+        }
+    }
+
+    private String getExclusionReason() {
+        return excludeReason;
     }
 
     @Before
@@ -114,7 +123,6 @@ public final class LLVMDebugExprParserTest {
         final Context.Builder contextBuilder = Context.newBuilder(LANG_ID);
         contextBuilder.allowAllAccess(true);
         contextBuilder.option(OPTION_LAZY_PARSING, String.valueOf(false));
-        setContextOptions(contextBuilder);
         tester = new DebuggerTester(contextBuilder);
     }
 
@@ -135,21 +143,29 @@ public final class LLVMDebugExprParserTest {
     }
 
     private Source loadOriginalSource() {
-        final File file = SRC_DIR_PATH.resolve(testName + SOURCE_FILE_EXTENSIONS).toFile();
-        if (file.exists()) {
-            return loadSource(file);
-        }
-        throw new AssertionError("Could not locate source for test: " + testName);
+        final File file = getSourcePath().resolve(testName).toFile();
+        Assert.assertTrue("Locate Source", file.exists());
+        return loadSource(file);
     }
 
     private Source loadBitcodeSource() {
-        final Path path = BC_DIR_PATH.resolve(Paths.get(testName, configuration));
-        return loadSource(path.toFile());
+        final File file = testPath.resolve(CONFIGURATION).toFile();
+        Assert.assertTrue("Locate Bitcode", file.exists());
+        return loadSource(file);
     }
 
     private TestExpressions fetchExpressions() {
-        final Path path = TRACE_DIR_PATH.resolve(testName + TRACE_EXT);
+        final Path path = getTracePath().resolve(testName + TRACE_EXT);
+        Assert.assertTrue("Locate Test Expression", path.toFile().exists());
         return TestExpressions.parse(path);
+    }
+
+    static Path getSourcePath() {
+        return SRC_DIR_PATH;
+    }
+
+    static Path getTracePath() {
+        return TRACE_DIR_PATH;
     }
 
     private static final class BreakInfo {
@@ -276,6 +292,7 @@ public final class LLVMDebugExprParserTest {
 
     @Test
     public void test() throws Throwable {
+        assumeNotExcluded();
         final TestExpressions testExpr = fetchExpressions();
 
         final Source source = loadOriginalSource();

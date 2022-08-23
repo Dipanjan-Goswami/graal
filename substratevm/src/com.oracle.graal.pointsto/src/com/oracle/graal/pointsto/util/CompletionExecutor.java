@@ -24,12 +24,10 @@
  */
 package com.oracle.graal.pointsto.util;
 
-import static org.graalvm.compiler.debug.DebugContext.DEFAULT_LOG_STREAM;
-import static org.graalvm.compiler.debug.DebugContext.NO_GLOBAL_METRIC_VALUES;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -51,7 +49,7 @@ import jdk.vm.ci.common.JVMCIError;
  * An extended version of a {@link ThreadPoolExecutor} that can block until all posted operations
  * are completed.
  */
-public final class CompletionExecutor {
+public class CompletionExecutor {
 
     private enum State {
         BEFORE_START,
@@ -62,15 +60,16 @@ public final class CompletionExecutor {
     private final AtomicReference<State> state;
     private final LongAdder postedOperations;
     private final LongAdder completedOperations;
-    private final List<DebugContextRunnable> postedBeforeStart;
-    private volatile CopyOnWriteArrayList<Throwable> exceptions = new CopyOnWriteArrayList<>();
+    private List<DebugContextRunnable> postedBeforeStart;
+    private final CopyOnWriteArrayList<Throwable> exceptions = new CopyOnWriteArrayList<>();
 
-    private final ForkJoinPool executorService;
+    private ExecutorService executorService;
     private final Runnable heartbeatCallback;
 
-    private BigBang bb;
+    private final BigBang bb;
     private Timing timing;
     private Object vmConfig;
+    private final Thread startingThread;
 
     public interface Timing {
         long getPrintIntervalNanos();
@@ -91,7 +90,7 @@ public final class CompletionExecutor {
         state = new AtomicReference<>(State.UNUSED);
         postedOperations = new LongAdder();
         completedOperations = new LongAdder();
-        postedBeforeStart = new ArrayList<>();
+        startingThread = Thread.currentThread();
     }
 
     public void init() {
@@ -99,13 +98,11 @@ public final class CompletionExecutor {
     }
 
     public void init(Timing newTiming) {
-        assert isSequential() || !executorService.hasQueuedSubmissions();
-
         timing = newTiming;
         setState(State.BEFORE_START);
         postedOperations.reset();
         completedOperations.reset();
-        postedBeforeStart.clear();
+        postedBeforeStart = new ArrayList<>();
         vmConfig = bb.getHostVM().getConfiguration();
     }
 
@@ -126,11 +123,11 @@ public final class CompletionExecutor {
         /**
          * Gets a {@link DebugContext} the executor will use for this task.
          *
-         * A task can override this and return {@link DebugContext#disabled} to avoid the cost of
-         * creating a {@link DebugContext} if one is not needed.
+         * {@link DebugContext#disabled} is used by default to avoid the cost of creating a
+         * {@link DebugContext}, so the task should override this if one is needed.
          */
-        default DebugContext getDebug(OptionValues options, List<DebugHandlersFactory> factories) {
-            return DebugContext.create(options, getDescription(), NO_GLOBAL_METRIC_VALUES, DEFAULT_LOG_STREAM, factories);
+        default DebugContext getDebug(@SuppressWarnings("unused") OptionValues options, @SuppressWarnings("unused") List<DebugHandlersFactory> factories) {
+            return DebugContext.disabled(null);
         }
     }
 
@@ -145,6 +142,11 @@ public final class CompletionExecutor {
             case UNUSED:
                 throw JVMCIError.shouldNotReachHere();
             case BEFORE_START:
+                /*
+                 * The postedBeforeStart list is not thread safe. Make sure that it is only updated
+                 * from the same thread that created the executor.
+                 */
+                assert Thread.currentThread() == startingThread;
                 postedBeforeStart.add(command);
                 break;
             case STARTED:
@@ -161,33 +163,7 @@ public final class CompletionExecutor {
                     }
                     completedOperations.increment();
                 } else {
-                    executorService.execute(() -> {
-                        bb.getHostVM().installInThread(vmConfig);
-                        long startTime = 0L;
-                        if (timing != null) {
-                            startTime = System.nanoTime();
-                        }
-                        heartbeatCallback.run();
-                        Throwable thrown = null;
-                        try (DebugContext debug = command.getDebug(bb.getOptions(), bb.getDebugHandlerFactories());
-                                        Scope s = debug.scope("Operation");
-                                        Activation a = debug.activate()) {
-                            command.run(debug);
-                        } catch (Throwable x) {
-                            thrown = x;
-                        } finally {
-                            bb.getHostVM().clearInThread();
-                            if (timing != null) {
-                                long taskTime = System.nanoTime() - startTime;
-                                timing.addCompleted(command, taskTime);
-                            }
-
-                            if (thrown != null) {
-                                exceptions.add(thrown);
-                            }
-                            completedOperations.increment();
-                        }
-                    });
+                    executeService(command);
                 }
 
                 break;
@@ -196,12 +172,47 @@ public final class CompletionExecutor {
         }
     }
 
+    private void executeService(DebugContextRunnable command) {
+        executorService.execute(() -> {
+            executeCommand(command);
+        });
+    }
+
+    @SuppressWarnings("try")
+    private void executeCommand(DebugContextRunnable command) {
+        bb.getHostVM().installInThread(vmConfig);
+        long startTime = 0L;
+        if (timing != null) {
+            startTime = System.nanoTime();
+        }
+        heartbeatCallback.run();
+        Throwable thrown = null;
+        try (DebugContext debug = command.getDebug(bb.getOptions(), bb.getDebugHandlerFactories());
+                        Scope s = debug.scope("Operation");
+                        Activation a = debug.activate()) {
+            command.run(debug);
+        } catch (Throwable x) {
+            thrown = x;
+        } finally {
+            bb.getHostVM().clearInThread();
+            if (timing != null) {
+                long taskTime = System.nanoTime() - startTime;
+                timing.addCompleted(command, taskTime);
+            }
+
+            if (thrown != null) {
+                exceptions.add(thrown);
+            }
+            completedOperations.increment();
+        }
+    }
+
     public void start() {
         assert state.get() == State.BEFORE_START;
 
         setState(State.STARTED);
         postedBeforeStart.forEach(this::execute);
-        postedBeforeStart.clear();
+        postedBeforeStart = null;
     }
 
     private void setState(State newState) {
@@ -227,7 +238,12 @@ public final class CompletionExecutor {
         while (true) {
             assert state.get() == State.STARTED;
 
-            boolean quiescent = executorService.awaitTermination(100, TimeUnit.MILLISECONDS);
+            boolean quiescent;
+            if (executorService instanceof ForkJoinPool) {
+                quiescent = ((ForkJoinPool) executorService).awaitQuiescence(100, TimeUnit.MILLISECONDS);
+            } else {
+                quiescent = executorService.awaitTermination(100, TimeUnit.MILLISECONDS);
+            }
             if (timing != null && !quiescent) {
                 long curTime = System.nanoTime();
                 if (curTime - lastPrint > timing.getPrintIntervalNanos()) {
@@ -254,7 +270,7 @@ public final class CompletionExecutor {
     }
 
     public long getPostedOperations() {
-        return postedOperations.sum() + postedBeforeStart.size();
+        return postedOperations.sum() + (postedBeforeStart == null ? 0 : postedBeforeStart.size());
     }
 
     public boolean isSequential() {
@@ -262,7 +278,7 @@ public final class CompletionExecutor {
     }
 
     public void shutdown() {
-        assert isSequential() || !executorService.hasQueuedSubmissions() : "There should be no queued submissions on shutdown.";
+        assert isSequential() || !(executorService instanceof ForkJoinPool) || !((ForkJoinPool) executorService).hasQueuedSubmissions() : "There should be no queued submissions on shutdown.";
         assert completedOperations.sum() == postedOperations.sum() : "Posted operations (" + postedOperations.sum() + ") must match completed (" + completedOperations.sum() + ") operations";
         setState(State.UNUSED);
     }
@@ -271,7 +287,25 @@ public final class CompletionExecutor {
         return state.get() == State.STARTED;
     }
 
-    public ForkJoinPool getExecutorService() {
+    public int parallelism() {
+        if (executorService instanceof ForkJoinPool) {
+            return ((ForkJoinPool) executorService).getParallelism();
+        }
+        return 1;
+    }
+
+    public int poolSize() {
+        if (executorService instanceof ForkJoinPool) {
+            return ((ForkJoinPool) executorService).getPoolSize();
+        }
+        return 1;
+    }
+
+    public ExecutorService getExecutorService() {
         return executorService;
+    }
+
+    public void setExecutorService(ExecutorService executorService) {
+        this.executorService = executorService;
     }
 }

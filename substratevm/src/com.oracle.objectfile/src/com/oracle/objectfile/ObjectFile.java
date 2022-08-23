@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,9 +24,7 @@
  */
 package com.oracle.objectfile;
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
@@ -43,8 +41,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import java.util.stream.StreamSupport;
 
+import org.graalvm.compiler.debug.DebugContext;
+
+import com.oracle.objectfile.debuginfo.DebugInfoProvider;
 import com.oracle.objectfile.elf.ELFObjectFile;
 import com.oracle.objectfile.macho.MachOObjectFile;
 import com.oracle.objectfile.pecoff.PECoffObjectFile;
@@ -244,31 +246,31 @@ public abstract class ObjectFile {
          * The relocation's symbol provides an address whose absolute value (plus addend) supplies
          * the fixup bytes.
          */
-        DIRECT,
+        DIRECT_1,
+        DIRECT_2,
+        DIRECT_4,
+        DIRECT_8,
         /**
-         * The relocation's symbol provides high fixup bytes.
+         * The index of the object file section containing the relocation's symbol supplies the
+         * fixup bytes. (used in CodeView debug information)
          */
-        DIRECT_HI,
+        SECTION_2,
         /**
-         * The relocation's symbol provides low fixup bytes.
+         * The address of the object file section containing the relocation's symbol (plus addend)
+         * supplies the fixup bytes. (used in CodeView debug information)
          */
-        DIRECT_LO,
+        SECREL_4,
         /**
          * The relocation's symbol provides an address whose PC-relative value (plus addend)
          * supplies the fixup bytes.
          */
-        PC_RELATIVE,
+        PC_RELATIVE_1,
+        PC_RELATIVE_2,
+        PC_RELATIVE_4,
+        PC_RELATIVE_8,
         /**
-         * The relocation's symbol is ignored; the load-time offset of the program (FIXME: or shared
-         * object), plus addend, supplies the fixup bytes.
+         * AArch64-specific relocation types.
          */
-        PROGRAM_BASE {
-
-            @Override
-            public boolean usesSymbolValue() {
-                return false;
-            }
-        },
         AARCH64_R_MOVW_UABS_G0,
         AARCH64_R_MOVW_UABS_G0_NC,
         AARCH64_R_MOVW_UABS_G1,
@@ -280,21 +282,80 @@ public abstract class ObjectFile {
         AARCH64_R_AARCH64_ADD_ABS_LO12_NC,
         AARCH64_R_LD_PREL_LO19,
         AARCH64_R_GOT_LD_PREL19,
+        AARCH64_R_AARCH64_LDST128_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST64_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST32_ABS_LO12_NC,
         AARCH64_R_AARCH64_LDST16_ABS_LO12_NC,
-        AARCH64_R_AARCH64_LDST8_ABS_LO12_NC,
-        AARCH64_R_AARCH64_LDST128_ABS_LO12_NC;
+        AARCH64_R_AARCH64_LDST8_ABS_LO12_NC;
 
-        /**
-         * Generally, relocation records come with symbols whose value is used to compute the
-         * fixed-up bytes at the relocation site. In some cases, though, no such symbol is needed.
-         *
-         * @return Whether the value of any symbol attached to the relocation record affects the
-         *         fixed-up contents of the relocation site.
-         */
-        public boolean usesSymbolValue() {
-            return true;
+        public static RelocationKind getDirect(int relocationSize) {
+            switch (relocationSize) {
+                case 1:
+                    return DIRECT_1;
+                case 2:
+                    return DIRECT_2;
+                case 4:
+                    return DIRECT_4;
+                case 8:
+                    return DIRECT_8;
+                default:
+                    return UNKNOWN;
+            }
+        }
+
+        public static RelocationKind getPCRelative(int relocationSize) {
+            switch (relocationSize) {
+                case 1:
+                    return PC_RELATIVE_1;
+                case 2:
+                    return PC_RELATIVE_2;
+                case 4:
+                    return PC_RELATIVE_4;
+                case 8:
+                    return PC_RELATIVE_8;
+                default:
+                    return UNKNOWN;
+            }
+        }
+
+        public static boolean isPCRelative(RelocationKind kind) {
+            switch (kind) {
+                case PC_RELATIVE_1:
+                case PC_RELATIVE_2:
+                case PC_RELATIVE_4:
+                case PC_RELATIVE_8:
+                    return true;
+            }
+            return false;
+        }
+
+        public static int getRelocationSize(RelocationKind kind) {
+            switch (kind) {
+                case DIRECT_1:
+                case PC_RELATIVE_1:
+                    return 1;
+                case DIRECT_2:
+                case PC_RELATIVE_2:
+                case SECTION_2:
+                    return 2;
+                case DIRECT_4:
+                case PC_RELATIVE_4:
+                case SECREL_4:
+                    return 4;
+                case AARCH64_R_AARCH64_ADR_PREL_PG_HI21:
+                case AARCH64_R_AARCH64_LDST64_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST32_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST16_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST8_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_ADD_ABS_LO12_NC:
+                    // AArch64 instructions are 4 bytes
+                    return 4;
+                case DIRECT_8:
+                case PC_RELATIVE_8:
+                    return 8;
+            }
+            // other types should not be queried
+            throw new IllegalArgumentException("Invalid RelocationKind provided: " + kind);
         }
     }
 
@@ -302,15 +363,6 @@ public abstract class ObjectFile {
      * Interface implemented by objects implementing a specific relocation method and size.
      */
     public interface RelocationMethod {
-
-        RelocationKind getKind();
-
-        boolean canUseImplicitAddend();
-
-        boolean canUseExplicitAddend();
-
-        int getRelocatedByteSize();
-
         /*
          * If we were implementing a linker, we'd have a method something like
          *
@@ -325,10 +377,6 @@ public abstract class ObjectFile {
     public interface RelocationSiteInfo {
 
         long getOffset();
-
-        int getRelocatedByteSize();
-
-        RelocationKind getKind();
     }
 
     /**
@@ -359,17 +407,14 @@ public abstract class ObjectFile {
          * this is true of our native native image code.
          *
          * @param offset the offset into the section contents of the beginning of the fixed-up bytes
-         * @param length the length of byte sequence to be fixed up
          * @param bb the byte buffer representing the encoded section contents, at least as far as
          *            offset + length bytes
          * @param k the kind of fixup to be applied
          * @param symbolName the name of the symbol whose value is used to compute the fixed-up
          *            bytes
-         * @param useImplicitAddend whether the current bytes are to be used as an addend
-         * @param explicitAddend a full-width addend, or null if useImplicitAddend is true
-         * @return the relocation record created (or found, if it exists already)
+         * @param addend a full-width addend, or 0 if unneeded
          */
-        RelocationRecord markRelocationSite(int offset, int length, ByteBuffer bb, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, ByteBuffer bb, RelocationKind k, String symbolName, long addend);
 
         /**
          * Force the creation of a relocation section/element for this section, and return it. This
@@ -377,13 +422,12 @@ public abstract class ObjectFile {
          * which leads to unpredictable results (e.g. not appearing in the ELF SHT, if the SHT was
          * written before the section was created).
          *
-         * @param useImplicitAddend whether the relocation section of interest is for implicit
-         *            addends
+         * @param addend whether a full-width addend, or 0 if unneeded
          *
          * @return the element which will hold relocation records (of the argument-specified kind)
          *         for this section
          */
-        Element getOrCreateRelocationElement(boolean useImplicitAddend);
+        Element getOrCreateRelocationElement(long addend);
     }
 
     /**
@@ -400,7 +444,7 @@ public abstract class ObjectFile {
          * passed a buffer. It uses the byte array accessed by {@link #getContent} and
          * {@link #setContent}.
          */
-        RelocationRecord markRelocationSite(int offset, int length, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, RelocationKind k, String symbolName, long addend);
     }
 
     public interface NobitsSectionImpl extends ElementImpl {
@@ -933,7 +977,7 @@ public abstract class ObjectFile {
 
         @Override
         public String toString() {
-            return getClass().getSimpleName() + "(" + name + ")";
+            return getClass().getName() + "(" + name + ")";
         }
 
         @Override
@@ -1086,6 +1130,17 @@ public abstract class ObjectFile {
         // flag compatibility
     }
 
+    /**
+     * API method provided to allow a native image generator to provide details of types, code and
+     * heap data inserted into a native image.
+     *
+     * @param debugInfoProvider an implementation of the provider interface that communicates
+     *            details of the relevant types, code and heap data.
+     */
+    public void installDebugInfo(@SuppressWarnings("unused") DebugInfoProvider debugInfoProvider) {
+        // do nothing by default
+    }
+
     protected static Iterable<LayoutDecision> allDecisions(final Map<Element, LayoutDecisionMap> decisions) {
         return () -> StreamSupport.stream(decisions.values().spliterator(), false)
                         .flatMap(layoutDecisionMap -> StreamSupport.stream(layoutDecisionMap.spliterator(), false)).iterator();
@@ -1214,8 +1269,11 @@ public abstract class ObjectFile {
         int totalSize = bake(sortedObjectFileElements);
         try {
             ByteBuffer buffer = outputChannel.map(MapMode.READ_WRITE, 0, totalSize);
-            try (Closeable ignored = () -> ((DirectBuffer) buffer).cleaner().clean()) {
+            try {
                 writeBuffer(sortedObjectFileElements, buffer);
+            } finally {
+                // unmap immediately
+                ((DirectBuffer) buffer).cleaner().clean();
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -1604,19 +1662,12 @@ public abstract class ObjectFile {
         return decisionsByElement;
     }
 
-    /**
-     * See {@code org.graalvm.compiler.serviceprovider.BufferUtil}.
-     */
-    private static Buffer asBaseBuffer(Buffer obj) {
-        return obj;
-    }
-
     public void writeBuffer(List<Element> sortedObjectFileElements, ByteBuffer out) {
         /* Emit each one! */
         for (Element e : sortedObjectFileElements) {
             int off = (int) decisionsTaken.get(e).getDecision(LayoutDecision.Kind.OFFSET).getValue();
             assert off != Integer.MAX_VALUE; // not allowed any more -- this was a broken approach
-            asBaseBuffer(out).position(off);
+            out.position(off);
             int expectedSize = (int) decisionsTaken.get(e).getDecidedValue(LayoutDecision.Kind.SIZE);
             byte[] content = (byte[]) decisionsTaken.get(e).getDecidedValue(LayoutDecision.Kind.CONTENT);
             out.put(content);
@@ -1723,6 +1774,52 @@ public abstract class ObjectFile {
             return t;
         } else {
             return createSymbolTable();
+        }
+    }
+
+    /**
+     * Temporary storage for a debug context installed in a nested scope under a call. to
+     * {@link #withDebugContext}
+     */
+    private DebugContext debugContext = null;
+
+    /**
+     * Allows a task to be executed with a debug context in a named subscope bound to the object
+     * file and accessible to code executed during the lifetime of the task. Invoked code may obtain
+     * access to the debug context using method {@link #debugContext}.
+     *
+     * @param context a context to be bound to the object file for the duration of the task
+     *            execution.
+     * @param scopeName a name to be used to define a subscope current while the task is being
+     *            executed.
+     * @param task a task to be executed while the context is bound to the object file.
+     */
+    @SuppressWarnings("try")
+    public void withDebugContext(DebugContext context, String scopeName, Runnable task) {
+        try (DebugContext.Scope s = context.scope(scopeName)) {
+            this.debugContext = context;
+            task.run();
+        } catch (Throwable e) {
+            throw debugContext.handle(e);
+        } finally {
+            debugContext = null;
+        }
+    }
+
+    /**
+     * Allows a consumer to retrieve the debug context currently bound to this object file. This
+     * method must only called underneath an invocation of method {@link #withDebugContext}.
+     *
+     * @param scopeName a name to be used to define a subscope current while the consumer is active.
+     * @param action an action parameterised by the debug context.
+     */
+    @SuppressWarnings("try")
+    public void debugContext(String scopeName, Consumer<DebugContext> action) {
+        assert debugContext != null;
+        try (DebugContext.Scope s = debugContext.scope(scopeName)) {
+            action.accept(debugContext);
+        } catch (Throwable e) {
+            throw debugContext.handle(e);
         }
     }
 }

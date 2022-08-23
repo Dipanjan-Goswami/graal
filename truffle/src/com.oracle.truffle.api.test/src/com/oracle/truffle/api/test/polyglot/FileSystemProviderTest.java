@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -55,13 +55,22 @@ import java.nio.file.attribute.FileTime;
 import java.util.EnumSet;
 import java.util.Optional;
 import java.util.stream.StreamSupport;
+
+import org.graalvm.polyglot.io.FileSystem;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
-import org.graalvm.polyglot.io.FileSystem;
+
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class FileSystemProviderTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     private Path workDir;
     private Path invalidWorkDir;
@@ -77,7 +86,7 @@ public class FileSystemProviderTest {
         existingRelative = workDir.relativize(existingAbsolute);
         // Use FileSystem.setCurrentWorkingDirectory to verify that all FileSystem operations are
         // correctly using current working directory
-        fs = newFullIOFileSystem();
+        fs = FileSystem.newDefaultFileSystem();
         fs.setCurrentWorkingDirectory(workDir);
     }
 
@@ -245,17 +254,6 @@ public class FileSystemProviderTest {
             final Method m = clz.getDeclaredMethod("newDefaultFileSystem", Path.class);
             m.setAccessible(true);
             return (FileSystem) m.invoke(null, workDir);
-        } catch (ReflectiveOperationException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    static FileSystem newFullIOFileSystem() {
-        try {
-            final Class<?> clz = Class.forName("com.oracle.truffle.polyglot.FileSystems");
-            final Method m = clz.getDeclaredMethod("newDefaultFileSystem");
-            m.setAccessible(true);
-            return (FileSystem) m.invoke(null);
         } catch (ReflectiveOperationException e) {
             throw new RuntimeException(e);
         }

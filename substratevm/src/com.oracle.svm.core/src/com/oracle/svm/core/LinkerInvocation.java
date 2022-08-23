@@ -59,5 +59,17 @@ public interface LinkerInvocation {
 
     List<String> getCommand();
 
-    void addAdditionalPreOption(String option);
+    default List<String> getFallbackCommand() {
+        return getCommand();
+    }
+
+    default boolean shouldRunFallback(@SuppressWarnings("unused") String message) {
+        return false;
+    }
+
+    void addNativeLinkerOption(String option);
+
+    List<String> getImageSymbols(boolean onlyGlobal);
+
+    Path getTempDirectory();
 }

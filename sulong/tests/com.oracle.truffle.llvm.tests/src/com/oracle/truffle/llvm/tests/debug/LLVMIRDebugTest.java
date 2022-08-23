@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -34,46 +34,81 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.logging.Level;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import com.oracle.truffle.llvm.tests.options.TestOptions;
 import org.graalvm.polyglot.Context;
+import org.junit.Assert;
+import org.junit.Assume;
+import org.junit.BeforeClass;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+import com.oracle.truffle.llvm.tests.CommonTestUtils;
+import com.oracle.truffle.llvm.tests.Platform;
+import com.oracle.truffle.llvm.tests.options.TestOptions;
+
 @RunWith(Parameterized.class)
 public final class LLVMIRDebugTest extends LLVMDebugTestBase {
 
-    private static final String CONFIGURATION = "O0.bc";
+    private static final String CONFIGURATION = "bitcode-O0.bc";
 
-    private static final Path BC_DIR_PATH = Paths.get(TestOptions.TEST_SUITE_PATH, "irdebug");
+    private static final Path BC_DIR_PATH = Paths.get(TestOptions.getTestDistribution("SULONG_EMBEDDED_TEST_SUITES"), "irdebug");
     private static final Path SRC_DIR_PATH = Paths.get(TestOptions.PROJECT_ROOT, "..", "tests", "com.oracle.truffle.llvm.tests.irdebug.native", "irdebug");
     private static final Path TRACE_DIR_PATH = Paths.get(TestOptions.PROJECT_ROOT, "..", "tests", "com.oracle.truffle.llvm.tests.irdebug.native", "trace");
 
     private static final String OPTION_LLDEBUG = "llvm.llDebug";
+    private static final String OPTION_LOG_LLDEBUG_LEVEL = "log.llvm.LLDebug.level";
     private static final String OPTION_LLDEBUG_SOURCES = "llvm.llDebug.sources";
+
+    @BeforeClass
+    public static void bundledOnly() {
+        TestOptions.assumeBundledLLVM();
+    }
+
+    @BeforeClass
+    public static void checkLinuxAMD64() {
+        Assume.assumeTrue("Skipping amd64 only test", Platform.isAMD64());
+    }
 
     @Parameters(name = "{0}")
     public static Collection<Object[]> getConfigurations() {
         try (Stream<Path> dirs = Files.walk(BC_DIR_PATH)) {
-            return dirs.filter(path -> path.endsWith(CONFIGURATION)).map(path -> new Object[]{path.getParent().getFileName().toString(), CONFIGURATION}).collect(Collectors.toSet());
+            return dirs.filter(path -> path.endsWith(CONFIGURATION)).map(path -> new Object[]{getTestSource(path), CONFIGURATION}).collect(Collectors.toSet());
         } catch (IOException e) {
-            throw new AssertionError("Error while finding tests!", e);
+            /*
+             * No tests found. To allow @BeforeClass assumptions to deal with this we return dummy
+             * data with `null` entry and fail in the constructor if we reach it.
+             */
+            return Collections.singletonList(new Object[]{null, CONFIGURATION});
         }
+    }
+
+    private static String getTestSource(Path path) {
+        String filename = path.getParent().getFileName().toString();
+        if (filename.endsWith(TEST_FOLDER_EXT)) {
+            return filename.substring(0, filename.length() - TEST_FOLDER_EXT.length());
+        }
+        return filename;
     }
 
     public LLVMIRDebugTest(String testName, String configuration) {
         super(testName, configuration);
+        Assert.assertNotNull("Error while finding tests!", testName);
     }
 
     @Override
     void setContextOptions(Context.Builder contextBuilder) {
+        if (!Platform.isLinux() || !Platform.isAMD64()) {
+            // ignore target triple
+            CommonTestUtils.disableBitcodeVerification(contextBuilder);
+        }
         contextBuilder.option(OPTION_LLDEBUG, String.valueOf(true));
-
-        final String testName = getTestName();
-        final String sourceMapping = String.format("%s=%s", BC_DIR_PATH.resolve(testName).resolve(CONFIGURATION), SRC_DIR_PATH.resolve(testName + ".ll"));
+        contextBuilder.option(OPTION_LOG_LLDEBUG_LEVEL, Level.SEVERE.getName());
+        final String sourceMapping = String.format("%s=%s", loadBitcodeSource().getPath(), loadOriginalSource().getPath());
         contextBuilder.option(OPTION_LLDEBUG_SOURCES, sourceMapping);
     }
 

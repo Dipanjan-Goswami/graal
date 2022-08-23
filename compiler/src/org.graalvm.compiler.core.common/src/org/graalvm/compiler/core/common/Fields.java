@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@ import static org.graalvm.compiler.serviceprovider.GraalUnsafeAccess.getUnsafe;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import org.graalvm.compiler.debug.GraalError;
 
@@ -40,6 +41,7 @@ import sun.misc.Unsafe;
 public class Fields {
 
     private static final Unsafe UNSAFE = getUnsafe();
+    private static final Fields EMPTY_FIELDS = new Fields(Collections.emptyList());
 
     /**
      * Offsets used with {@link Unsafe} to access the fields.
@@ -61,10 +63,10 @@ public class Fields {
     public static Fields forClass(Class<?> clazz, Class<?> endClazz, boolean includeTransient, FieldsScanner.CalcOffset calcOffset) {
         FieldsScanner scanner = new FieldsScanner(calcOffset == null ? new FieldsScanner.DefaultCalcOffset() : calcOffset);
         scanner.scan(clazz, endClazz, includeTransient);
-        return new Fields(scanner.data);
+        return create(scanner.data);
     }
 
-    public Fields(ArrayList<? extends FieldsScanner.FieldInfo> fields) {
+    protected Fields(List<? extends FieldsScanner.FieldInfo> fields) {
         Collections.sort(fields);
         this.offsets = new long[fields.size()];
         this.names = new String[offsets.length];
@@ -78,6 +80,13 @@ public class Fields {
             declaringClasses[index] = f.declaringClass;
             index++;
         }
+    }
+
+    public static Fields create(ArrayList<? extends FieldsScanner.FieldInfo> fields) {
+        if (fields.size() == 0) {
+            return EMPTY_FIELDS;
+        }
+        return new Fields(fields);
     }
 
     /**
@@ -293,38 +302,11 @@ public class Fields {
      * @param value a value that will be assigned to the field
      */
     private boolean checkAssignableFrom(Object object, int index, Object value) {
-        assert value == null || getType(index).isAssignableFrom(value.getClass()) : String.format("Field %s.%s of type %s is not assignable from %s", object.getClass().getSimpleName(),
-                        getName(index), getType(index).getSimpleName(), value.getClass().getSimpleName());
-        return true;
-    }
-
-    public void set(Object object, int index, Object value) {
-        long offset = offsets[index];
-        Class<?> type = types[index];
-        if (type.isPrimitive()) {
-            if (type == Integer.TYPE) {
-                UNSAFE.putInt(object, offset, (Integer) value);
-            } else if (type == Long.TYPE) {
-                UNSAFE.putLong(object, offset, (Long) value);
-            } else if (type == Boolean.TYPE) {
-                UNSAFE.putBoolean(object, offset, (Boolean) value);
-            } else if (type == Float.TYPE) {
-                UNSAFE.putFloat(object, offset, (Float) value);
-            } else if (type == Double.TYPE) {
-                UNSAFE.putDouble(object, offset, (Double) value);
-            } else if (type == Short.TYPE) {
-                UNSAFE.putShort(object, offset, (Short) value);
-            } else if (type == Character.TYPE) {
-                UNSAFE.putChar(object, offset, (Character) value);
-            } else if (type == Byte.TYPE) {
-                UNSAFE.putByte(object, offset, (Byte) value);
-            } else {
-                assert false : "unhandled property type: " + type;
-            }
-        } else {
-            assert checkAssignableFrom(object, index, value);
-            UNSAFE.putObject(object, offset, value);
+        if (value != null && !getType(index).isAssignableFrom(value.getClass())) {
+            throw new GraalError(String.format("Field %s.%s of type %s in %s is not assignable from %s", object.getClass().getSimpleName(),
+                            getName(index), object, getType(index).getSimpleName(), value.getClass().getSimpleName()));
         }
+        return true;
     }
 
     public void setRawPrimitive(Object object, int index, long value) {
@@ -411,6 +393,11 @@ public class Fields {
 
     public void putObject(Object object, int i, Object value) {
         assert checkAssignableFrom(object, i, value);
+        UNSAFE.putObject(object, offsets[i], value);
+    }
+
+    public void putObjectChecked(Object object, int i, Object value) {
+        checkAssignableFrom(object, i, value);
         UNSAFE.putObject(object, offsets[i], value);
     }
 }

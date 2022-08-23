@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,34 +25,36 @@
 package org.graalvm.compiler.truffle.test;
 
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import org.graalvm.compiler.core.common.CompilationIdentifier;
 import org.graalvm.compiler.core.common.PermanentBailoutException;
 import org.graalvm.compiler.nodes.StructuredGraph;
+import org.graalvm.compiler.phases.contract.NodeCostUtil;
+import org.graalvm.compiler.truffle.options.PolyglotCompilerOptions;
 import org.graalvm.compiler.truffle.runtime.OptimizedCallTarget;
+import org.graalvm.polyglot.Context;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.RootCallTarget;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.RootNode;
-import java.util.function.Supplier;
-import org.graalvm.compiler.truffle.options.PolyglotCompilerOptions;
-import org.graalvm.polyglot.Context;
 
 public class NodeLimitTest extends PartialEvaluationTest {
 
     @Before
     public void before() {
         setupContext();
-        OptimizedCallTarget callTarget = (OptimizedCallTarget) Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(42));
-        Assume.assumeFalse(callTarget.getOptionValue(PolyglotCompilerOptions.CompileImmediately));
+        Assume.assumeFalse(dummyTarget().getOptionValue(PolyglotCompilerOptions.CompileImmediately));
+    }
+
+    private static OptimizedCallTarget dummyTarget() {
+        return (OptimizedCallTarget) RootNode.createConstantNode(42).getCallTarget();
     }
 
     @Test
@@ -63,22 +65,6 @@ public class NodeLimitTest extends PartialEvaluationTest {
     @Test
     public void oneRootNodeTestEnoughGraalNodeCount() {
         expectAllOK(NodeLimitTest::createRootNode);
-    }
-
-    @Test
-    @SuppressWarnings("try")
-    public void testWithTruffleInlining() {
-        setupContext(Context.newBuilder().allowAllAccess(true).allowExperimentalOptions(true).option("engine.MaximumInlineNodeCount", "10").build());
-        RootNode rootNode = createRootNodeWithCall(new RootNode(null) {
-            @Override
-            public Object execute(VirtualFrame frame) {
-                CompilerAsserts.neverPartOfCompilation();
-                return null;
-            }
-        });
-        RootCallTarget target = Truffle.getRuntime().createCallTarget(rootNode);
-        final Object[] arguments = {1};
-        partialEval((OptimizedCallTarget) target, arguments, StructuredGraph.AllowAssumptions.YES, CompilationIdentifier.INVALID_COMPILATION_ID);
     }
 
     @Test(expected = PermanentBailoutException.class)
@@ -101,7 +87,7 @@ public class NodeLimitTest extends PartialEvaluationTest {
             }
 
             private Function<Integer, Integer> getF() {
-                return new Function<Integer, Integer>() {
+                return new Function<>() {
                     @Override
                     public Integer apply(Integer integer) {
                         return integer < 500 ? getF().apply(integer + 1) : 0;
@@ -109,10 +95,34 @@ public class NodeLimitTest extends PartialEvaluationTest {
                 };
             }
         };
-        partialEval((OptimizedCallTarget) Truffle.getRuntime().createCallTarget(rootNode), new Object[]{}, StructuredGraph.AllowAssumptions.YES, CompilationIdentifier.INVALID_COMPILATION_ID);
+        partialEval((OptimizedCallTarget) rootNode.getCallTarget(), new Object[]{}, CompilationIdentifier.INVALID_COMPILATION_ID);
     }
 
     private static class TestRootNode extends RootNode {
+        // Used to introduce allocation during PE to increase the size of the graph
+        private static class MyClass {
+            int[] array = new int[100];
+
+            MyClass() {
+                for (int i = 0; i < array.length; i++) {
+                    array[i] = value();
+                }
+            }
+
+            @CompilerDirectives.TruffleBoundary
+            private static int value() {
+                return 1;
+            }
+
+            public int sum() {
+                int sum = 0;
+                for (int i : array) {
+                    sum += i;
+                }
+                return sum;
+            }
+        }
+
         // Used as a black hole for filler code
         @SuppressWarnings("unused") private int global;
         @SuppressWarnings("unused") private int globalI;
@@ -129,7 +139,7 @@ public class NodeLimitTest extends PartialEvaluationTest {
 
         protected void foo() {
             for (; globalI < 1000; globalI++) {
-                global += globalI;
+                global += new MyClass().sum();
             }
 
         }
@@ -152,34 +162,22 @@ public class NodeLimitTest extends PartialEvaluationTest {
     }
 
     private void expectAllOK(Supplier<RootNode> rootNodeFactory) {
-        peRootNode(getBaselineGraphNodeCount(rootNodeFactory.get()) * 2, rootNodeFactory);
+        int adjust = 3; // account for reduction in base graph size by GR-34551
+        peRootNode((getBaselineGraphNodeCount(rootNodeFactory.get()) + adjust) * 2, rootNodeFactory);
     }
 
     private int getBaselineGraphNodeCount(RootNode rootNode) {
-        final OptimizedCallTarget baselineGraphTarget = (OptimizedCallTarget) Truffle.getRuntime().createCallTarget(rootNode);
-        final StructuredGraph baselineGraph = partialEval(baselineGraphTarget, new Object[]{}, StructuredGraph.AllowAssumptions.YES, CompilationIdentifier.INVALID_COMPILATION_ID);
-        return baselineGraph.getNodeCount();
+        final OptimizedCallTarget baselineGraphTarget = (OptimizedCallTarget) rootNode.getCallTarget();
+        final StructuredGraph baselineGraph = partialEval(baselineGraphTarget, new Object[]{}, getCompilationId(baselineGraphTarget));
+        return NodeCostUtil.computeGraphSize(baselineGraph);
     }
 
     @SuppressWarnings("try")
     private void peRootNode(int nodeLimit, Supplier<RootNode> rootNodeFactory) {
-        setupContext(Context.newBuilder().allowAllAccess(true).allowExperimentalOptions(true).option("engine.MaximumGraalNodeCount", Integer.toString(nodeLimit)).build());
-        RootCallTarget target = Truffle.getRuntime().createCallTarget(rootNodeFactory.get());
+        setupContext(Context.newBuilder().allowAllAccess(true).allowExperimentalOptions(true).option("engine.MaximumGraalGraphSize", Integer.toString(nodeLimit)).build());
+        RootCallTarget target = rootNodeFactory.get().getCallTarget();
         final Object[] arguments = {1};
-        partialEval((OptimizedCallTarget) target, arguments, StructuredGraph.AllowAssumptions.YES, CompilationIdentifier.INVALID_COMPILATION_ID);
+        partialEval((OptimizedCallTarget) target, arguments, getCompilationId(target));
     }
 
-    private static RootNode createRootNodeWithCall(final RootNode rootNode) {
-        return new TestRootNode() {
-
-            @Child DirectCallNode call = Truffle.getRuntime().createDirectCallNode(Truffle.getRuntime().createCallTarget(rootNode));
-
-            @Override
-            public Object execute(VirtualFrame frame) {
-                foo();
-                call.call(new Object[0]);
-                return null;
-            }
-        };
-    }
 }

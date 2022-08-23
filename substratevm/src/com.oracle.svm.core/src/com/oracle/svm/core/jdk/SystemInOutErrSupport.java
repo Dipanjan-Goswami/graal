@@ -31,13 +31,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
 import java.util.Objects;
 
-import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
-
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.RecomputeFieldValue;
+import org.graalvm.nativeimage.hosted.Feature;
 
 /**
  * This class provides replacement values for the {@link System#in}, {@link System#out}, and
@@ -51,48 +49,46 @@ import com.oracle.svm.core.annotate.RecomputeFieldValue;
  */
 public final class SystemInOutErrSupport {
     private InputStream in = new BufferedInputStream(new FileInputStream(FileDescriptor.in));
-    private PrintStream out = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 128), true);
-    private PrintStream err = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.err), 128), true);
+    private PrintStream out = newPrintStream(new FileOutputStream(FileDescriptor.out), System.getProperty("sun.stdout.encoding"));
+    private PrintStream err = newPrintStream(new FileOutputStream(FileDescriptor.err), System.getProperty("sun.stderr.encoding"));
+
+    /* Create `PrintStream` in the same way as `System.newPrintStream`. */
+    private static PrintStream newPrintStream(FileOutputStream fos, String enc) {
+        if (enc != null) {
+            try {
+                return new PrintStream(new BufferedOutputStream(fos, 128), true, enc);
+            } catch (UnsupportedEncodingException ignored) {
+            }
+        }
+        return new PrintStream(new BufferedOutputStream(fos, 128), true);
+    }
+
+    public InputStream in() {
+        return in;
+    }
 
     public static void setIn(InputStream in) {
         ImageSingletons.lookup(SystemInOutErrSupport.class).in = Objects.requireNonNull(in);
+    }
+
+    public PrintStream out() {
+        return out;
     }
 
     public static void setOut(PrintStream out) {
         ImageSingletons.lookup(SystemInOutErrSupport.class).out = Objects.requireNonNull(out);
     }
 
+    public PrintStream err() {
+        return err;
+    }
+
     public static void setErr(PrintStream err) {
         ImageSingletons.lookup(SystemInOutErrSupport.class).err = Objects.requireNonNull(err);
     }
-
-    // Checkstyle: stop
-    Object replaceStreams(Object object) {
-        if (object == System.in) {
-            return in;
-        } else if (object == System.out) {
-            return out;
-        } else if (object == System.err) {
-            return err;
-        } else {
-            return object;
-        }
-    }
-    // Checkstyle: resume
 }
 
-/**
- * We use an {@link Feature.DuringSetupAccess#registerObjectReplacer object replacer} because the
- * streams can be cached in other instance and static fields in addition to the fields in
- * {@link System}. We do not know all these places, so we do now know where to place
- * {@link RecomputeFieldValue} annotations.
- */
-@AutomaticFeature
+@SuppressWarnings("unused")
 class SystemInOutErrFeature implements Feature {
-    @Override
-    public void duringSetup(DuringSetupAccess access) {
-        SystemInOutErrSupport support = new SystemInOutErrSupport();
-        ImageSingletons.add(SystemInOutErrSupport.class, support);
-        access.registerObjectReplacer(support::replaceStreams);
-    }
+    /* Dummy for backward compatibility. */
 }

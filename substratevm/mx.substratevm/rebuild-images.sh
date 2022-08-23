@@ -43,7 +43,7 @@ location="$( cd -P "$( dirname "$source" )" && pwd )"
 graalvm_home="${location}/../../.."
 
 function usage_and_exit() {
-    echo "Usage: $0 [--verbose] polyglot|libpolyglot|js|llvm|python|ruby... [custom native-image args]..."
+    echo "Usage: $0 [--verbose] polyglot|libpolyglot|js|llvm|python|ruby|R... [custom native-image args]..."
     exit 1
 }
 
@@ -52,7 +52,7 @@ custom_args=()
 
 for opt in "${@:1}"; do
     case "$opt" in
-        polyglot|libpolyglot|js|llvm|python|ruby)
+        polyglot|libpolyglot|js|llvm|python|ruby|R)
            to_build+=("${opt}")
             ;;
         --help|-h)
@@ -74,14 +74,7 @@ if [[ "${#to_build[@]}" == "0" ]]; then
 fi
 
 function common() {
-    cmd_line+=(
-        "${graalvm_home}/bin/native-image"
-        ${custom_args[@]}
-    )
-
-    if $(${graalvm_home}/bin/native-image --help-extra | grep -q "\-\-no\-server"); then
-        cmd_line+=("--no-server")
-    fi
+    cmd_line+=("${graalvm_home}/bin/native-image")
 
     if [[ -f "${graalvm_home}/lib/svm/builder/svm-enterprise.jar" ]]; then
         cmd_line+=("-g")
@@ -107,6 +100,12 @@ function launcher() {
     fi
 }
 
+function library() {
+    common
+    local launcher="$1"
+    cmd_line+=("--macro:${launcher}-library")
+}
+
 for binary in "${to_build[@]}"; do
     cmd_line=()
     case "${binary}" in
@@ -117,7 +116,7 @@ for binary in "${to_build[@]}"; do
             libpolyglot
             ;;
         js)
-            launcher js
+            library jsvm
             ;;
         llvm)
             launcher lli
@@ -128,11 +127,15 @@ for binary in "${to_build[@]}"; do
         ruby)
             launcher truffleruby
             ;;
+        R)
+            launcher RMain
+            ;;
         *)
             echo "shouldNotReachHere()"
             exit 1
             ;;
     esac
+    cmd_line+=(${custom_args[@]})
     echo "Building ${binary}..."
     if [[ ! -z "${VERBOSE}" ]]; then
         echo "${cmd_line[@]}"

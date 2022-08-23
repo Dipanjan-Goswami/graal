@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,8 +40,12 @@
  */
 package com.oracle.truffle.api.test.polyglot;
 
+import java.util.List;
+
 import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.hosted.RuntimeReflection;
+
+import com.oracle.truffle.tck.tests.ValueAssert;
 
 /**
  * Register all <i>named</i> inner classes under {@link #TEST_CLASSES} for reflection, so that they
@@ -50,13 +54,19 @@ import org.graalvm.nativeimage.hosted.RuntimeReflection;
  */
 public class RegisterTestClassesForReflectionFeature implements Feature {
 
-    private static final Class<?>[] TEST_CLASSES = {
+    private static final List<Class<?>> TEST_CLASSES = List.of(
                     ValueHostInteropTest.class,
                     ValueHostConversionTest.class,
-                    ValueAssert.class
-    };
+                    ValueAssert.class,
+                    ValueAPITest.class,
+                    ValueScopingTest.class,
+                    PolyglotExceptionTest.class,
+                    LanguageSPIHostInteropTest.class,
+                    HostAccessTest.class,
+                    ExposeToGuestTest.class,
+                    ContextAPITest.class);
 
-    private static void registerClass(Class<?> clazz) {
+    protected static void registerClass(Class<?> clazz) {
         RuntimeReflection.register(clazz);
         RuntimeReflection.register(clazz.getConstructors());
         RuntimeReflection.register(clazz.getDeclaredConstructors());

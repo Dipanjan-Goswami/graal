@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -89,6 +89,29 @@ import org.graalvm.nativeimage.Platforms;
 public interface Feature {
 
     /**
+     * A URL to documentation or the sources of the feature.
+     *
+     * The URL will be used as a link for the feature in the build output (if supported by the
+     * user's terminal).
+     *
+     * @since 22.2
+     */
+    default String getURL() {
+        return null;
+    }
+
+    /**
+     * A short description of the feature (e.g., "Enables Truffle support").
+     *
+     * The description is displayed to users as part of the build output.
+     *
+     * @since 22.2
+     */
+    default String getDescription() {
+        return null;
+    }
+
+    /**
      * Access methods that are available for all feature methods.
      *
      * @since 19.0
@@ -102,6 +125,34 @@ public interface Feature {
          * @since 19.0
          */
         Class<?> findClassByName(String className);
+
+        /**
+         * Returns the class path of the native image that is currently built.
+         *
+         * The returned list does not include the native image generator itself, and does not
+         * include the JDK.
+         *
+         * @since 20.2
+         */
+        List<Path> getApplicationClassPath();
+
+        /**
+         * Returns the module path of the native image that is currently built.
+         *
+         * The returned list does not include the native image generator itself, and does not
+         * include the JDK.
+         *
+         * @since 20.2
+         */
+        List<Path> getApplicationModulePath();
+
+        /**
+         * Returns the {@link ClassLoader} that can find all classes of the class path and module
+         * path.
+         *
+         * @since 20.2
+         */
+        ClassLoader getApplicationClassLoader();
     }
 
     /**
@@ -204,11 +255,24 @@ public interface Feature {
         void registerReachabilityHandler(Consumer<DuringAnalysisAccess> callback, Object... elements);
 
         /**
-         * Registers a callback that is invoked once {@link Feature#duringAnalysis during analysis}
-         * for each time a method that overrides the specified {param baseMethod} is determined to
-         * be reachable at run time. In addition the handler will also get invoked once when the
-         * {param baseMethod} itself becomes reachable. The specific method that becomes reachable
-         * is passed to the handler as the second parameter.
+         * Registers a callback that is invoked once during analysis for each time a method that
+         * overrides the specified {param baseMethod} is determined to be reachable at run time. In
+         * addition, the handler will also get invoked once when the {param baseMethod} itself
+         * becomes reachable. The specific method that becomes reachable is passed to the handler as
+         * the second parameter.
+         * <p/>
+         * A method is considered reachable at run time if it can be executed, as determined via
+         * static analysis.
+         * <p/>
+         * Therefore, if a method can be statically bound (usually, that means it is final or
+         * private or static, but not abstract, or the declaring class is final), or it is a
+         * constructors, and it is the target of a reachable invoke, or it is inlined, then it is
+         * considered run time reachable.
+         * <p/>
+         * A virtual methods is considered run time reachable if its declaring-class or any of its
+         * subtypes is instantiated and the method is the target of a reachable invoke, or it is
+         * inlined. Even if the declaring type itself is not marked as instantiated the method can
+         * still be reachable via special invokes, e.g., `super` calls.
          *
          * @since 19.3
          */
@@ -224,6 +288,22 @@ public interface Feature {
          * @since 19.3
          */
         void registerSubtypeReachabilityHandler(BiConsumer<DuringAnalysisAccess, Class<?>> callback, Class<?> baseClass);
+
+        /**
+         * Registers a callback that is invoked once {@link Feature#duringAnalysis during analysis}
+         * when the class initializer for the given type is determined to be reachable at run time.
+         *
+         * @since 21.0
+         */
+        void registerClassInitializerReachabilityHandler(Consumer<DuringAnalysisAccess> callback, Class<?> clazz);
+
+        /**
+         * Registers a field value transformer for the provided field. See the JavaDoc of
+         * {@link FieldValueTransformer} for details.
+         * 
+         * @since 22.3
+         */
+        void registerFieldValueTransformer(Field field, FieldValueTransformer transformer);
     }
 
     /**
@@ -309,6 +389,15 @@ public interface Feature {
     @Platforms(Platform.HOSTED_ONLY.class)
     interface OnAnalysisExitAccess extends FeatureAccess {
 
+    }
+
+    /**
+     * Access methods available for {@link Feature#beforeUniverseBuilding}.
+     *
+     * @since 21.1
+     */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    interface BeforeUniverseBuildingAccess extends FeatureAccess {
     }
 
     /**
@@ -485,6 +574,17 @@ public interface Feature {
      * @since 19.0
      */
     default void onAnalysisExit(OnAnalysisExitAccess access) {
+    }
+
+    /**
+     * Handler for code that needs to run before universe building, but after hosted meta-access has
+     * been created.
+     *
+     * @param access The supported operations that the feature can perform at this time
+     *
+     * @since 21.1
+     */
+    default void beforeUniverseBuilding(BeforeUniverseBuildingAccess access) {
     }
 
     /**

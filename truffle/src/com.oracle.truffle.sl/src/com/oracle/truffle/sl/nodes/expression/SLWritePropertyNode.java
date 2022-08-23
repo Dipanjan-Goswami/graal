@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,8 +50,11 @@ import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.nodes.NodeInfo;
+import com.oracle.truffle.api.object.DynamicObjectLibrary;
 import com.oracle.truffle.sl.nodes.SLExpressionNode;
 import com.oracle.truffle.sl.nodes.util.SLToMemberNode;
+import com.oracle.truffle.sl.nodes.util.SLToTruffleStringNode;
+import com.oracle.truffle.sl.runtime.SLObject;
 import com.oracle.truffle.sl.runtime.SLUndefinedNameException;
 
 /**
@@ -73,7 +76,7 @@ public abstract class SLWritePropertyNode extends SLExpressionNode {
     static final int LIBRARY_LIMIT = 3;
 
     @Specialization(guards = "arrays.hasArrayElements(receiver)", limit = "LIBRARY_LIMIT")
-    protected Object write(Object receiver, Object index, Object value,
+    protected Object writeArray(Object receiver, Object index, Object value,
                     @CachedLibrary("receiver") InteropLibrary arrays,
                     @CachedLibrary("index") InteropLibrary numbers) {
         try {
@@ -86,7 +89,15 @@ public abstract class SLWritePropertyNode extends SLExpressionNode {
     }
 
     @Specialization(limit = "LIBRARY_LIMIT")
-    protected Object write(Object receiver, Object name, Object value,
+    protected Object writeSLObject(SLObject receiver, Object name, Object value,
+                    @CachedLibrary("receiver") DynamicObjectLibrary objectLibrary,
+                    @Cached SLToTruffleStringNode toTruffleStringNode) {
+        objectLibrary.put(receiver, toTruffleStringNode.execute(name), value);
+        return value;
+    }
+
+    @Specialization(guards = "!isSLObject(receiver)", limit = "LIBRARY_LIMIT")
+    protected Object writeObject(Object receiver, Object name, Object value,
                     @CachedLibrary("receiver") InteropLibrary objectLibrary,
                     @Cached SLToMemberNode asMember) {
         try {
@@ -98,4 +109,7 @@ public abstract class SLWritePropertyNode extends SLExpressionNode {
         return value;
     }
 
+    static boolean isSLObject(Object receiver) {
+        return receiver instanceof SLObject;
+    }
 }

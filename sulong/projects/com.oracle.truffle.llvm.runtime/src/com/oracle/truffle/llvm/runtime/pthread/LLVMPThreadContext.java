@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -31,11 +31,15 @@ package com.oracle.truffle.llvm.runtime.pthread;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.llvm.runtime.LLVMContext;
-import com.oracle.truffle.llvm.runtime.nodes.intrinsics.multithreading.LLVMPThreadStart;
+import com.oracle.truffle.llvm.runtime.LLVMLanguage;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
+import com.oracle.truffle.llvm.runtime.nodes.intrinsics.multithreading.LLVMThreadStart;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMPointer;
 
+import java.lang.ref.WeakReference;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -43,12 +47,28 @@ import java.util.concurrent.ConcurrentMap;
 public final class LLVMPThreadContext {
 
     // associated context for creating threads
-    private final LLVMContext context;
+    private final TruffleLanguage.Env env;
 
     // the long-key is the thread-id
     private final Object threadLock;
+
+    /**
+     * At pthread_join, return values shall be cleared from this map of return values.
+     */
     private final ConcurrentMap<Long, Object> threadReturnValueStorage;
-    private final ConcurrentMap<Long, Thread> threadStorage;
+
+    /**
+     * See doc on TruffleLanguage.initializeThread(Object, Thread).
+     * <p>
+     * When a thread is created with pthread_create and it completes execution, there are no more
+     * references held to the thread object and the GC will free it. It might happen that at some
+     * later point the user calls pthread_join on the thread but by that time there are no
+     * references held to the thread object anymore, so it cannot be joined on. If that is the case,
+     * the thread must have already terminated, and the join does not need to wait. The return value
+     * of the thread is stored in a separate map as well, so any reference to the thread object is
+     * really not needed anymore.
+     */
+    private final ConcurrentMap<Long, WeakReference<Thread>> threadStorage;
     private volatile boolean isCreateThreadAllowed;
 
     private int pThreadKey;
@@ -58,8 +78,8 @@ public final class LLVMPThreadContext {
 
     private final CallTarget pthreadCallTarget;
 
-    public LLVMPThreadContext(LLVMContext context) {
-        this.context = context;
+    public LLVMPThreadContext(TruffleLanguage.Env env, LLVMLanguage language, DataLayout dataLayout) {
+        this.env = env;
 
         // pthread storages
         this.threadLock = new Object();
@@ -69,20 +89,27 @@ public final class LLVMPThreadContext {
         this.pThreadKeyLock = new Object();
         this.pThreadKeyStorage = new ConcurrentHashMap<>();
         this.pThreadDestructorStorage = new ConcurrentHashMap<>();
-        this.pthreadCallTarget = Truffle.getRuntime().createCallTarget(new LLVMPThreadStart.LLVMPThreadFunctionRootNode(context.getLanguage()));
+
+        this.pthreadCallTarget = language.createCachedCallTarget(LLVMThreadStart.LLVMPThreadFunctionRootNode.class,
+                        l -> LLVMThreadStart.LLVMPThreadFunctionRootNode.create(l, l.getActiveConfiguration().createNodeFactory(l, dataLayout)));
         this.isCreateThreadAllowed = true;
     }
 
     @TruffleBoundary
     public void joinAllThreads() {
-        final Collection<Thread> threadsToJoin;
+        final Collection<WeakReference<Thread>> threads;
+
         synchronized (threadLock) {
             this.isCreateThreadAllowed = false;
-            threadsToJoin = threadStorage.values();
+            threads = threadStorage.values();
         }
-        for (Thread createdThread : threadsToJoin) {
+
+        for (WeakReference<Thread> thread : threads) {
             try {
-                createdThread.join();
+                Thread t = thread.get();
+                if (t != null) {
+                    t.join();
+                }
             } catch (InterruptedException e) {
                 // ignored
             }
@@ -145,9 +172,13 @@ public final class LLVMPThreadContext {
 
     @TruffleBoundary
     public LLVMPointer getAndRemoveSpecificUnlessNull(int keyId) {
+        return getAndRemoveSpecificUnlessNull(keyId, Thread.currentThread().getId());
+    }
+
+    @TruffleBoundary
+    public LLVMPointer getAndRemoveSpecificUnlessNull(int keyId, long threadId) {
         final ConcurrentMap<Long, LLVMPointer> value = pThreadKeyStorage.get(keyId);
         if (value != null) {
-            final long threadId = Thread.currentThread().getId();
             final LLVMPointer keyMapping = value.get(threadId);
             if (keyMapping != null && !keyMapping.isNull()) {
                 value.remove(threadId);
@@ -166,8 +197,8 @@ public final class LLVMPThreadContext {
     public Thread createThread(Runnable runnable) {
         synchronized (threadLock) {
             if (isCreateThreadAllowed) {
-                final Thread thread = context.getEnv().createThread(runnable);
-                threadStorage.put(thread.getId(), thread);
+                final Thread thread = env.createThread(runnable);
+                threadStorage.put(thread.getId(), new WeakReference<>(thread));
                 return thread;
             } else {
                 return null;
@@ -177,25 +208,55 @@ public final class LLVMPThreadContext {
 
     @TruffleBoundary
     public Thread getThread(long threadID) {
-        return threadStorage.get(threadID);
+        WeakReference<Thread> thread = threadStorage.get(threadID);
+        if (thread == null) {
+            return null;
+        }
+        return thread.get();
     }
 
     @TruffleBoundary
-    public void clearThreadId() {
-        threadStorage.remove(Thread.currentThread().getId());
+    public void clearThreadID(long threadID) {
+        threadStorage.remove(threadID);
     }
 
     @TruffleBoundary
-    public void setThreadReturnValue(long threadId, Object value) {
-        threadReturnValueStorage.put(threadId, value);
+    public void setThreadReturnValue(long threadID, Object value) {
+        threadReturnValueStorage.put(threadID, value);
     }
 
     @TruffleBoundary
-    public Object getThreadReturnValue(long threadId) {
-        return threadReturnValueStorage.get(threadId);
+    public Object getThreadReturnValue(long threadID) {
+        return threadReturnValueStorage.get(threadID);
+    }
+
+    @TruffleBoundary
+    public void clearThreadReturnValue(long threadID) {
+        threadReturnValueStorage.remove(threadID);
     }
 
     public CallTarget getPthreadCallTarget() {
         return pthreadCallTarget;
+    }
+
+    public void callDestructors(LLVMContext context) {
+        callDestructors(context, Thread.currentThread().getId());
+    }
+
+    public void callDestructors(LLVMContext context, long threadId) {
+        for (int key = 1; key <= getNumberOfPthreadKeys(); key++) {
+            final LLVMPointer destructor = getDestructor(key);
+            if (destructor != null && !destructor.isNull()) {
+                final LLVMPointer keyMapping = getAndRemoveSpecificUnlessNull(key, threadId);
+                if (keyMapping != null) {
+                    if (context.isFinalized()) {
+                        throw new LLVMPolyglotException(null,
+                                        "Tried to call a pthread destructor, but the LLVMContext has already been finalized. Ensure that the context is still alive and that the thread was created using the Truffle API.");
+                    }
+                    assert !keyMapping.isNull();
+                    getPthreadCallTarget().call(destructor, keyMapping);
+                }
+            }
+        }
     }
 }

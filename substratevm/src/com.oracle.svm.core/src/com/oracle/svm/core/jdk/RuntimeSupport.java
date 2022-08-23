@@ -32,102 +32,123 @@ import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.VMRuntime;
 import org.graalvm.nativeimage.impl.VMRuntimeSupport;
 
+import com.oracle.svm.core.Isolates;
+import com.oracle.svm.core.heap.HeapSizeVerifier;
+import com.oracle.svm.core.util.VMError;
+
 public final class RuntimeSupport implements VMRuntimeSupport {
-
-    /** A list of startup hooks. */
-    private AtomicReference<Runnable[]> startupHooks;
-
-    /** A list of shutdown hooks. */
-    private AtomicReference<Runnable[]> shutdownHooks;
-
-    /** A list of tear down hooks. */
-    private AtomicReference<Runnable[]> tearDownHooks;
-
-    /** A constructor for the singleton instance. */
-    private RuntimeSupport() {
-        super();
-        startupHooks = new AtomicReference<>();
-        shutdownHooks = new AtomicReference<>();
-        tearDownHooks = new AtomicReference<>();
+    @FunctionalInterface
+    public interface Hook {
+        void execute(boolean isFirstIsolate);
     }
 
-    /** Construct and register the singleton instance, if necessary. */
+    private final AtomicReference<InitializationState> initializationState = new AtomicReference<>(InitializationState.Uninitialized);
+
+    /** Hooks that run before calling Java {@code main} or in {@link VMRuntime#initialize()}. */
+    private final AtomicReference<Hook[]> startupHooks = new AtomicReference<>();
+
+    /**
+     * Hooks that run after the Java {@code main} method or when calling {@link Runtime#exit} (or
+     * {@link System#exit}).
+     */
+    private final AtomicReference<Hook[]> shutdownHooks = new AtomicReference<>();
+
+    /** Hooks that run during isolate initialization. */
+    private final AtomicReference<Hook[]> initializationHooks = new AtomicReference<>();
+
+    /** Hooks that run during isolate tear-down. */
+    private final AtomicReference<Hook[]> tearDownHooks = new AtomicReference<>();
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    private RuntimeSupport() {
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
     public static void initializeRuntimeSupport() {
         assert ImageSingletons.contains(RuntimeSupport.class) == false : "Initializing RuntimeSupport again.";
         ImageSingletons.add(RuntimeSupport.class, new RuntimeSupport());
     }
 
-    /** Get the singleton instance. */
     @Fold
     public static RuntimeSupport getRuntimeSupport() {
         return ImageSingletons.lookup(RuntimeSupport.class);
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public void addStartupHook(Runnable hook) {
+    public void addStartupHook(Hook hook) {
         addHook(startupHooks, hook);
     }
 
+    public boolean isUninitialized() {
+        return initializationState.get() == InitializationState.Uninitialized;
+    }
+
     @Override
-    public void executeStartupHooks() {
-        executeHooks(startupHooks);
+    public void initialize() {
+        boolean shouldInitialize = initializationState.compareAndSet(InitializationState.Uninitialized, InitializationState.InProgress);
+        if (shouldInitialize) {
+            // GR-35186: we should verify that none of the early parsed isolate arguments changed.
+            HeapSizeVerifier.verifyHeapOptions();
+
+            executeHooks(startupHooks);
+            VMError.guarantee(initializationState.compareAndSet(InitializationState.InProgress, InitializationState.Done), "Only one thread can call the initialization");
+        } else if (initializationState.get() != InitializationState.Done) {
+            throw VMError.shouldNotReachHere("Only one thread can call the initialization");
+        }
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public void addShutdownHook(Runnable hook) {
+    public void addShutdownHook(Hook hook) {
         addHook(shutdownHooks, hook);
     }
 
-    /**
-     * Called only internally as part of the JDK shutdown process, use {@link #shutdown()} to
-     * trigger the whoke JDK shutdown process.
-     */
     static void executeShutdownHooks() {
         executeHooks(getRuntimeSupport().shutdownHooks);
     }
 
-    /**
-     * Adds a tear down hook that is executed before the isolate torn down.
-     *
-     * @param tearDownHook hook to executed on isolate tear down.
-     */
-    public void addTearDownHook(Runnable tearDownHook) {
+    public void addInitializationHook(Hook initHook) {
+        addHook(initializationHooks, initHook);
+    }
+
+    /** Runs isolate initialization hooks. Although public, this method should not be public API. */
+    public static void executeInitializationHooks() {
+        executeHooks(getRuntimeSupport().initializationHooks);
+    }
+
+    public void addTearDownHook(Hook tearDownHook) {
         addHook(tearDownHooks, tearDownHook);
     }
 
-    /**
-     * Called only internally as part of the isolate tear down process. These hooks clean up all
-     * running threads to allow proper isolate tear down.
-     *
-     * Although public, this method should not go to the public API.
-     */
+    /** Runs isolate tear-down hooks. Although public, this method should not be public API. */
     public static void executeTearDownHooks() {
         executeHooks(getRuntimeSupport().tearDownHooks);
     }
 
-    private static void addHook(AtomicReference<Runnable[]> hooksReference, Runnable newHook) {
+    private static void addHook(AtomicReference<Hook[]> hooksReference, Hook newHook) {
         Objects.requireNonNull(newHook);
 
-        Runnable[] existingHooks;
-        Runnable[] newHooks;
+        Hook[] existingHooks;
+        Hook[] newHooks;
         do {
             existingHooks = hooksReference.get();
             if (existingHooks != null) {
                 newHooks = Arrays.copyOf(existingHooks, existingHooks.length + 1);
                 newHooks[newHooks.length - 1] = newHook;
             } else {
-                newHooks = new Runnable[]{newHook};
+                newHooks = new Hook[]{newHook};
             }
         } while (!hooksReference.compareAndSet(existingHooks, newHooks));
     }
 
-    private static void executeHooks(AtomicReference<Runnable[]> hooksReference) {
-        Runnable[] hooks = hooksReference.getAndSet(null);
+    private static void executeHooks(AtomicReference<Hook[]> hooksReference) {
+        Hook[] hooks = hooksReference.getAndSet(null);
         if (hooks != null) {
-            for (Runnable hook : hooks) {
-                hook.run();
+            boolean firstIsolate = Isolates.isCurrentFirst();
+            for (Hook hook : hooks) {
+                hook.execute(firstIsolate);
             }
         }
     }
@@ -137,4 +158,9 @@ public final class RuntimeSupport implements VMRuntimeSupport {
         Target_java_lang_Shutdown.shutdown();
     }
 
+    private enum InitializationState {
+        Uninitialized,
+        InProgress,
+        Done
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -74,6 +74,25 @@ public final class LoopEndNode extends AbstractEndNode {
      */
     boolean canSafepoint;
 
+    /**
+     * If Graal is used as a compiler for a guest language then in addition to host safepoints there
+     * is also a need for guest safepoints. Unlike host safepoints, guest safepoints are not needed
+     * to support garbage collectors but to support features like cancellation or reading stack
+     * frames from other threads.
+     * <p>
+     * This flag is used to store the information whether safepoints can be disabled for this loop
+     * end. It depends on the guest language implementation framework whether this flag may ever
+     * become <code>false</code>.
+     * <p>
+     * If Graal is not used to compile a guest language then this flag will be <code>false</code>
+     * for all loops seen by the safepoint elimination phase. It will be <code>true</code> before
+     * safepoint elimination.
+     * <p>
+     * More information on the guest safepoint implementation in Truffle can be found
+     * <a href="http://github.com/oracle/graal/blob/master/truffle/docs/Safepoints.md">here</a>.
+     */
+    boolean canGuestSafepoint;
+
     public LoopEndNode(LoopBeginNode begin) {
         super(TYPE);
         int idx = begin.nextEndIndex();
@@ -81,6 +100,7 @@ public final class LoopEndNode extends AbstractEndNode {
         this.endIndex = idx;
         this.loopBegin = begin;
         this.canSafepoint = begin.canEndsSafepoint;
+        this.canGuestSafepoint = begin.canEndsGuestSafepoint;
     }
 
     @Override
@@ -103,6 +123,15 @@ public final class LoopEndNode extends AbstractEndNode {
      */
     public void disableSafepoint() {
         this.canSafepoint = false;
+    }
+
+    public void disableGuestSafepoint() {
+        this.canGuestSafepoint = false;
+    }
+
+    public boolean canGuestSafepoint() {
+        assert !canGuestSafepoint || loopBegin().canEndsGuestSafepoint : "When safepoints are disabled for loop begin, safepoints must be disabled for all loop ends";
+        return this.canGuestSafepoint;
     }
 
     public boolean canSafepoint() {
@@ -146,7 +175,7 @@ public final class LoopEndNode extends AbstractEndNode {
 
     @Override
     public NodeCycles estimatedNodeCycles() {
-        if (loopBegin() == null) {
+        if (!(loopBegin instanceof LoopBeginNode) || loopBegin() == null) {
             return CYCLES_UNKNOWN;
         }
         if (canSafepoint()) {
@@ -157,13 +186,13 @@ public final class LoopEndNode extends AbstractEndNode {
     }
 
     @Override
-    public NodeSize estimatedNodeSize() {
-        if (loopBegin() == null) {
+    protected NodeSize dynamicNodeSizeEstimate() {
+        if (!(loopBegin instanceof LoopBeginNode)) {
             return SIZE_UNKNOWN;
         }
         if (canSafepoint()) {
             return SIZE_2;
         }
-        return super.estimatedNodeSize();
+        return super.dynamicNodeSizeEstimate();
     }
 }

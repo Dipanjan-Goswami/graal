@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2017, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -25,9 +25,12 @@
  */
 package org.graalvm.compiler.phases.common;
 
+import java.util.Optional;
+
 import org.graalvm.compiler.core.common.type.Stamp;
 import org.graalvm.compiler.core.common.type.StampFactory;
 import org.graalvm.compiler.graph.Node;
+import org.graalvm.compiler.nodes.GraphState;
 import org.graalvm.compiler.nodes.NodeView;
 import org.graalvm.compiler.nodes.PrefetchAllocateNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
@@ -38,15 +41,16 @@ import org.graalvm.compiler.nodes.memory.FloatingReadNode;
 import org.graalvm.compiler.nodes.memory.ReadNode;
 import org.graalvm.compiler.nodes.memory.address.AddressNode;
 import org.graalvm.compiler.nodes.memory.address.OffsetAddressNode;
+import org.graalvm.compiler.nodes.spi.CoreProviders;
 import org.graalvm.compiler.nodes.util.GraphUtil;
-import org.graalvm.compiler.phases.Phase;
+import org.graalvm.compiler.phases.BasePhase;
 
 import jdk.vm.ci.meta.JavaKind;
 
 /**
  * Created by adinn on 09/05/17.
  */
-public class AddressLoweringByUsePhase extends Phase {
+public class AddressLoweringByUsePhase extends BasePhase<CoreProviders> {
     public abstract static class AddressLoweringByUse {
 
         public abstract AddressNode lower(ValueNode use, Stamp stamp, AddressNode address);
@@ -62,7 +66,12 @@ public class AddressLoweringByUsePhase extends Phase {
     }
 
     @Override
-    protected void run(StructuredGraph graph) {
+    public Optional<NotApplicable> canApply(GraphState graphState) {
+        return ALWAYS_APPLICABLE;
+    }
+
+    @Override
+    protected void run(StructuredGraph graph, CoreProviders providers) {
         // first replace address nodes hanging off known usages
         for (Node node : graph.getNodes()) {
             AddressNode address;

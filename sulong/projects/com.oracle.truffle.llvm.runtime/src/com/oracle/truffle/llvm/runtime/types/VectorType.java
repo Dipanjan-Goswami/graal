@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,37 +29,34 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
-import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class VectorType extends AggregateType {
 
-    @CompilationFinal private Assumption elementTypeAssumption;
-    @CompilationFinal private Type elementType;
+    private Type elementType;
     /**
      * Length of the vector. The value is interpreted as an unsigned 32 bit integer value.
      */
     private final int length;
 
     public VectorType(Type elementType, int length) {
-        if (elementType != null && !(elementType instanceof PrimitiveType || elementType instanceof PointerType)) {
+        if (elementType != null && !(elementType instanceof PrimitiveType || elementType instanceof PointerType || elementType instanceof VariableBitWidthType)) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw new AssertionError("Invalid ElementType of Vector: " + elementType);
+            throw new AssertionError("Invalid ElementType of Vector: " + elementType.getClass().getSimpleName());
         }
-        this.elementTypeAssumption = Truffle.getRuntime().createAssumption("VectorType.elementType");
         this.elementType = elementType;
         this.length = length;
     }
 
     public Type getElementType() {
-        if (!elementTypeAssumption.isValid()) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-        }
+        CompilerAsserts.neverPartOfCompilation();
         return elementType;
     }
 
@@ -78,13 +75,12 @@ public final class VectorType extends AggregateType {
     }
 
     public void setElementType(Type elementType) {
-        CompilerDirectives.transferToInterpreterAndInvalidate();
-        if (elementType == null || !(elementType instanceof PrimitiveType || elementType instanceof PointerType)) {
-            throw new AssertionError("Invalid ElementType of Vector: " + elementType);
+        CompilerAsserts.neverPartOfCompilation();
+        if (!(elementType instanceof PrimitiveType || elementType instanceof PointerType || elementType instanceof VariableBitWidthType)) {
+            throw new AssertionError("Invalid ElementType of Vector: " + (elementType == null ? "null" : elementType.getClass().getSimpleName()));
         }
-        this.elementTypeAssumption.invalidate();
+        verifyCycleFree(elementType);
         this.elementType = elementType;
-        this.elementTypeAssumption = Truffle.getRuntime().createAssumption("VectorType.elementType");
     }
 
     @Override
@@ -104,7 +100,15 @@ public final class VectorType extends AggregateType {
 
     @Override
     public long getSize(DataLayout targetDataLayout) throws TypeOverflowException {
-        return multiplyUnsignedExact(getElementType().getSize(targetDataLayout), Integer.toUnsignedLong(length));
+        // See https://llvm.org/docs/LangRef.html#vector-type
+        long bitSize = getElementType().getBitSize();
+        long vecBitSize = multiplyUnsignedExact(bitSize, Integer.toUnsignedLong(length));
+        long size = vecBitSize / Byte.SIZE;
+        if (vecBitSize % Byte.SIZE != 0) {
+            size += 1;
+        }
+        long hiBitSize = Long.highestOneBit(size);
+        return hiBitSize == size ? hiBitSize : hiBitSize << 1;
     }
 
     @Override
@@ -150,5 +154,10 @@ public final class VectorType extends AggregateType {
             return false;
         }
         return true;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        return nodeFactory.createZeroVectorInitializer(getNumberOfElementsInt(), this);
     }
 }

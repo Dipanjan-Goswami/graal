@@ -46,10 +46,13 @@ import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.annotate.AlwaysInline;
 import com.oracle.svm.core.annotate.StubCallingConvention;
 import com.oracle.svm.core.deopt.Deoptimizer;
+import com.oracle.svm.core.meta.MethodPointer;
 import com.oracle.svm.core.meta.SharedMethod;
+import com.oracle.svm.core.meta.SubstrateMethodPointerConstant;
 import com.oracle.svm.core.util.VMError;
 import com.oracle.svm.hosted.code.CompilationInfo;
 
+import jdk.internal.vm.annotation.ForceInline;
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.ConstantPool;
 import jdk.vm.ci.meta.ExceptionHandler;
@@ -63,7 +66,10 @@ import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 import jdk.vm.ci.meta.SpeculationLog;
 
-public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvider, JavaMethodContext, Comparable<HostedMethod>, OriginalMethodProvider {
+public final class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvider, JavaMethodContext, OriginalMethodProvider {
+
+    public static final String METHOD_NAME_COLLISION_SUFFIX = "*";
+    public static final String METHOD_NAME_DEOPT_SUFFIX = "**";
 
     public final AnalysisMethod wrapped;
 
@@ -71,9 +77,8 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
     private final Signature signature;
     private final ConstantPool constantPool;
     private final ExceptionHandler[] handlers;
-    protected StaticAnalysisResults staticAnalysisResults;
-    private final boolean hasNeverInlineDirective;
-    protected int vtableIndex = -1;
+    StaticAnalysisResults staticAnalysisResults;
+    int vtableIndex = -1;
 
     /**
      * The address offset of the compiled code relative to the code of the first method in the
@@ -87,40 +92,61 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
      * All concrete methods that can actually be called when calling this method. This includes all
      * overridden methods in subclasses, as well as this method if it is non-abstract.
      */
-    protected HostedMethod[] implementations;
+    HostedMethod[] implementations;
 
     public final CompilationInfo compilationInfo;
     private final LocalVariableTable localVariableTable;
 
-    public HostedMethod(HostedUniverse universe, AnalysisMethod wrapped, HostedType holder, Signature signature, ConstantPool constantPool, ExceptionHandler[] handlers) {
+    private final String name;
+    private final String uniqueShortName;
+
+    public static HostedMethod create(HostedUniverse universe, AnalysisMethod wrapped, HostedType holder, Signature signature,
+                    ConstantPool constantPool, ExceptionHandler[] handlers, HostedMethod deoptOrigin) {
+        LocalVariableTable localVariableTable = createLocalVariableTable(universe, wrapped);
+        String name = deoptOrigin != null ? wrapped.getName() + METHOD_NAME_DEOPT_SUFFIX : wrapped.getName();
+        String uniqueShortName = SubstrateUtil.uniqueShortName(SubstrateUtil.classLoaderNameAndId(holder.getJavaClass().getClassLoader()), holder, name, signature, wrapped.isConstructor());
+        int collisionCount = universe.uniqueHostedMethodNames.merge(uniqueShortName, 0, (oldValue, value) -> oldValue + 1);
+        if (collisionCount > 0) {
+            name = name + METHOD_NAME_COLLISION_SUFFIX + collisionCount;
+            uniqueShortName = SubstrateUtil.uniqueShortName(SubstrateUtil.classLoaderNameAndId(holder.getJavaClass().getClassLoader()), holder, name, signature, wrapped.isConstructor());
+        }
+        return new HostedMethod(wrapped, holder, signature, constantPool, handlers, deoptOrigin, name, uniqueShortName, localVariableTable);
+    }
+
+    private static LocalVariableTable createLocalVariableTable(HostedUniverse universe, AnalysisMethod wrapped) {
+        LocalVariableTable lvt = wrapped.getLocalVariableTable();
+        if (lvt == null) {
+            return null;
+        }
+        try {
+            Local[] origLocals = lvt.getLocals();
+            Local[] newLocals = new Local[origLocals.length];
+            for (int i = 0; i < newLocals.length; ++i) {
+                Local origLocal = origLocals[i];
+                JavaType origType = origLocal.getType();
+                if (!universe.contains(origType)) {
+                    throw new UnsupportedFeatureException("No HostedType for given AnalysisType");
+                }
+                HostedType newType = universe.lookup(origType);
+                newLocals[i] = new Local(origLocal.getName(), newType, origLocal.getStartBCI(), origLocal.getEndBCI(), origLocal.getSlot());
+            }
+            return new LocalVariableTable(newLocals);
+        } catch (UnsupportedFeatureException e) {
+            return null;
+        }
+    }
+
+    private HostedMethod(AnalysisMethod wrapped, HostedType holder, Signature signature, ConstantPool constantPool,
+                    ExceptionHandler[] handlers, HostedMethod deoptOrigin, String name, String uniqueShortName, LocalVariableTable localVariableTable) {
         this.wrapped = wrapped;
         this.holder = holder;
         this.signature = signature;
         this.constantPool = constantPool;
         this.handlers = handlers;
-        this.compilationInfo = new CompilationInfo(this);
-
-        LocalVariableTable newLocalVariableTable = null;
-        if (wrapped.getLocalVariableTable() != null) {
-            try {
-                Local[] origLocals = wrapped.getLocalVariableTable().getLocals();
-                Local[] newLocals = new Local[origLocals.length];
-                for (int i = 0; i < newLocals.length; ++i) {
-                    Local origLocal = origLocals[i];
-                    JavaType origType = origLocal.getType();
-                    if (!universe.contains(origType)) {
-                        throw new UnsupportedFeatureException("No HostedType for given AnalysisType");
-                    }
-                    HostedType newType = universe.lookup(origType);
-                    newLocals[i] = new Local(origLocal.getName(), newType, origLocal.getStartBCI(), origLocal.getEndBCI(), origLocal.getSlot());
-                }
-                newLocalVariableTable = new LocalVariableTable(newLocals);
-            } catch (UnsupportedFeatureException e) {
-                newLocalVariableTable = null;
-            }
-        }
-        localVariableTable = newLocalVariableTable;
-        hasNeverInlineDirective = SubstrateUtil.NativeImageLoadingShield.isNeverInline(wrapped);
+        this.compilationInfo = new CompilationInfo(this, deoptOrigin);
+        this.localVariableTable = localVariableTable;
+        this.name = name;
+        this.uniqueShortName = uniqueShortName;
     }
 
     @Override
@@ -134,6 +160,8 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
 
     public void setCodeAddressOffset(int address) {
         assert isCompiled();
+        assert !codeAddressOffsetValid;
+
         codeAddressOffset = address;
         codeAddressOffsetValid = true;
     }
@@ -161,12 +189,21 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
         return compiled;
     }
 
+    public String getUniqueShortName() {
+        return uniqueShortName;
+    }
+
     /*
      * Release compilation related information.
      */
     public void clear() {
         compilationInfo.clear();
         staticAnalysisResults = null;
+    }
+
+    @Override
+    public boolean hasCodeOffsetInImage() {
+        throw unimplemented();
     }
 
     @Override
@@ -243,10 +280,7 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
 
     @Override
     public String getName() {
-        if (compilationInfo.isDeoptTarget()) {
-            return wrapped.getName() + "**";
-        }
-        return wrapped.getName();
+        return name;
     }
 
     @Override
@@ -350,21 +384,6 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return wrapped.getAnnotations();
-    }
-
-    @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return wrapped.getDeclaredAnnotations();
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        return wrapped.getAnnotation(annotationClass);
-    }
-
-    @Override
     public Annotation[][] getParameterAnnotations() {
         return wrapped.getParameterAnnotations();
     }
@@ -381,12 +400,12 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
 
     @Override
     public boolean hasNeverInlineDirective() {
-        return hasNeverInlineDirective;
+        return wrapped.hasNeverInlineDirective();
     }
 
     @Override
     public boolean shouldBeInlined() {
-        return getAnnotation(AlwaysInline.class) != null;
+        return getAnnotation(AlwaysInline.class) != null || getAnnotation(ForceInline.class) != null;
     }
 
     @Override
@@ -411,16 +430,12 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
 
     @Override
     public boolean isInVirtualMethodTable(ResolvedJavaType resolved) {
-        /*
-         * This method is used by Graal to decide if method-based inlining guards are possible. As
-         * long as getEncoding() is unimplemented, this method needs to return false.
-         */
-        return false;
+        return hasVTableIndex();
     }
 
     @Override
     public Constant getEncoding() {
-        throw unimplemented();
+        return new SubstrateMethodPointerConstant(new MethodPointer(this));
     }
 
     @Override
@@ -441,43 +456,6 @@ public class HostedMethod implements SharedMethod, WrappedJavaMethod, GraphProvi
     @Override
     public int hashCode() {
         return wrapped.hashCode();
-    }
-
-    @Override
-    public int compareTo(HostedMethod other) {
-        if (this.equals(other)) {
-            return 0;
-        }
-
-        /*
-         * Sort deoptimization targets towards the end of the code cache. They are rarely executed,
-         * and we do not want a deoptimization target as the first method (because offset 0 means no
-         * deoptimization target available).
-         */
-        int result = Boolean.compare(this.compilationInfo.isDeoptTarget(), other.compilationInfo.isDeoptTarget());
-
-        if (result == 0) {
-            result = this.getDeclaringClass().compareTo(other.getDeclaringClass());
-        }
-        if (result == 0) {
-            result = this.getName().compareTo(other.getName());
-        }
-        if (result == 0) {
-            result = this.getSignature().getParameterCount(false) - other.getSignature().getParameterCount(false);
-        }
-        if (result == 0) {
-            for (int i = 0; i < this.getSignature().getParameterCount(false); i++) {
-                result = ((HostedType) this.getSignature().getParameterType(i, null)).compareTo((HostedType) other.getSignature().getParameterType(i, null));
-                if (result != 0) {
-                    break;
-                }
-            }
-        }
-        if (result == 0) {
-            result = ((HostedType) this.getSignature().getReturnType(null)).compareTo((HostedType) other.getSignature().getReturnType(null));
-        }
-        assert result != 0;
-        return result;
     }
 
     @Override

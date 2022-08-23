@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -771,7 +771,7 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.28
      */
     public static com.oracle.truffle.api.source.Source getSourceImpl(Source source) {
-        return (com.oracle.truffle.api.source.Source) getField(source, "impl");
+        return (com.oracle.truffle.api.source.Source) getField(source, "receiver");
     }
 
     // Copied from ReflectionUtils.
@@ -827,7 +827,7 @@ public final class DebuggerTester implements AutoCloseable {
     }
 
     private void putEvent(Object event) {
-        trace("Put event " + this + ": " + Thread.currentThread());
+        trace("Put event " + event + " to " + this + ": " + Thread.currentThread());
         if (event instanceof SuspendedEvent) {
             try {
                 if (handler == null) {
@@ -852,6 +852,7 @@ public final class DebuggerTester implements AutoCloseable {
     }
 
     private void onSuspend(SuspendedEvent event) {
+        trace("On SUSPEND " + event + " of " + this + ": " + Thread.currentThread());
         if (closed) {
             return;
         }
@@ -888,6 +889,11 @@ public final class DebuggerTester implements AutoCloseable {
 
         ExecutingSource(Function<Context, Value> function) {
             this.function = function;
+        }
+
+        @Override
+        public String toString() {
+            return "ExecutingSource[" + function + "], error = " + error + ", returnValue = " + returnValue;
         }
 
     }
@@ -946,18 +952,24 @@ public final class DebuggerTester implements AutoCloseable {
                     }
                     ExecutingSource s = executingSource;
                     try {
-                        trace("Start executing " + this);
+                        trace("Start executing " + s + " on " + DebuggerTester.this + ": " + Thread.currentThread());
                         s.returnValue = s.function.apply(context).toString();
-                        trace("Done executing " + this);
                     } catch (Throwable e) {
                         s.error = e;
                     } finally {
+                        trace("Done executing " + s + " on " + DebuggerTester.this + ": " + Thread.currentThread());
                         putEvent(s);
                     }
                 }
             } finally {
                 if (context != null) {
-                    context.close();
+                    try {
+                        context.close();
+                    } catch (PolyglotException pe) {
+                        if (!pe.isCancelled() && !pe.isExit()) {
+                            throw pe;
+                        }
+                    }
                 }
             }
         }

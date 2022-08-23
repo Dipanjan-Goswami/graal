@@ -25,21 +25,23 @@
 package org.graalvm.polyglot.nativeapi;
 
 import static com.oracle.svm.hosted.NativeImageOptions.CStandards.C11;
-import static java.lang.ProcessBuilder.Redirect.INHERIT;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.hosted.Feature;
 
+import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.NativeImageOptions;
+import com.oracle.svm.hosted.c.util.FileUtils;
 
 public class PolyglotNativeAPIFeature implements Feature {
 
@@ -67,26 +69,20 @@ public class PolyglotNativeAPIFeature implements Feature {
             // on Darwin, change the `id` install name
             String id = System.getProperty("org.graalvm.polyglot.install_name_id");
             if (id == null) {
-                // Checkstyle: stop This is Hosted-only code
                 String msg = String.format("Warning: no id passed through `org.graalvm.polyglot.install_name_id`:" +
                                 "\n%s might include its absolute path as id (see man install_name_tool)", imagePath);
                 System.err.println(msg);
-                // Checkstyle: resume
             } else {
-                Process process = null;
+                List<String> command = Arrays.asList("install_name_tool", "-id", id, imagePath.toString());
                 try {
-                    process = new ProcessBuilder("install_name_tool", "-id", id, imagePath.toString()).redirectOutput(INHERIT).redirectError(INHERIT).start();
-                    int exitCode = process.waitFor();
+                    int exitCode = FileUtils.executeCommand(command);
                     if (exitCode != 0) {
-                        // Checkstyle: stop This is Hosted-only code
-                        System.err.println(String.format("Failed to set `id` install name. install_name_tool exited with code %d", exitCode));
-                        // Checkstyle: resume
+                        System.err.printf("Failed to set `id` install name. install_name_tool exited with code %d%n", exitCode);
                     }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 } catch (InterruptedException e) {
-                    process.destroy();
-                    Thread.currentThread().interrupt();
+                    throw new InterruptImageBuilding("Interrupted in call to: " + String.join(" ", command));
                 }
             }
         }

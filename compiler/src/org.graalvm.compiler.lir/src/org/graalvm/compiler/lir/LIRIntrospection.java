@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,7 +33,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.Equivalence;
@@ -41,6 +43,7 @@ import org.graalvm.collections.MapCursor;
 import org.graalvm.compiler.core.common.FieldIntrospection;
 import org.graalvm.compiler.core.common.Fields;
 import org.graalvm.compiler.core.common.FieldsScanner;
+import org.graalvm.compiler.debug.GraalError;
 import org.graalvm.compiler.lir.LIRInstruction.OperandFlag;
 import org.graalvm.compiler.lir.LIRInstruction.OperandMode;
 
@@ -61,22 +64,31 @@ abstract class LIRIntrospection<T> extends FieldIntrospection<T> {
         super(clazz);
     }
 
-    protected static class Values extends Fields {
+    protected static final class Values extends Fields {
         private final int directCount;
         private final EnumSet<OperandFlag>[] flags;
 
-        public Values(OperandModeAnnotation mode) {
-            this(mode.directCount, mode.values);
-        }
+        private static final Values EMPTY_VALUES = new Values(0, Collections.emptyList());
 
         @SuppressWarnings({"unchecked"})
-        public Values(int directCount, ArrayList<ValueFieldInfo> fields) {
+        private Values(int directCount, List<ValueFieldInfo> fields) {
             super(fields);
             this.directCount = directCount;
             flags = (EnumSet<OperandFlag>[]) new EnumSet<?>[fields.size()];
             for (int i = 0; i < fields.size(); i++) {
                 flags[i] = fields.get(i).flags;
             }
+        }
+
+        public static Values create(int directCount, ArrayList<ValueFieldInfo> fields) {
+            if (directCount == 0 && fields.size() == 0) {
+                return EMPTY_VALUES;
+            }
+            return new Values(directCount, fields);
+        }
+
+        public static Values create(OperandModeAnnotation mode) {
+            return create(mode.directCount, mode.values);
         }
 
         public int getDirectCount() {
@@ -92,7 +104,7 @@ abstract class LIRIntrospection<T> extends FieldIntrospection<T> {
         }
 
         protected void setValue(Object obj, int index, Value value) {
-            putObject(obj, index, value);
+            putObjectChecked(obj, index, value);
         }
 
         protected Value[] getValueArray(Object obj, int index) {
@@ -100,7 +112,7 @@ abstract class LIRIntrospection<T> extends FieldIntrospection<T> {
         }
 
         protected void setValueArray(Object obj, int index, Value[] valueArray) {
-            putObject(obj, index, valueArray);
+            putObjectChecked(obj, index, valueArray);
         }
     }
 
@@ -248,6 +260,7 @@ abstract class LIRIntrospection<T> extends FieldIntrospection<T> {
                     if (!(value instanceof CompositeValue)) {
                         assert verifyAssignment(inst, newValue, values.getFlags(i));
                     }
+                    GraalError.guarantee(newValue.getPlatformKind().equals(value.getPlatformKind()), "New assignment changes PlatformKind");
                     values.setValue(inst, i, newValue);
                 }
             } else {
@@ -262,6 +275,7 @@ abstract class LIRIntrospection<T> extends FieldIntrospection<T> {
                         newValue = proc.doValue(inst, value, mode, values.getFlags(i));
                     }
                     if (!value.identityEquals(newValue)) {
+                        GraalError.guarantee(newValue.getPlatformKind().equals(value.getPlatformKind()), "New assignment changes PlatformKind");
                         valueArray[j] = newValue;
                     }
                 }

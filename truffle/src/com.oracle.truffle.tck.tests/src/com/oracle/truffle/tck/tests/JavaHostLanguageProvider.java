@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,25 +40,6 @@
  */
 package com.oracle.truffle.tck.tests;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.Supplier;
-
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
@@ -66,12 +47,38 @@ import org.graalvm.polyglot.proxy.ProxyArray;
 import org.graalvm.polyglot.proxy.ProxyDate;
 import org.graalvm.polyglot.proxy.ProxyDuration;
 import org.graalvm.polyglot.proxy.ProxyExecutable;
+import org.graalvm.polyglot.proxy.ProxyHashMap;
+import org.graalvm.polyglot.proxy.ProxyIterable;
+import org.graalvm.polyglot.proxy.ProxyIterator;
 import org.graalvm.polyglot.proxy.ProxyObject;
 import org.graalvm.polyglot.proxy.ProxyTime;
 import org.graalvm.polyglot.proxy.ProxyTimeZone;
 import org.graalvm.polyglot.tck.LanguageProvider;
 import org.graalvm.polyglot.tck.Snippet;
 import org.graalvm.polyglot.tck.TypeDescriptor;
+
+import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class JavaHostLanguageProvider implements LanguageProvider {
     private static final String ID = "java-host";
@@ -126,10 +133,15 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
         primitives.put(Throwable.class,
                         Primitive.create("java.lang.Throwable", new RuntimeException(), TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.EXCEPTION)));
 
+        primitives.put(Class.class,
+                        Primitive.create("Float.class", Float.class,
+                                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.META_OBJECT)));
+
         // Java primitives
         for (Primitive primitive : primitives.values()) {
             result.add(createPrimitive(context, primitive));
         }
+
         // Arrays
         result.add(Snippet.newBuilder("Array<int>", export(context, new ValueSupplier<>(new int[]{1, 2})),
                         TypeDescriptor.array(TypeDescriptor.NUMBER)).build());
@@ -140,6 +152,54 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
         for (Primitive primitive : primitives.values()) {
             result.add(createProxyArray(context, primitive));
         }
+
+        // Iterables
+        result.add(Snippet.newBuilder("Iterable<int>", export(context,
+                        new ValueSupplier<>(new IterableImpl(1, 2))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.iterable(TypeDescriptor.NUMBER))).build());
+        result.add(Snippet.newBuilder("Iterable<java.lang.Object>", export(context, new ValueSupplier<>(new IterableImpl(1, "TEST"))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.iterable(TypeDescriptor.union(TypeDescriptor.NUMBER,
+                                        TypeDescriptor.STRING)))).build());
+
+        // Iterable Proxies
+        result.add(Snippet.newBuilder("Proxy<Iterable<int>>", export(context, new ValueSupplier<>(ProxyIterable.from(new IterableImpl(1, 2)))),
+                        TypeDescriptor.iterable(TypeDescriptor.NUMBER)).build());
+
+        result.add(Snippet.newBuilder("Proxy<Iterable<java.lang.Object>>", export(context, new ValueSupplier<>(ProxyIterable.from(new IterableImpl(1, "TEST")))),
+                        TypeDescriptor.iterable(TypeDescriptor.union(TypeDescriptor.NUMBER,
+                                        TypeDescriptor.STRING))).build());
+
+        // Iterators
+        result.add(Snippet.newBuilder("Iterator<int>", export(context, new ValueSupplier<>(new IteratorImpl(1, 2))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.iterator(TypeDescriptor.NUMBER))).build());
+
+        result.add(Snippet.newBuilder("Iterator<java.lang.Object>", export(context, new ValueSupplier<>(new IteratorImpl(1, "TEST"))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.iterator(TypeDescriptor.union(TypeDescriptor.NUMBER,
+                                        TypeDescriptor.STRING)))).build());
+
+        // Iterator Proxies
+        result.add(Snippet.newBuilder("Proxy<Iterator<int>>", export(context, new ValueSupplier<>(ProxyIterator.from(new IteratorImpl(1, 2)))),
+                        TypeDescriptor.iterator(TypeDescriptor.NUMBER)).build());
+
+        result.add(Snippet.newBuilder("Proxy<Iterator<java.lang.Object>>", export(context, new ValueSupplier<>(ProxyIterator.from(new IteratorImpl(1, "TEST")))),
+                        TypeDescriptor.iterator(TypeDescriptor.union(TypeDescriptor.NUMBER,
+                                        TypeDescriptor.STRING))).build());
+
+        // HashMaps
+        result.add(Snippet.newBuilder("Map<int,string>", export(context, new ValueSupplier<>(Collections.singletonMap(1, "string"))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.hash(TypeDescriptor.NUMBER, TypeDescriptor.STRING))).build());
+        result.add(Snippet.newBuilder("Proxy<HashMap<int,string>>", export(context, new ValueSupplier<>(ProxyHashMap.from(Collections.singletonMap(1, "string")))),
+                        TypeDescriptor.hash(TypeDescriptor.NUMBER, TypeDescriptor.STRING)).build());
+
+        // Hash Entries
+        result.add(Snippet.newBuilder("Map.Entry<int,string>", export(context, new ValueSupplier<>(new AbstractMap.SimpleEntry<>(1, "string"))),
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT,
+                                        TypeDescriptor.array(TypeDescriptor.union(TypeDescriptor.NUMBER, TypeDescriptor.STRING)))).build());
+
+        // Buffers
+        result.add(Snippet.newBuilder("HeapByteBuffer", export(context, new ValueSupplier<>(ByteBuffer.wrap(new byte[]{1, 2, 3}))), TypeDescriptor.OBJECT).build());
+        result.add(Snippet.newBuilder("HeapByteBufferR", export(context, new ValueSupplier<>(ByteBuffer.wrap(new byte[]{1, 2, 3}).asReadOnlyBuffer())), TypeDescriptor.OBJECT).build());
+
         // Object Proxies
         result.add(Snippet.newBuilder("Proxy<java.lang.Object{}>", export(context, new ValueSupplier<>(ProxyObject.fromMap(Collections.emptyMap()))), TypeDescriptor.OBJECT).build());
         final Map<String, Object> props = new HashMap<>();
@@ -174,7 +234,7 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
                         "java.util.List<Integer>",
                         export(context, new ValueSupplier<>(new ArrayList<>(Arrays.asList(1, 2)))),
                         TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT, TypeDescriptor.array(TypeDescriptor.NUMBER))).build());
-        Function<Object, Object> func = new Function<Object, Object>() {
+        Function<Object, Object> func = new Function<>() {
             @Override
             public Object apply(Object t) {
                 return t;
@@ -187,7 +247,7 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
         result.add(Snippet.newBuilder(
                         "java.lang.Class<java.lang.Object>",
                         export(context, new ValueSupplier<>(Object.class)),
-                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT,
+                        TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.META_OBJECT, TypeDescriptor.OBJECT,
                                         TypeDescriptor.instantiable(TypeDescriptor.intersection(TypeDescriptor.HOST_OBJECT, TypeDescriptor.OBJECT), false))).build());
         return Collections.unmodifiableCollection(result);
     }
@@ -286,7 +346,7 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
     }
 
     private static final class ProxyExecutableImpl implements ProxyExecutable {
-        private static final Consumer<? super Value> EMPTY = new Consumer<Value>() {
+        private static final Consumer<? super Value> EMPTY = new Consumer<>() {
             @Override
             public void accept(Value t) {
             }
@@ -334,7 +394,7 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
 
         private static Consumer<? super Value> createVerifier(final Primitive primitive) {
             if (TypeDescriptor.NUMBER == primitive.type) {
-                return new Consumer<Value>() {
+                return new Consumer<>() {
                     @Override
                     public void accept(Value value) {
                         if (!value.isNumber()) {
@@ -358,14 +418,14 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
                     }
                 };
             } else if (TypeDescriptor.BOOLEAN == primitive.type) {
-                return new Consumer<Value>() {
+                return new Consumer<>() {
                     @Override
                     public void accept(Value value) {
                         value.asBoolean();
                     }
                 };
             } else if (TypeDescriptor.STRING == primitive.type) {
-                return new Consumer<Value>() {
+                return new Consumer<>() {
                     @Override
                     public void accept(Value value) {
                         value.asString();
@@ -388,6 +448,43 @@ public final class JavaHostLanguageProvider implements LanguageProvider {
 
         public double abs() {
             return Math.sqrt(real * real + imag * imag);
+        }
+    }
+
+    public static final class IteratorImpl implements Iterator<Object> {
+
+        private final Object[] values;
+        private int index;
+
+        IteratorImpl(Object... values) {
+            this.values = values;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return index < values.length;
+        }
+
+        @Override
+        public Object next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            return values[index++];
+        }
+    }
+
+    public static final class IterableImpl implements Iterable<Object> {
+
+        private final Object[] values;
+
+        IterableImpl(Object... values) {
+            this.values = values;
+        }
+
+        @Override
+        public Iterator<Object> iterator() {
+            return new IteratorImpl(values);
         }
     }
 }

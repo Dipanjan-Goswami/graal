@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@ import java.util.function.Function;
 import org.graalvm.compiler.core.test.GraalCompilerTest;
 import org.graalvm.compiler.nodes.ConstantNode;
 import org.graalvm.compiler.nodes.LogicNode;
+import org.graalvm.compiler.nodes.ProfileData.BranchProbabilityData;
 import org.graalvm.compiler.nodes.ShortCircuitOrNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.StructuredGraph.AllowAssumptions;
@@ -39,12 +40,7 @@ import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderContext;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugin;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins;
 import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins.Registration;
-import org.graalvm.compiler.nodes.spi.CoreProviders;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
-import org.graalvm.compiler.phases.common.CanonicalizerPhase;
-import org.graalvm.compiler.phases.common.FloatingReadPhase;
-import org.graalvm.compiler.phases.common.IncrementalCanonicalizerPhase;
-import org.graalvm.compiler.phases.common.LoweringPhase;
+import org.graalvm.compiler.phases.tiers.Suites;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -53,23 +49,27 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 public class ShortCircuitOrNodeTest extends GraalCompilerTest {
 
-    static boolean shortCircuitOr(boolean b1, boolean b2) {
+    public static boolean shortCircuitOr(boolean b1, boolean b2) {
         return b1 || b2;
     }
 
-    @Override
-    protected void registerInvocationPlugins(InvocationPlugins invocationPlugins) {
+    public static void registerShortCircuitOrPlugin(InvocationPlugins invocationPlugins) {
         Registration r = new Registration(invocationPlugins, ShortCircuitOrNodeTest.class);
-        r.register2("shortCircuitOr", boolean.class, boolean.class, new InvocationPlugin() {
+        r.register(new InvocationPlugin("shortCircuitOr", boolean.class, boolean.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode b1, ValueNode b2) {
                 LogicNode x = b.add(new IntegerEqualsNode(b1, b.add(ConstantNode.forInt(1))));
                 LogicNode y = b.add(new IntegerEqualsNode(b2, b.add(ConstantNode.forInt(1))));
-                ShortCircuitOrNode compare = b.add(new ShortCircuitOrNode(x, false, y, false, 0.5));
+                ShortCircuitOrNode compare = b.add(new ShortCircuitOrNode(x, false, y, false, BranchProbabilityData.unknown()));
                 b.addPush(JavaKind.Boolean, new ConditionalNode(compare, b.add(ConstantNode.forBoolean(true)), b.add(ConstantNode.forBoolean(false))));
                 return true;
             }
         });
+    }
+
+    @Override
+    public void registerInvocationPlugins(InvocationPlugins invocationPlugins) {
+        registerShortCircuitOrPlugin(invocationPlugins);
         super.registerInvocationPlugins(invocationPlugins);
     }
 
@@ -377,11 +377,9 @@ public class ShortCircuitOrNodeTest extends GraalCompilerTest {
         for (int i = 1; i <= 64; ++i) {
             String snippet = "testCascadeSnippet" + i;
             StructuredGraph graph = parseEager(snippet, AllowAssumptions.YES);
-            CoreProviders context = getProviders();
-            CanonicalizerPhase canonicalizer = createCanonicalizerPhase();
-            canonicalizer.apply(graph, context);
-            new LoweringPhase(canonicalizer, LoweringTool.StandardLoweringStage.HIGH_TIER).apply(graph, context);
-            new IncrementalCanonicalizerPhase<>(canonicalizer, new FloatingReadPhase()).apply(graph, context);
+            Suites s = super.createSuites(getInitialOptions());
+            s.getHighTier().apply(graph, getDefaultHighTierContext());
+            s.getMidTier().apply(graph, getDefaultMidTierContext());
             int shortCircuitCount = graph.getNodes(ShortCircuitOrNode.TYPE).count();
 
             int trueCount = testInputCombinations(snippet);

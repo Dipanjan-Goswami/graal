@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,6 +44,7 @@ public class HotSpotWordTypes extends WordTypes {
      * Resolved type for {@link MetaspacePointer}.
      */
     private final ResolvedJavaType metaspacePointerType;
+    private final Class<?> metaspacePointerClass;
 
     /**
      * Resolved type for {@link KlassPointer}.
@@ -59,13 +60,25 @@ public class HotSpotWordTypes extends WordTypes {
      * Resolved type for {@link MethodCountersPointer}.
      */
     private final ResolvedJavaType methodCountersPointerType;
+    private final Class<?> klassPointerClass;
+    private final Class<?> methodPointerClass;
+    private final Class<?> methodCountersPointerClass;
 
     public HotSpotWordTypes(MetaAccessProvider metaAccess, JavaKind wordKind) {
         super(metaAccess, wordKind);
         this.metaspacePointerType = metaAccess.lookupJavaType(MetaspacePointer.class);
+        this.metaspacePointerClass = MetaspacePointer.class;
         this.klassPointerType = metaAccess.lookupJavaType(KlassPointer.class);
+        this.klassPointerClass = KlassPointer.class;
+        this.methodPointerClass = MethodPointer.class;
         this.methodPointerType = metaAccess.lookupJavaType(MethodPointer.class);
         this.methodCountersPointerType = metaAccess.lookupJavaType(MethodCountersPointer.class);
+        this.methodCountersPointerClass = MethodCountersPointer.class;
+        // These assertion sanity check that the underlying types were properly resolved
+        // in the context of libgraal where these should actually be SnippetResolvedJavaTypes
+        assert metaspacePointerType.isAssignableFrom(klassPointerType);
+        assert metaspacePointerType.isAssignableFrom(methodPointerType);
+        assert metaspacePointerType.isAssignableFrom(methodCountersPointerType);
     }
 
     @Override
@@ -77,8 +90,16 @@ public class HotSpotWordTypes extends WordTypes {
     }
 
     @Override
+    public boolean isWord(Class<?> clazz) {
+        if (metaspacePointerClass.isAssignableFrom(clazz)) {
+            return true;
+        }
+        return super.isWord(clazz);
+    }
+
+    @Override
     public JavaKind asKind(JavaType type) {
-        if (klassPointerType.equals(type) || methodPointerType.equals(type)) {
+        if (type instanceof ResolvedJavaType && metaspacePointerType.isAssignableFrom((ResolvedJavaType) type)) {
             return getWordKind();
         }
         return super.asKind(type);
@@ -91,6 +112,18 @@ public class HotSpotWordTypes extends WordTypes {
         } else if (type.equals(methodPointerType)) {
             return MethodPointerStamp.method();
         } else if (type.equals(methodCountersPointerType)) {
+            return MethodCountersPointerStamp.methodCounters();
+        }
+        return super.getWordStamp(type);
+    }
+
+    @Override
+    public Stamp getWordStamp(Class<?> type) {
+        if (type.equals(klassPointerClass)) {
+            return KlassPointerStamp.klass();
+        } else if (type.equals(methodPointerClass)) {
+            return MethodPointerStamp.method();
+        } else if (type.equals(methodCountersPointerClass)) {
             return MethodCountersPointerStamp.methodCounters();
         }
         return super.getWordStamp(type);
